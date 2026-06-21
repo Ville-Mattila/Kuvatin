@@ -618,6 +618,9 @@ mod win_drop {
         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
         HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES, WM_NCLBUTTONDOWN,
     };
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    };
 
     /// Width of the invisible edge zone (in physical px) used for resize hit-testing.
     const RESIZE_BORDER: i32 = 6;
@@ -708,6 +711,16 @@ mod win_drop {
         };
         // Stash the raw handle so the win-* callbacks can use it later.
         let _ = HWND_RAW.set(hwnd.0 as isize);
+        // Windows 11: round the frameless window's outer corners via DWM.
+        unsafe {
+            let pref = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &pref as *const _ as *const core::ffi::c_void,
+                std::mem::size_of_val(&pref) as u32,
+            );
+        }
         // SAFETY: hwnd is a valid window handle obtained from the shown window,
         // and we run on the UI/event-loop thread that owns it.
         unsafe {
