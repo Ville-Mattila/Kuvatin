@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_batch;
 use kuvatin_core::format::OutputFormat;
 use kuvatin_core::preset::PresetStore;
-use slint::{Model, ModelRc, SharedString, VecModel};
+use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
     let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap())));
     ui.set_files(ModelRc::from(rows.clone()));
+    spawn_thumbnails(ui.as_weak(), files.clone(), files.lock().unwrap().clone());
 
     // Selecting a preset syncs the format/quality controls to that preset's job.
     {
@@ -45,6 +46,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     {
         let files = files.clone();
         let rows = rows.clone();
+        let ui_weak = ui.as_weak();
         ui.on_add_files(move || {
             if let Some(picked) = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
@@ -55,6 +57,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 guard.sort();
                 guard.dedup();
                 refresh(&rows, &guard);
+                spawn_thumbnails(ui_weak.clone(), files.clone(), guard.clone());
             }
         });
     }
@@ -144,8 +147,56 @@ fn rows_from(paths: &[PathBuf]) -> Vec<FileRow> {
                 .to_string()
                 .into(),
             status: "queued".into(),
+            thumb: Default::default(),
+            dims: "".into(),
         })
         .collect()
+}
+
+/// Decode thumbnails for the current `files` on a background thread and post
+/// each one back to the matching row on the UI thread. The decoded thumbnail is
+/// matched by full path against the *current* `files` snapshot when posting, so
+/// an add/clear that happens mid-decode can't write a thumbnail onto the wrong
+/// row — a path that is no longer present is simply dropped. The same path-based
+/// lookup the convert progress callback uses keeps model indices honest.
+fn spawn_thumbnails(
+    ui_weak: slint::Weak<AppWindow>,
+    files: Arc<Mutex<Vec<PathBuf>>>,
+    paths: Vec<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        for path in paths {
+            let Ok(img) = image::open(&path) else {
+                continue;
+            };
+            let (ow, oh) = (img.width(), img.height());
+            let thumb = img.thumbnail(40, 40).to_rgba8();
+            let (tw, th) = (thumb.width(), thumb.height());
+            // `SharedPixelBuffer` is `Send`; `slint::Image` is not, so we ship the
+            // buffer across the event-loop boundary and build the `Image` on the
+            // UI thread.
+            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(thumb.as_raw(), tw, th);
+            let dims: SharedString = format!("{ow}×{oh}").into();
+
+            let ui_weak = ui_weak.clone();
+            let files = files.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    // Resolve this path to its current row index. If the list
+                    // changed and the path is gone, skip silently.
+                    let idx = files.lock().unwrap().iter().position(|p| *p == path);
+                    if let Some(i) = idx {
+                        let model = ui.get_files();
+                        if let Some(mut row) = model.row_data(i) {
+                            row.thumb = Image::from_rgba8(buf);
+                            row.dims = dims;
+                            model.set_row_data(i, row);
+                        }
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// The combo-box string for a format (matches the model in app.slint).

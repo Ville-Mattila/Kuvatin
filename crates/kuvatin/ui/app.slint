@@ -3,6 +3,8 @@ import { Button, ComboBox, ProgressIndicator, ListView } from "std-widgets.slint
 export struct FileRow {
     name: string,
     status: string,
+    thumb: image,
+    dims: string,
 }
 
 // Palette ---------------------------------------------------------------
@@ -179,15 +181,35 @@ export component AppWindow inherits Window {
                         // populated list
                         if root.files.length > 0: ListView {
                             for row[i] in root.files: Rectangle {
-                                height: 38px;
+                                height: 44px;
                                 background: row-ta.has-hover
                                     ? #262b34
                                     : (Math.mod(i, 2) == 0 ? transparent : #1c2027);
                                 row-ta := TouchArea { }
                                 HorizontalLayout {
-                                    padding-left: 14px;
+                                    padding-left: 12px;
                                     padding-right: 14px;
-                                    spacing: 8px;
+                                    spacing: 10px;
+                                    alignment: center;
+
+                                    // thumbnail with a subtle rounded backing
+                                    Rectangle {
+                                        width: 40px;
+                                        height: 40px;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: 6px;
+                                        background: #181b21;
+                                        border-width: 1px;
+                                        border-color: #2c313b;
+                                        clip: true;
+                                        Image {
+                                            source: row.thumb;
+                                            width: 40px;
+                                            height: 40px;
+                                            image-fit: contain;
+                                        }
+                                    }
+
                                     Text {
                                         text: row.name;
                                         color: #f2f4f8;
@@ -195,6 +217,12 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                         overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.dims;
+                                        color: #9aa3b2;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
                                     }
                                     Text {
                                         text: row.status;
