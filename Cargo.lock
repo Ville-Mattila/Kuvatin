@@ -2589,6 +2589,7 @@ dependencies = [
  "kuvatin-core",
  "slint",
  "slint-build",
+ "tempfile",
  "windows 0.58.0",
 ]
 

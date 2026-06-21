@@ -1,4 +1,5 @@
 mod cli;
+mod collect;
 
 use clap::Parser;
 use cli::{Cli, Mode};
