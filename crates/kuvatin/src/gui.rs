@@ -52,14 +52,47 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
                 .pick_files()
             {
-                let mut guard = files.lock().unwrap();
-                guard.extend(collect_images(&picked));
-                guard.sort();
-                guard.dedup();
-                refresh(&rows, &guard);
-                spawn_thumbnails(ui_weak.clone(), files.clone(), guard.clone());
+                add_paths(picked, &files, &rows, &ui_weak);
             }
         });
+    }
+
+    // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
+    // and drain dropped paths into the same add-files pipeline. The native HWND
+    // is only available after the window is shown, so we wire it up from a
+    // single-shot timer that fires once the event loop is running.
+    #[cfg(windows)]
+    {
+        let files = files.clone();
+        let rows = rows.clone();
+        let ui_weak = ui.as_weak();
+        let setup_weak = ui.as_weak();
+        let setup_timer = slint::Timer::default();
+        setup_timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(100),
+            move || {
+                if let Some(ui) = setup_weak.upgrade() {
+                    win_drop::enable(&ui);
+                }
+            },
+        );
+        // Keep the timer alive for the lifetime of the window.
+        std::mem::forget(setup_timer);
+
+        // Drain dropped paths on the UI thread and feed them into add_paths.
+        let drain_timer = slint::Timer::default();
+        drain_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(150),
+            move || {
+                let dropped = win_drop::take_dropped();
+                if !dropped.is_empty() {
+                    add_paths(dropped, &files, &rows, &ui_weak);
+                }
+            },
+        );
+        std::mem::forget(drain_timer);
     }
 
     {
@@ -230,5 +263,128 @@ fn refresh(rows: &Rc<VecModel<FileRow>>, paths: &[PathBuf]) {
     }
     for r in new {
         rows.push(r);
+    }
+}
+
+/// Add `picked` paths to the queue: filter/expand to image files, merge with the
+/// existing set (sorted + deduped), refresh the visible rows, and kick off
+/// thumbnail decoding. Shared by the Add files… button and the drag-and-drop
+/// drain timer so both paths behave identically.
+fn add_paths(
+    picked: Vec<PathBuf>,
+    files: &Arc<Mutex<Vec<PathBuf>>>,
+    rows: &Rc<VecModel<FileRow>>,
+    ui_weak: &slint::Weak<AppWindow>,
+) {
+    let mut guard = files.lock().unwrap();
+    guard.extend(collect_images(&picked));
+    guard.sort();
+    guard.dedup();
+    refresh(rows, &guard);
+    spawn_thumbnails(ui_weak.clone(), files.clone(), guard.clone());
+}
+
+/// Native Windows Explorer drag-and-drop support via `WM_DROPFILES`.
+///
+/// Slint 1.16 does not expose OS file-drop events, so we obtain the window's
+/// `HWND` (through the `raw-window-handle-06` slint feature), call
+/// `DragAcceptFiles`, and subclass the window proc to intercept `WM_DROPFILES`.
+/// Dropped paths are pushed into a process-global inbox that the UI thread
+/// drains on a repeating timer — this avoids passing Rust closures through the
+/// C callback boundary.
+#[cfg(windows)]
+mod win_drop {
+    use super::AppWindow;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use slint::ComponentHandle;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Shell::{
+        DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::WM_DROPFILES;
+
+    /// Inbox of paths dropped onto the window, awaiting drain by the UI thread.
+    static INBOX: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+    /// Guards against subclassing the window more than once.
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+
+    fn inbox() -> &'static Mutex<Vec<PathBuf>> {
+        INBOX.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    /// Drain all queued dropped paths. Called by the UI-thread timer.
+    pub fn take_dropped() -> Vec<PathBuf> {
+        let mut guard = inbox().lock().unwrap();
+        std::mem::take(&mut *guard)
+    }
+
+    /// Enable Explorer drag-and-drop on the given window. Idempotent: only the
+    /// first call installs the subclass. Must run after the window is shown so
+    /// the native HWND exists.
+    pub fn enable(ui: &AppWindow) {
+        if INSTALLED.get().is_some() {
+            return;
+        }
+        let Some(hwnd) = hwnd_of(ui) else {
+            return;
+        };
+        // SAFETY: hwnd is a valid window handle obtained from the shown window,
+        // and we run on the UI/event-loop thread that owns it.
+        unsafe {
+            DragAcceptFiles(hwnd, true);
+            // Subclass id 1, no per-instance refdata (we use a global inbox).
+            if SetWindowSubclass(hwnd, Some(subclass_proc), 1, 0).as_bool() {
+                let _ = INSTALLED.set(());
+            }
+        }
+    }
+
+    /// Extract the Win32 HWND from a shown Slint window.
+    fn hwnd_of(ui: &AppWindow) -> Option<HWND> {
+        let handle = ui.window().window_handle();
+        match handle.window_handle().ok()?.as_raw() {
+            RawWindowHandle::Win32(h) => Some(HWND(isize::from(h.hwnd) as *mut std::ffi::c_void)),
+            _ => None,
+        }
+    }
+
+    /// Window subclass proc. Runs on the UI thread (same thread as the Slint
+    /// event loop). On `WM_DROPFILES` it reads the dropped paths and queues them
+    /// in the inbox; everything else is forwarded to the default chain.
+    unsafe extern "system" fn subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _uid: usize,
+        _refdata: usize,
+    ) -> LRESULT {
+        if msg == WM_DROPFILES {
+            let hdrop = HDROP(wparam.0 as *mut std::ffi::c_void);
+            let mut dropped = Vec::new();
+            // Passing 0xFFFFFFFF as the index returns the file count.
+            let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+            for i in 0..count {
+                // First query the required length (excluding NUL).
+                let len = DragQueryFileW(hdrop, i, None);
+                if len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u16; len as usize + 1];
+                let written = DragQueryFileW(hdrop, i, Some(&mut buf));
+                if written > 0 {
+                    let s = String::from_utf16_lossy(&buf[..written as usize]);
+                    dropped.push(PathBuf::from(s));
+                }
+            }
+            DragFinish(hdrop);
+            if !dropped.is_empty() {
+                inbox().lock().unwrap().extend(dropped);
+            }
+            return LRESULT(0);
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
     }
 }
