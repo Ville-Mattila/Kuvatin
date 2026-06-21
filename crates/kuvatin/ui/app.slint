@@ -1,4 +1,4 @@
-import { Button, ComboBox, ProgressIndicator, ListView, LineEdit, SpinBox } from "std-widgets.slint";
+import { Button, ComboBox, ProgressIndicator, ListView, LineEdit, SpinBox, CheckBox } from "std-widgets.slint";
 
 export struct FileRow {
     name: string,
@@ -179,6 +179,11 @@ export component AppWindow inherits Window {
     // numeric X/Y/W/H fields can be shown and edited in absolute pixels.
     in property <int> crop-img-w;
     in property <int> crop-img-h;
+
+    // Output-resolution override (Settings panel). 0 means "use preset size".
+    in-out property <int> res-w: 0;
+    in-out property <int> res-h: 0;
+    in-out property <bool> res-lock: true;
 
     callback add-files();
     callback clear-files();
@@ -394,6 +399,45 @@ export component AppWindow inherits Window {
                         FieldLabel { text: "QUALITY (\{root.quality})"; }
                         QualitySlider {
                             value <=> root.quality;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "RESOLUTION (px)"; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                spacing: 2px;
+                                FieldLabel { text: "WIDTH"; }
+                                SpinBox {
+                                    minimum: 0;
+                                    maximum: 20000;
+                                    value <=> root.res-w;
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 2px;
+                                FieldLabel { text: "HEIGHT"; }
+                                SpinBox {
+                                    minimum: 0;
+                                    maximum: 20000;
+                                    value <=> root.res-h;
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Keep aspect";
+                                checked <=> root.res-lock;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Text {
+                            text: "0 = keep preset size";
+                            color: #9aa3b2;
+                            font-size: 11px;
                         }
                     }
 

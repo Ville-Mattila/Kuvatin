@@ -353,6 +353,23 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let mut job = preset.job.clone();
             job.format = format_combo_to_format(&ui.get_format());
             job.quality = ui.get_quality().clamp(0, 100) as u8;
+
+            // Explicit output-resolution override from the Settings fields. When
+            // either dimension is set (> 0) it replaces the preset's resize for
+            // this run; a 0 dimension is left unconstrained. With both at 0 the
+            // preset's resize is used unchanged. The core pipeline crops first
+            // and resizes second, so a per-file crop + this resolution combine
+            // correctly (crop the region, then scale it to the resolution).
+            let rw = ui.get_res_w().max(0) as u32;
+            let rh = ui.get_res_h().max(0) as u32;
+            if rw > 0 || rh > 0 {
+                job.resize = kuvatin_core::resize::ResizeMode::Pixels {
+                    width: if rw > 0 { Some(rw) } else { None },
+                    height: if rh > 0 { Some(rh) } else { None },
+                    keep_aspect: ui.get_res_lock(),
+                };
+            }
+
             let preset_name = preset.name.clone();
 
             // Build a per-file job list: files with a stored crop get a
