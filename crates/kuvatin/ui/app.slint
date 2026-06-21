@@ -1,4 +1,4 @@
-import { Button, ComboBox, ProgressIndicator, ListView } from "std-widgets.slint";
+import { Button, ComboBox, ProgressIndicator, ListView, LineEdit } from "std-widgets.slint";
 
 export struct FileRow {
     name: string,
@@ -108,11 +108,14 @@ export component AppWindow inherits Window {
     in-out property <int> current-preset: 0;
     in-out property <string> format: "webp";
     in-out property <int> quality: 80;
+    in-out property <string> preset-name;
 
     callback add-files();
     callback clear-files();
     callback preset-changed(int);
     callback convert();
+    callback save-preset(string);
+    callback delete-preset();
 
     VerticalLayout {
         padding: 16px;
@@ -272,6 +275,24 @@ export component AppWindow inherits Window {
                             model: root.preset-names;
                             current-index <=> root.current-preset;
                             selected => { root.preset-changed(self.current-index); }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            LineEdit {
+                                placeholder-text: "Preset name";
+                                text <=> root.preset-name;
+                                horizontal-stretch: 1;
+                            }
+                            SecondaryButton {
+                                text: "Save";
+                                min-width: 72px;
+                                clicked => { root.save-preset(root.preset-name); }
+                            }
+                            SecondaryButton {
+                                text: "Delete";
+                                min-width: 72px;
+                                clicked => { root.delete-preset(); }
+                            }
                         }
                     }
 

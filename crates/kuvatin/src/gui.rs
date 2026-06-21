@@ -2,6 +2,7 @@ use crate::collect::collect_images;
 use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_batch;
 use kuvatin_core::format::OutputFormat;
+use kuvatin_core::pipeline::Job;
 use kuvatin_core::preset::PresetStore;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::path::PathBuf;
@@ -12,19 +13,13 @@ slint::include_modules!();
 
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
-    let store = Arc::new(PresetStore::load_or_init(&store_path)?);
+    let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
 
     let ui = AppWindow::new()?;
 
-    let names: Vec<SharedString> = store.presets.iter().map(|p| p.name.clone().into()).collect();
-    ui.set_preset_names(ModelRc::new(VecModel::from(names)));
-
-    // Initialize the format/quality controls from the first preset so they reflect
-    // (and can override) what will actually be applied.
-    if let Some(first) = store.presets.first() {
-        ui.set_format(format_combo_str(first.job.format).into());
-        ui.set_quality(first.job.quality as i32);
-    }
+    // Initialize the preset-names model and the format/quality controls from the
+    // first preset so they reflect (and can override) what will actually be applied.
+    refresh_presets(&ui, &store.lock().unwrap(), 0);
 
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
     let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap())));
@@ -36,9 +31,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let store = store.clone();
         let ui_weak = ui.as_weak();
         ui.on_preset_changed(move |idx| {
+            let store = store.lock().unwrap();
             if let (Some(ui), Some(p)) = (ui_weak.upgrade(), store.presets.get(idx as usize)) {
                 ui.set_format(format_combo_str(p.job.format).into());
                 ui.set_quality(p.job.quality as i32);
+                ui.set_preset_name(p.name.clone().into());
             }
         });
     }
@@ -105,6 +102,83 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
+    // Save (upsert) the current settings as a named preset.
+    {
+        let store = store.clone();
+        let store_path = store_path.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_save_preset(move |name| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let mut store = store.lock().unwrap();
+            // Trim the requested name; fall back to the selected preset's name if
+            // the field is empty so a bare "Save" still overwrites the current one.
+            let mut name = name.trim().to_string();
+            if name.is_empty() {
+                let idx = ui.get_current_preset() as usize;
+                match store.presets.get(idx) {
+                    Some(p) => name = p.name.clone(),
+                    None => return,
+                }
+            }
+
+            let job = current_job(&ui, &store);
+
+            // Upsert: overwrite an existing preset's job, or push a new one.
+            if let Some(existing) = store.presets.iter_mut().find(|p| p.name == name) {
+                existing.job = job;
+            } else {
+                store.presets.push(kuvatin_core::preset::Preset {
+                    name: name.clone(),
+                    job,
+                });
+            }
+
+            if let Err(e) = store.save(&store_path) {
+                eprintln!("failed to save presets: {e}");
+            }
+
+            let idx = store
+                .presets
+                .iter()
+                .position(|p| p.name == name)
+                .unwrap_or(0);
+            refresh_presets(&ui, &store, idx);
+            ui.set_preset_name(name.into());
+        });
+    }
+
+    // Delete the currently selected preset (keeping at least one).
+    {
+        let store = store.clone();
+        let store_path = store_path.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_delete_preset(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let mut store = store.lock().unwrap();
+            // Keep at least one preset: deleting the last one would leave the app
+            // with no selectable preset and no usable job.
+            if store.presets.len() <= 1 {
+                return;
+            }
+            let idx = (ui.get_current_preset() as usize).min(store.presets.len() - 1);
+            store.presets.remove(idx);
+
+            if let Err(e) = store.save(&store_path) {
+                eprintln!("failed to save presets: {e}");
+            }
+
+            let select = idx.min(store.presets.len() - 1);
+            refresh_presets(&ui, &store, select);
+            if let Some(p) = store.presets.get(select) {
+                ui.set_preset_name(p.name.clone().into());
+            }
+        });
+    }
+
     {
         let files = files.clone();
         let store = store.clone();
@@ -119,7 +193,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 None => return,
             };
             let preset_idx = ui.get_current_preset() as usize;
-            let preset = match store.presets.get(preset_idx) {
+            let preset = match store.lock().unwrap().presets.get(preset_idx) {
                 Some(p) => p.clone(),
                 None => return,
             };
@@ -167,6 +241,34 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
 
     ui.run()?;
     Ok(())
+}
+
+/// (Re)build the preset-names model, select `select` (clamped to a valid index),
+/// and sync the format/quality controls to the selected preset's job.
+fn refresh_presets(ui: &AppWindow, store: &PresetStore, select: usize) {
+    let names: Vec<SharedString> = store.presets.iter().map(|p| p.name.clone().into()).collect();
+    ui.set_preset_names(ModelRc::new(VecModel::from(names)));
+    let idx = select.min(store.presets.len().saturating_sub(1));
+    ui.set_current_preset(idx as i32);
+    if let Some(p) = store.presets.get(idx) {
+        ui.set_format(format_combo_str(p.job.format).into());
+        ui.set_quality(p.job.quality as i32);
+    }
+}
+
+/// Build the job described by the live UI: start from the selected preset's job
+/// (to preserve resize/crop/output), then override format + quality from the
+/// controls — the same recipe `on_convert` applies before running a batch.
+fn current_job(ui: &AppWindow, store: &PresetStore) -> Job {
+    let idx = ui.get_current_preset() as usize;
+    let mut job = store
+        .presets
+        .get(idx)
+        .map(|p| p.job.clone())
+        .unwrap_or_default();
+    job.format = format_combo_to_format(&ui.get_format());
+    job.quality = ui.get_quality().clamp(0, 100) as u8;
+    job
 }
 
 fn rows_from(paths: &[PathBuf]) -> Vec<FileRow> {
