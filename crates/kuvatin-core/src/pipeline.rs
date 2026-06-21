@@ -30,14 +30,18 @@ impl Default for Job {
     }
 }
 
-/// Apply the op pipeline (resize -> crop) to an in-memory image. Returns the
+/// Apply the op pipeline (crop -> resize) to an in-memory image. Returns the
 /// transformed image and its final (w, h).
+///
+/// Crop runs first so a crop rectangle expressed in the *source* image's pixels
+/// (e.g. an interactive per-image crop) selects the right region; the resize
+/// then scales that cropped region to the target dimensions.
 pub fn process_image(img: &DynamicImage, job: &Job) -> (DynamicImage, u32, u32) {
-    let (tw, th) = compute_target_dimensions(job.resize, img.width(), img.height());
-    let resized = resample(img, tw, th);
-    let cropped = apply_crop(&resized, job.crop);
-    let (w, h) = (cropped.width(), cropped.height());
-    (cropped, w, h)
+    let cropped = apply_crop(img, job.crop);
+    let (tw, th) = compute_target_dimensions(job.resize, cropped.width(), cropped.height());
+    let resized = resample(&cropped, tw, th);
+    let (w, h) = (resized.width(), resized.height());
+    (resized, w, h)
 }
 
 /// Encode an image to bytes in the requested format/quality.
@@ -105,14 +109,27 @@ mod tests {
     }
 
     #[test]
-    fn process_image_resizes_then_crops() {
+    fn process_image_crops_then_resizes() {
         let job = Job {
             resize: ResizeMode::Percent { factor: 0.5 },
             crop: CropMode::FixedSize { width: 100, height: 100, anchor: Default::default() },
             ..Job::default()
         };
+        // crop 100x100 first, then scale by 0.5 -> 50x50
         let (_img, w, h) = process_image(&sample(800, 600), &job);
-        assert_eq!((w, h), (100, 100));
+        assert_eq!((w, h), (50, 50));
+    }
+
+    #[test]
+    fn rect_crop_then_resize_to_resolution() {
+        // Source 800x600, crop the top-left 400x300, then resize to 200x150.
+        let job = Job {
+            crop: CropMode::Rect { x: 0, y: 0, width: 400, height: 300 },
+            resize: ResizeMode::Pixels { width: Some(200), height: Some(150), keep_aspect: false },
+            ..Job::default()
+        };
+        let (_img, w, h) = process_image(&sample(800, 600), &job);
+        assert_eq!((w, h), (200, 150));
     }
 
     #[test]
