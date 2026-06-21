@@ -1,10 +1,12 @@
 use crate::collect::collect_images;
 use anyhow::{anyhow, Result};
-use kuvatin_core::batch::run_batch;
+use kuvatin_core::batch::run_jobs;
+use kuvatin_core::crop::CropMode;
 use kuvatin_core::format::OutputFormat;
 use kuvatin_core::pipeline::Job;
 use kuvatin_core::preset::PresetStore;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -25,6 +27,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap())));
     ui.set_files(ModelRc::from(rows.clone()));
     spawn_thumbnails(ui.as_weak(), files.clone(), files.lock().unwrap().clone());
+
+    // Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
+    // not present here are converted with the base job (no crop override).
+    let crops: Arc<Mutex<HashMap<PathBuf, (u32, u32, u32, u32)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    // The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
+    let edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>> = Arc::new(Mutex::new(None));
 
     // Selecting a preset syncs the format/quality controls to that preset's job.
     {
@@ -95,9 +104,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     {
         let files = files.clone();
         let rows = rows.clone();
+        let crops = crops.clone();
         ui.on_clear_files(move || {
             let mut guard = files.lock().unwrap();
             guard.clear();
+            crops.lock().unwrap().clear();
             refresh(&rows, &guard);
         });
     }
@@ -179,9 +190,145 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
+    // Open the crop editor for a queued file.
+    {
+        let files = files.clone();
+        let crops = crops.clone();
+        let edit = edit.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_start_crop(move |index| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let path = match files.lock().unwrap().get(index as usize) {
+                Some(p) => p.clone(),
+                None => return,
+            };
+            let Ok(img) = image::open(&path) else {
+                return;
+            };
+            let (ow, oh) = (img.width(), img.height());
+            if ow == 0 || oh == 0 {
+                return;
+            }
+
+            // Downscale the decoded image for display; normalized coords keep the
+            // crop math independent of the preview size.
+            let preview = img.thumbnail(900, 620).to_rgba8();
+            let (pw, ph) = (preview.width(), preview.height());
+            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(preview.as_raw(), pw, ph);
+            ui.set_crop_image(Image::from_rgba8(buf));
+
+            // Preview BOX size that matches the original aspect within a max area.
+            let (max_w, max_h) = (560.0_f32, 420.0_f32);
+            let scale = (max_w / ow as f32).min(max_h / oh as f32).min(1.0);
+            ui.set_crop_box_w((ow as f32 * scale).max(1.0));
+            ui.set_crop_box_h((oh as f32 * scale).max(1.0));
+
+            // Initialize the rect from any existing crop (normalized back to 0..1),
+            // else the full image.
+            if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
+                ui.set_crop_x(x as f32 / ow as f32);
+                ui.set_crop_y(y as f32 / oh as f32);
+                ui.set_crop_w(w as f32 / ow as f32);
+                ui.set_crop_h(h as f32 / oh as f32);
+            } else {
+                ui.set_crop_x(0.0);
+                ui.set_crop_y(0.0);
+                ui.set_crop_w(1.0);
+                ui.set_crop_h(1.0);
+            }
+
+            *edit.lock().unwrap() = Some((path, ow, oh));
+            ui.set_cropping(true);
+        });
+    }
+
+    // Apply the current crop rectangle: normalized → absolute pixels.
+    {
+        let crops = crops.clone();
+        let edit = edit.clone();
+        let files = files.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_apply_crop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let Some((path, ow, oh)) = edit.lock().unwrap().clone() else {
+                ui.set_cropping(false);
+                return;
+            };
+            let cx = ui.get_crop_x().clamp(0.0, 1.0);
+            let cy = ui.get_crop_y().clamp(0.0, 1.0);
+            let cw = ui.get_crop_w().clamp(0.0, 1.0);
+            let ch = ui.get_crop_h().clamp(0.0, 1.0);
+
+            let mut x = (cx * ow as f32).round() as u32;
+            let mut y = (cy * oh as f32).round() as u32;
+            let mut w = (cw * ow as f32).round().max(1.0) as u32;
+            let mut h = (ch * oh as f32).round().max(1.0) as u32;
+            // Clamp so the rect stays inside the image.
+            x = x.min(ow.saturating_sub(1));
+            y = y.min(oh.saturating_sub(1));
+            w = w.min(ow - x).max(1);
+            h = h.min(oh - y).max(1);
+
+            crops.lock().unwrap().insert(path.clone(), (x, y, w, h));
+
+            // Mark the row (path-matched via the files list) as cropped.
+            if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
+                let model = ui.get_files();
+                if let Some(mut row) = model.row_data(i) {
+                    row.status = "cropped".into();
+                    model.set_row_data(i, row);
+                }
+            }
+
+            ui.set_cropping(false);
+        });
+    }
+
+    // Cancel the crop edit: discard, keep any previously applied crop.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_cancel_crop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_cropping(false);
+            }
+        });
+    }
+
+    // Clear the crop for the file currently being edited.
+    {
+        let crops = crops.clone();
+        let edit = edit.clone();
+        let files = files.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_clear_crop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if let Some((path, _, _)) = edit.lock().unwrap().clone() {
+                crops.lock().unwrap().remove(&path);
+                // Reset the row status back to queued.
+                if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
+                    let model = ui.get_files();
+                    if let Some(mut row) = model.row_data(i) {
+                        if row.status == "cropped" {
+                            row.status = "queued".into();
+                            model.set_row_data(i, row);
+                        }
+                    }
+                }
+            }
+            ui.set_cropping(false);
+        });
+    }
+
     {
         let files = files.clone();
         let store = store.clone();
+        let crops = crops.clone();
         let ui_weak = ui.as_weak();
         ui.on_convert(move || {
             let inputs = files.lock().unwrap().clone();
@@ -203,6 +350,21 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             job.quality = ui.get_quality().clamp(0, 100) as u8;
             let preset_name = preset.name.clone();
 
+            // Build a per-file job list: files with a stored crop get a
+            // CropMode::Rect override; the rest use the base job unchanged. Clone
+            // the crop data out now so we don't hold the lock across the thread.
+            let crop_map = crops.lock().unwrap().clone();
+            let items: Vec<(PathBuf, Job)> = inputs
+                .iter()
+                .map(|p| {
+                    let mut j = job.clone();
+                    if let Some(&(x, y, width, height)) = crop_map.get(p) {
+                        j.crop = CropMode::Rect { x, y, width, height };
+                    }
+                    (p.clone(), j)
+                })
+                .collect();
+
             ui.set_running(true);
             ui.set_progress(0.0);
 
@@ -211,7 +373,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             std::thread::spawn(move || {
                 let ui_for_progress = ui_weak2.clone();
                 let rows_paths = inputs.clone();
-                run_batch(&inputs, &job, &preset_name, move |p| {
+                run_jobs(&items, &preset_name, move |p| {
                     let frac = p.done as f32 / total as f32;
                     let idx = rows_paths.iter().position(|x| *x == p.last.input);
                     let ok = p.last.outcome.is_ok();

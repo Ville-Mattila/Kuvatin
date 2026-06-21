@@ -95,6 +95,47 @@ component FieldLabel inherits Text {
     font-weight: 700;
 }
 
+// One resize handle for a corner of the crop rectangle. It owns its own drag
+// bookkeeping (start values captured on press) and reports the dragged corner
+// position back as normalized deltas via the `dragged` callback.
+component CropHandle inherits Rectangle {
+    in property <float> box-w;
+    in property <float> box-h;
+    // Which corner: -1 = left/top edge moves, +1 = right/bottom edge moves.
+    in property <float> sign-x;
+    in property <float> sign-y;
+    // Fired when the drag starts, so the owner can capture the edges to offset.
+    callback pressed();
+    // dx, dy are normalized (0..1) drag deltas since press.
+    callback dragged(float, float);
+
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    background: ha.pressed ? #14b8a6 : #2dd4bf;
+    border-width: 2px;
+    border-color: #08110f;
+
+    property <length> sx;
+    property <length> sy;
+
+    ha := TouchArea {
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) {
+                root.sx = self.mouse-x;
+                root.sy = self.mouse-y;
+                root.pressed();
+            }
+        }
+        moved => {
+            root.dragged(
+                (self.mouse-x - root.sx) / (root.box-w * 1px),
+                (self.mouse-y - root.sy) / (root.box-h * 1px),
+            );
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
     preferred-width: 880px;
@@ -110,12 +151,29 @@ export component AppWindow inherits Window {
     in-out property <int> quality: 80;
     in-out property <string> preset-name;
 
+    // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
+    // (0..1) relative to the displayed image, so the preview size is irrelevant —
+    // Rust maps normalized → absolute pixels using the original image dimensions.
+    in property <bool> cropping: false;
+    in property <image> crop-image;
+    in property <float> crop-box-w: 400;   // preview box size in px (matches image aspect)
+    in property <float> crop-box-h: 300;
+    in-out property <float> crop-x: 0;
+    in-out property <float> crop-y: 0;
+    in-out property <float> crop-w: 1;
+    in-out property <float> crop-h: 1;
+    in-out property <bool> aspect-lock: false;
+
     callback add-files();
     callback clear-files();
     callback preset-changed(int);
     callback convert();
     callback save-preset(string);
     callback delete-preset();
+    callback start-crop(int);
+    callback apply-crop();
+    callback cancel-crop();
+    callback clear-crop();
 
     VerticalLayout {
         padding: 16px;
@@ -188,7 +246,9 @@ export component AppWindow inherits Window {
                                 background: row-ta.has-hover
                                     ? #262b34
                                     : (Math.mod(i, 2) == 0 ? transparent : #1c2027);
-                                row-ta := TouchArea { }
+                                row-ta := TouchArea {
+                                    clicked => { root.start-crop(i); }
+                                }
                                 HorizontalLayout {
                                     padding-left: 12px;
                                     padding-right: 14px;
@@ -225,6 +285,14 @@ export component AppWindow inherits Window {
                                         color: #9aa3b2;
                                         font-size: 11px;
                                         vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: "✂ Crop";
+                                        color: #2dd4bf;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                        visible: row-ta.has-hover;
                                     }
                                     Text {
                                         text: row.status;
@@ -346,4 +414,260 @@ export component AppWindow inherits Window {
             }
         }
     }
+
+    // ---- Crop editor overlay -------------------------------------------
+    // Drawn last so it sits above the two panes. Normalized crop coords
+    // (crop-x/y/w/h in 0..1) are multiplied by the preview box size to get
+    // on-screen pixels; Rust converts them to absolute pixels on Apply.
+    if root.cropping: parent-overlay := Rectangle {
+        // Full-window backdrop; its TouchArea swallows clicks behind the card.
+        background: #000000cc;
+        TouchArea { }
+
+        // Minimum normalized rect size, so a rectangle can't collapse.
+        property <float> min-n: 0.03;
+
+        // Drag bookkeeping for moving the whole rectangle.
+        property <length> move-sx;
+        property <length> move-sy;
+        property <float> move-x0;
+        property <float> move-y0;
+
+        // Edge values captured at the start of a corner drag.
+        property <float> edge-l;
+        property <float> edge-t;
+        property <float> edge-r;
+        property <float> edge-b;
+        // Aspect ratio (w:h in box pixels) captured for aspect-lock resizing.
+        property <float> edge-ratio;
+
+        function begin-corner() {
+            self.edge-l = root.crop-x;
+            self.edge-t = root.crop-y;
+            self.edge-r = root.crop-x + root.crop-w;
+            self.edge-b = root.crop-y + root.crop-h;
+            self.edge-ratio = (root.crop-w * root.crop-box-w) / (root.crop-h * root.crop-box-h);
+        }
+
+        // Apply a corner drag. sgx/sgy pick which edges move (-1 left/top, +1 right/bottom).
+        function corner(sgx: float, sgy: float, dx: float, dy: float) {
+            // Horizontal edge.
+            if (sgx < 0) {
+                self.edge-l = Math.clamp(self.edge-l + dx, 0, self.edge-r - self.min-n);
+            } else {
+                self.edge-r = Math.clamp(self.edge-r + dx, self.edge-l + self.min-n, 1);
+            }
+            // Vertical edge.
+            if (sgy < 0) {
+                self.edge-t = Math.clamp(self.edge-t + dy, 0, self.edge-b - self.min-n);
+            } else {
+                self.edge-b = Math.clamp(self.edge-b + dy, self.edge-t + self.min-n, 1);
+            }
+
+            root.crop-x = self.edge-l;
+            root.crop-y = self.edge-t;
+            root.crop-w = self.edge-r - self.edge-l;
+            root.crop-h = self.edge-b - self.edge-t;
+
+            if (root.aspect-lock && self.edge-ratio > 0) {
+                // Recompute height from width to preserve the on-screen aspect:
+                // crop-w*box-w : crop-h*box-h == edge-ratio. Solve for crop-h.
+                root.crop-h = (root.crop-w * root.crop-box-w) / (self.edge-ratio * root.crop-box-h);
+                // Grow/shrink from the anchored corner (the edge that did NOT move).
+                if (sgy < 0) {
+                    root.crop-y = self.edge-b - root.crop-h;
+                }
+                // Clamp the derived height into bounds; if it overflows, fall back
+                // to a height that fits and re-anchor.
+                if (root.crop-y < 0) {
+                    root.crop-y = 0;
+                    root.crop-h = self.edge-b;
+                }
+                if (root.crop-y + root.crop-h > 1) {
+                    root.crop-h = 1 - root.crop-y;
+                }
+            }
+        }
+
+        Rectangle {
+            // Centered card.
+            width: card-layout.preferred-width;
+            height: card-layout.preferred-height;
+            background: #20242c;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #2c313b;
+
+            card-layout := VerticalLayout {
+                padding: 18px;
+                spacing: 14px;
+
+                Text {
+                    text: "Crop image";
+                    color: #f2f4f8;
+                    font-size: 16px;
+                    font-weight: 700;
+                }
+
+                // Preview box; its size matches the image aspect ratio.
+                box := Rectangle {
+                    width: root.crop-box-w * 1px;
+                    height: root.crop-box-h * 1px;
+                    horizontal-stretch: 0;
+                    border-radius: 6px;
+                    clip: true;
+
+                    Image {
+                        source: root.crop-image;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: fill;
+                    }
+
+                    // Dim overlay outside the crop selection (four strips).
+                    Rectangle { x: 0; y: 0; width: parent.width; height: root.crop-y * parent.height; background: #00000099; }
+                    Rectangle { x: 0; y: (root.crop-y + root.crop-h) * parent.height; width: parent.width; height: parent.height - (root.crop-y + root.crop-h) * parent.height; background: #00000099; }
+                    Rectangle { x: 0; y: root.crop-y * parent.height; width: root.crop-x * parent.width; height: root.crop-h * parent.height; background: #00000099; }
+                    Rectangle { x: (root.crop-x + root.crop-w) * parent.width; y: root.crop-y * parent.height; width: parent.width - (root.crop-x + root.crop-w) * parent.width; height: root.crop-h * parent.height; background: #00000099; }
+
+                    // The crop rectangle border + move handle.
+                    rect := Rectangle {
+                        x: root.crop-x * parent.width;
+                        y: root.crop-y * parent.height;
+                        width: root.crop-w * parent.width;
+                        height: root.crop-h * parent.height;
+                        border-width: 2px;
+                        border-color: #2dd4bf;
+
+                        move-ta := TouchArea {
+                            mouse-cursor: move;
+                            pointer-event(ev) => {
+                                if (ev.kind == PointerEventKind.down) {
+                                    parent-overlay.move-sx = self.mouse-x;
+                                    parent-overlay.move-sy = self.mouse-y;
+                                    parent-overlay.move-x0 = root.crop-x;
+                                    parent-overlay.move-y0 = root.crop-y;
+                                }
+                            }
+                            moved => {
+                                root.crop-x = Math.clamp(
+                                    parent-overlay.move-x0 + (self.mouse-x - parent-overlay.move-sx) / (root.crop-box-w * 1px),
+                                    0, 1 - root.crop-w);
+                                root.crop-y = Math.clamp(
+                                    parent-overlay.move-y0 + (self.mouse-y - parent-overlay.move-sy) / (root.crop-box-h * 1px),
+                                    0, 1 - root.crop-h);
+                            }
+                        }
+                    }
+
+                    // Four corner resize handles. Positioned at the rect corners,
+                    // centered on them. Each reports normalized drag deltas.
+                    CropHandle {
+                        x: root.crop-x * box.width - self.width / 2;
+                        y: root.crop-y * box.height - self.height / 2;
+                        box-w: root.crop-box-w; box-h: root.crop-box-h;
+                        sign-x: -1; sign-y: -1;
+                        pressed => { parent-overlay.begin-corner(); }
+                        dragged(dx, dy) => { parent-overlay.corner(-1, -1, dx, dy); }
+                    }
+                    CropHandle {
+                        x: (root.crop-x + root.crop-w) * box.width - self.width / 2;
+                        y: root.crop-y * box.height - self.height / 2;
+                        box-w: root.crop-box-w; box-h: root.crop-box-h;
+                        sign-x: 1; sign-y: -1;
+                        pressed => { parent-overlay.begin-corner(); }
+                        dragged(dx, dy) => { parent-overlay.corner(1, -1, dx, dy); }
+                    }
+                    CropHandle {
+                        x: root.crop-x * box.width - self.width / 2;
+                        y: (root.crop-y + root.crop-h) * box.height - self.height / 2;
+                        box-w: root.crop-box-w; box-h: root.crop-box-h;
+                        sign-x: -1; sign-y: 1;
+                        pressed => { parent-overlay.begin-corner(); }
+                        dragged(dx, dy) => { parent-overlay.corner(-1, 1, dx, dy); }
+                    }
+                    CropHandle {
+                        x: (root.crop-x + root.crop-w) * box.width - self.width / 2;
+                        y: (root.crop-y + root.crop-h) * box.height - self.height / 2;
+                        box-w: root.crop-box-w; box-h: root.crop-box-h;
+                        sign-x: 1; sign-y: 1;
+                        pressed => { parent-overlay.begin-corner(); }
+                        dragged(dx, dy) => { parent-overlay.corner(1, 1, dx, dy); }
+                    }
+                }
+
+                // Controls row.
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    // Aspect-lock toggle.
+                    lock-toggle := Rectangle {
+                        height: 34px;
+                        min-width: 130px;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: root.aspect-lock ? #2dd4bf : #2c313b;
+                        background: lock-ta.pressed ? #2c313b : (lock-ta.has-hover ? #262b34 : #20242c);
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            alignment: center;
+                            Rectangle {
+                                width: 16px; height: 16px;
+                                y: (parent.height - self.height) / 2;
+                                border-radius: 4px;
+                                border-width: 2px;
+                                border-color: #2dd4bf;
+                                background: root.aspect-lock ? #2dd4bf : transparent;
+                                Text {
+                                    text: "✓";
+                                    color: #08110f;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    visible: root.aspect-lock;
+                                }
+                            }
+                            Text {
+                                text: "Lock aspect";
+                                color: #f2f4f8;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        lock-ta := TouchArea {
+                            clicked => { root.aspect-lock = !root.aspect-lock; }
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    SecondaryButton {
+                        text: "Cancel";
+                        clicked => { root.cancel-crop(); }
+                    }
+                    // Apply (accent).
+                    apply-rect := Rectangle {
+                        height: 34px;
+                        min-width: 96px;
+                        border-radius: 8px;
+                        background: apply-ta.pressed || apply-ta.has-hover ? #14b8a6 : #2dd4bf;
+                        Text {
+                            text: "Apply";
+                            color: #08110f;
+                            font-size: 13px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        apply-ta := TouchArea {
+                            clicked => { root.apply-crop(); }
+                        }
+                    }
+                }
+            }
+        }
+    } // end overlay
 }
