@@ -148,10 +148,32 @@ component CropHandle inherits Rectangle {
     }
 }
 
+// A window-control button for the custom title bar (minimize/maximize/close).
+component WinButton inherits Rectangle {
+    in property <string> glyph;
+    in property <bool> danger: false;
+    callback clicked();
+    width: 46px;
+    background: ta.has-hover ? (root.danger ? #e23b3b : #2c313b) : transparent;
+    Text {
+        text: root.glyph;
+        color: ta.has-hover && root.danger ? #f2f4f8 : #9aa3b2;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
+    no-frame: true;
     preferred-width: 880px;
     preferred-height: 560px;
+    min-width: 640px;
+    min-height: 440px;
     background: #16181d;
 
     in property <[FileRow]> files;
@@ -185,6 +207,12 @@ export component AppWindow inherits Window {
     in-out property <int> res-h: 0;
     in-out property <bool> res-lock: true;
 
+    // Custom window-frame controls (frameless window; wired to Win32 in gui.rs).
+    callback win-minimize();
+    callback win-maximize();
+    callback win-close();
+    callback win-drag();
+
     callback add-files();
     callback clear-files();
     callback preset-changed(int);
@@ -197,27 +225,52 @@ export component AppWindow inherits Window {
     callback clear-crop();
 
     VerticalLayout {
-        padding: 16px;
-        spacing: 16px;
+        padding: 0px;
+        spacing: 0px;
 
-        // Header ---------------------------------------------------------
-        VerticalLayout {
-            spacing: 2px;
-            Text {
-                text: "Kuvatin";
-                color: #f2f4f8;
-                font-size: 20px;
-                font-weight: 800;
+        // Custom title bar ----------------------------------------------
+        Rectangle {
+            min-height: 36px;
+            max-height: 36px;
+            background: #20242c;
+
+            // Drag region across the whole bar; the buttons sit on top and
+            // consume their own clicks, so only the empty area drags.
+            TouchArea {
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) { root.win-drag(); }
+                }
             }
-            Text {
-                text: "Batch convert · resize · crop";
-                color: #9aa3b2;
-                font-size: 12px;
+
+            HorizontalLayout {
+                padding-left: 14px;
+                spacing: 8px;
+
+                Text {
+                    text: "Kuvatin";
+                    color: #f2f4f8;
+                    font-size: 14px;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "batch convert · resize · crop";
+                    color: #9aa3b2;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                WinButton { glyph: "—"; clicked => { root.win-minimize(); } }
+                WinButton { glyph: "❐"; clicked => { root.win-maximize(); } }
+                WinButton { glyph: "✕"; danger: true; clicked => { root.win-close(); } }
             }
         }
 
         // Body -----------------------------------------------------------
         HorizontalLayout {
+            padding: 16px;
             spacing: 18px;
 
             // Files card

@@ -101,6 +101,29 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         std::mem::forget(drain_timer);
     }
 
+    // Custom window-frame controls. On Windows these drive the native move/
+    // min/max/close via the win_drop module (the HWND is captured in enable()).
+    // On other platforms they are harmless no-ops so the .slint compiles and
+    // runs cross-platform.
+    {
+        ui.on_win_minimize(|| {
+            #[cfg(windows)]
+            win_drop::minimize();
+        });
+        ui.on_win_maximize(|| {
+            #[cfg(windows)]
+            win_drop::maximize();
+        });
+        ui.on_win_close(|| {
+            #[cfg(windows)]
+            win_drop::close();
+        });
+        ui.on_win_drag(|| {
+            #[cfg(windows)]
+            win_drop::drag();
+        });
+    }
+
     {
         let files = files.clone();
         let rows = rows.clone();
@@ -585,19 +608,86 @@ mod win_drop {
     use slint::ComponentHandle;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::UI::Shell::{
         DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
     };
-    use windows::Win32::UI::WindowsAndMessaging::WM_DROPFILES;
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, SendMessageW, ShowWindow, HTBOTTOM,
+        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+        HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES, WM_NCLBUTTONDOWN,
+    };
+
+    /// Width of the invisible edge zone (in physical px) used for resize hit-testing.
+    const RESIZE_BORDER: i32 = 6;
 
     /// Inbox of paths dropped onto the window, awaiting drain by the UI thread.
     static INBOX: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
     /// Guards against subclassing the window more than once.
     static INSTALLED: OnceLock<()> = OnceLock::new();
+    /// The native window handle, captured in `enable()` so the win-* callbacks
+    /// can reach it without re-deriving it from the Slint window each time.
+    static HWND_RAW: OnceLock<isize> = OnceLock::new();
 
     fn inbox() -> &'static Mutex<Vec<PathBuf>> {
         INBOX.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    /// The captured HWND, if `enable()` has run.
+    fn hwnd() -> Option<HWND> {
+        HWND_RAW
+            .get()
+            .map(|raw| HWND(*raw as *mut std::ffi::c_void))
+    }
+
+    /// Begin the native window move loop. Wired to the title-bar drag region:
+    /// release the implicit mouse capture, then tell Windows the user grabbed the
+    /// "caption" so it runs its own move loop (including edge snapping).
+    pub fn drag() {
+        if let Some(hwnd) = hwnd() {
+            // SAFETY: hwnd is valid and we run on the UI thread that owns it.
+            unsafe {
+                let _ = ReleaseCapture();
+                SendMessageW(
+                    hwnd,
+                    WM_NCLBUTTONDOWN,
+                    WPARAM(HTCAPTION as usize),
+                    LPARAM(0),
+                );
+            }
+        }
+    }
+
+    /// Minimize the window.
+    pub fn minimize() {
+        if let Some(hwnd) = hwnd() {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            }
+        }
+    }
+
+    /// Toggle maximize/restore.
+    pub fn maximize() {
+        if let Some(hwnd) = hwnd() {
+            unsafe {
+                if IsZoomed(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                } else {
+                    let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                }
+            }
+        }
+    }
+
+    /// Request a clean close (lets Slint tear down via the normal WM_CLOSE path).
+    pub fn close() {
+        if let Some(hwnd) = hwnd() {
+            unsafe {
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 
     /// Drain all queued dropped paths. Called by the UI-thread timer.
@@ -616,6 +706,8 @@ mod win_drop {
         let Some(hwnd) = hwnd_of(ui) else {
             return;
         };
+        // Stash the raw handle so the win-* callbacks can use it later.
+        let _ = HWND_RAW.set(hwnd.0 as isize);
         // SAFETY: hwnd is a valid window handle obtained from the shown window,
         // and we run on the UI/event-loop thread that owns it.
         unsafe {
@@ -647,6 +739,55 @@ mod win_drop {
         _uid: usize,
         _refdata: usize,
     ) -> LRESULT {
+        use windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST;
+        if msg == WM_NCHITTEST {
+            // The frameless window has no native border, so we synthesize resize
+            // grips: if the cursor is within RESIZE_BORDER px of an edge, return
+            // the matching hit code so Windows runs its native resize loop.
+            // The lparam packs screen coords as signed 16-bit lo/hi words;
+            // GetCursorPos avoids sign/monitor pitfalls and gives the same point.
+            let mut pt = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut pt).is_err() {
+                // Fall back to the lparam-packed coords.
+                pt.x = (lparam.0 & 0xFFFF) as i16 as i32;
+                pt.y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            }
+            let mut rc = RECT::default();
+            if GetWindowRect(hwnd, &mut rc).is_ok() {
+                let b = RESIZE_BORDER;
+                let left = pt.x < rc.left + b;
+                let right = pt.x >= rc.right - b;
+                let top = pt.y < rc.top + b;
+                let bottom = pt.y >= rc.bottom - b;
+
+                let hit = if top && left {
+                    Some(HTTOPLEFT)
+                } else if top && right {
+                    Some(HTTOPRIGHT)
+                } else if bottom && left {
+                    Some(HTBOTTOMLEFT)
+                } else if bottom && right {
+                    Some(HTBOTTOMRIGHT)
+                } else if left {
+                    Some(HTLEFT)
+                } else if right {
+                    Some(HTRIGHT)
+                } else if top {
+                    Some(HTTOP)
+                } else if bottom {
+                    Some(HTBOTTOM)
+                } else {
+                    None
+                };
+
+                if let Some(code) = hit {
+                    return LRESULT(code as isize);
+                }
+            }
+            // Anywhere else is client area: Slint receives normal input, and the
+            // title-bar drag is initiated explicitly via win-drag()/SendMessage.
+            return LRESULT(HTCLIENT as isize);
+        }
         if msg == WM_DROPFILES {
             let hdrop = HDROP(wparam.0 as *mut std::ffi::c_void);
             let mut dropped = Vec::new();
