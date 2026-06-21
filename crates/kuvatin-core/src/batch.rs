@@ -29,11 +29,22 @@ pub fn run_batch<F>(inputs: &[PathBuf], job: &Job, preset_name: &str, on_progres
 where
     F: Fn(Progress) + Sync,
 {
-    let total = inputs.len();
+    let items: Vec<(PathBuf, Job)> = inputs.iter().map(|p| (p.clone(), job.clone())).collect();
+    run_jobs(&items, preset_name, on_progress)
+}
+
+/// Like `run_batch`, but each input carries its own `Job` (e.g. a per-image
+/// crop). Runs in parallel with the same failure isolation and progress
+/// semantics as `run_batch`.
+pub fn run_jobs<F>(items: &[(PathBuf, Job)], preset_name: &str, on_progress: F) -> Vec<FileResult>
+where
+    F: Fn(Progress) + Sync,
+{
+    let total = items.len();
     let done = AtomicUsize::new(0);
-    inputs
+    items
         .par_iter()
-        .map(|input| {
+        .map(|(input, job)| {
             let outcome = process_file(input, job, preset_name).map_err(|e| e.to_string());
             let result = FileResult { input: input.clone(), outcome };
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
@@ -70,5 +81,24 @@ mod tests {
         let bad_res = results.iter().find(|r| r.input == bad).unwrap();
         assert!(good_res.outcome.is_ok());
         assert!(bad_res.outcome.is_err());
+    }
+
+    #[test]
+    fn run_jobs_uses_each_files_own_job() {
+        use crate::format::OutputFormat;
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        let b = dir.path().join("b.png");
+        RgbaImage::from_pixel(20, 20, Rgba([5, 5, 5, 255])).save(&a).unwrap();
+        RgbaImage::from_pixel(20, 20, Rgba([5, 5, 5, 255])).save(&b).unwrap();
+        let items = vec![
+            (a.clone(), Job { format: OutputFormat::Jpeg, ..Job::default() }),
+            (b.clone(), Job { format: OutputFormat::Webp, ..Job::default() }),
+        ];
+        let results = run_jobs(&items, "t", |_p| {});
+        let ra = results.iter().find(|r| r.input == a).unwrap().outcome.as_ref().unwrap();
+        let rb = results.iter().find(|r| r.input == b).unwrap().outcome.as_ref().unwrap();
+        assert_eq!(ra.extension().unwrap(), "jpg");
+        assert_eq!(rb.extension().unwrap(), "webp");
     }
 }
