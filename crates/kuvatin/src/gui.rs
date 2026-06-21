@@ -30,8 +30,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
 
     // Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
     // not present here are converted with the base job (no crop override).
-    let crops: Arc<Mutex<HashMap<PathBuf, (u32, u32, u32, u32)>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
+    let crops: Arc<Mutex<CropMap>> = Arc::new(Mutex::new(HashMap::new()));
     // The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
     let edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>> = Arc::new(Mutex::new(None));
 
