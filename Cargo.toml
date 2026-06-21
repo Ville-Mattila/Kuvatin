@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/kuvatin-core", "crates/kuvatin"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+image = "0.25"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+directories = "5"
+clap = { version = "4", features = ["derive"] }

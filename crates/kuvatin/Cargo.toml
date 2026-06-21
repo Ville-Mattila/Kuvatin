@@ -1,0 +1,32 @@
+[package]
+name = "kuvatin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors = ["Ensemble <ville.mattila@ensemble.fi>"]
+description = "Kuvatin image tool with Windows Explorer context-menu integration"
+
+[[bin]]
+name = "kuvatin"
+path = "src/main.rs"
+
+[dependencies]
+kuvatin-core = { path = "../kuvatin-core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+image = { workspace = true }
+slint = "1.8"
+rfd = "0.14"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Registry",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
+
+[build-dependencies]
+slint-build = "1.8"
+
+[dev-dependencies]
+tempfile = "3"

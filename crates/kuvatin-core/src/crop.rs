@@ -1,0 +1,109 @@
+use image::DynamicImage;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Anchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    #[default]
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CropMode {
+    None,
+    /// Crop a fixed pixel rectangle (clamped to the image), positioned by anchor.
+    FixedSize { width: u32, height: u32, anchor: Anchor },
+    /// Crop the largest w:h rectangle that fits, positioned by anchor.
+    AspectRatio { w: u32, h: u32, anchor: Anchor },
+}
+
+/// (x, y, width, height) of the crop within a `src_w` x `src_h` image.
+pub fn compute_crop_rect(mode: CropMode, src_w: u32, src_h: u32) -> (u32, u32, u32, u32) {
+    match mode {
+        CropMode::None => (0, 0, src_w, src_h),
+        CropMode::FixedSize { width, height, anchor } => {
+            let w = width.clamp(1, src_w);
+            let h = height.clamp(1, src_h);
+            place(anchor, src_w, src_h, w, h)
+        }
+        CropMode::AspectRatio { w, h, anchor } => {
+            let (w, h) = (w.max(1), h.max(1));
+            let by_width = (src_w, (src_w as u64 * h as u64 / w as u64) as u32);
+            let (cw, ch) = if by_width.1 <= src_h {
+                by_width
+            } else {
+                ((src_h as u64 * w as u64 / h as u64) as u32, src_h)
+            };
+            place(anchor, src_w, src_h, cw.max(1), ch.max(1))
+        }
+    }
+}
+
+fn place(anchor: Anchor, src_w: u32, src_h: u32, w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let max_x = src_w - w;
+    let max_y = src_h - h;
+    let (x, y) = match anchor {
+        Anchor::TopLeft => (0, 0),
+        Anchor::Top => (max_x / 2, 0),
+        Anchor::TopRight => (max_x, 0),
+        Anchor::Left => (0, max_y / 2),
+        Anchor::Center => (max_x / 2, max_y / 2),
+        Anchor::Right => (max_x, max_y / 2),
+        Anchor::BottomLeft => (0, max_y),
+        Anchor::Bottom => (max_x / 2, max_y),
+        Anchor::BottomRight => (max_x, max_y),
+    };
+    (x, y, w, h)
+}
+
+/// Apply a crop, returning a new image. `None` returns a clone.
+pub fn apply_crop(img: &DynamicImage, mode: CropMode) -> DynamicImage {
+    if let CropMode::None = mode {
+        return img.clone();
+    }
+    let (x, y, w, h) = compute_crop_rect(mode, img.width(), img.height());
+    img.crop_imm(x, y, w, h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_is_full_image() {
+        assert_eq!(compute_crop_rect(CropMode::None, 800, 600), (0, 0, 800, 600));
+    }
+
+    #[test]
+    fn fixed_center_is_centered() {
+        let m = CropMode::FixedSize { width: 400, height: 200, anchor: Anchor::Center };
+        assert_eq!(compute_crop_rect(m, 800, 600), (200, 200, 400, 200));
+    }
+
+    #[test]
+    fn fixed_top_left() {
+        let m = CropMode::FixedSize { width: 100, height: 100, anchor: Anchor::TopLeft };
+        assert_eq!(compute_crop_rect(m, 800, 600), (0, 0, 100, 100));
+    }
+
+    #[test]
+    fn fixed_size_clamps_to_image() {
+        let m = CropMode::FixedSize { width: 9999, height: 9999, anchor: Anchor::Center };
+        assert_eq!(compute_crop_rect(m, 800, 600), (0, 0, 800, 600));
+    }
+
+    #[test]
+    fn aspect_square_from_landscape() {
+        let m = CropMode::AspectRatio { w: 1, h: 1, anchor: Anchor::Center };
+        assert_eq!(compute_crop_rect(m, 800, 600), (100, 0, 600, 600));
+    }
+}
