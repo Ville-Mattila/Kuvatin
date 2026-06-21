@@ -1,5 +1,6 @@
 mod cli;
 mod collect;
+mod quickrun;
 mod shell;
 
 use clap::Parser;
@@ -11,7 +12,10 @@ fn main() -> anyhow::Result<()> {
         Mode::Register => shell::register()?,
         Mode::Unregister => shell::unregister()?,
         Mode::QuickRun { preset, paths } => {
-            println!("quickrun preset={preset} files={}", paths.len());
+            let failures = quickrun::run(&preset, &paths)?;
+            if failures > 0 {
+                std::process::exit(1);
+            }
         }
         Mode::Gui { paths } => {
             println!("gui files={}", paths.len());

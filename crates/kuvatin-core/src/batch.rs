@@ -16,6 +16,12 @@ pub struct Progress {
     pub last: FileResult,
 }
 
+impl Progress {
+    pub fn input_display(&self) -> String {
+        self.last.input.display().to_string()
+    }
+}
+
 /// Run `job` over every input in parallel. `on_progress` is called once per
 /// finished file (from worker threads — it must be `Sync`). A single failing
 /// file never aborts the batch; its error is captured in the returned results.
