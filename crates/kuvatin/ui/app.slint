@@ -1,4 +1,4 @@
-import { Button, ComboBox, ProgressIndicator, ListView, LineEdit } from "std-widgets.slint";
+import { Button, ComboBox, ProgressIndicator, ListView, LineEdit, SpinBox } from "std-widgets.slint";
 
 export struct FileRow {
     name: string,
@@ -109,17 +109,29 @@ component CropHandle inherits Rectangle {
     // dx, dy are normalized (0..1) drag deltas since press.
     callback dragged(float, float);
 
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-    background: ha.pressed ? #14b8a6 : #2dd4bf;
-    border-width: 2px;
-    border-color: #08110f;
+    // Large transparent hit area so the corner is easy to grab; the visible
+    // square is centered within it. The TouchArea fills `root`.
+    width: 32px;
+    height: 32px;
+    background: transparent;
 
     property <length> sx;
     property <length> sy;
 
+    // Visible handle: a smaller teal square with a dark outline, centered.
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 5px;
+        background: ha.pressed ? #14b8a6 : #2dd4bf;
+        border-width: 2px;
+        border-color: #08110f;
+    }
+
     ha := TouchArea {
+        mouse-cursor: move;
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.down) {
                 root.sx = self.mouse-x;
@@ -163,6 +175,10 @@ export component AppWindow inherits Window {
     in-out property <float> crop-w: 1;
     in-out property <float> crop-h: 1;
     in-out property <bool> aspect-lock: false;
+    // Original (full-resolution) dimensions of the image being cropped, so the
+    // numeric X/Y/W/H fields can be shown and edited in absolute pixels.
+    in property <int> crop-img-w;
+    in property <int> crop-img-h;
 
     callback add-files();
     callback clear-files();
@@ -560,39 +576,103 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Four corner resize handles. Positioned at the rect corners,
-                    // centered on them. Each reports normalized drag deltas.
+                    // Four corner resize handles. Inset so the full handle stays
+                    // visible at each corner (left/top edges anchor the handle's
+                    // outer edge at the corner; right/bottom anchor its inner edge),
+                    // rather than half-hanging off the box where it gets clipped.
+                    // Each reports normalized drag deltas.
                     CropHandle {
-                        x: root.crop-x * box.width - self.width / 2;
-                        y: root.crop-y * box.height - self.height / 2;
+                        x: root.crop-x * box.width;
+                        y: root.crop-y * box.height;
                         box-w: root.crop-box-w; box-h: root.crop-box-h;
                         sign-x: -1; sign-y: -1;
                         pressed => { parent-overlay.begin-corner(); }
                         dragged(dx, dy) => { parent-overlay.corner(-1, -1, dx, dy); }
                     }
                     CropHandle {
-                        x: (root.crop-x + root.crop-w) * box.width - self.width / 2;
-                        y: root.crop-y * box.height - self.height / 2;
+                        x: (root.crop-x + root.crop-w) * box.width - self.width;
+                        y: root.crop-y * box.height;
                         box-w: root.crop-box-w; box-h: root.crop-box-h;
                         sign-x: 1; sign-y: -1;
                         pressed => { parent-overlay.begin-corner(); }
                         dragged(dx, dy) => { parent-overlay.corner(1, -1, dx, dy); }
                     }
                     CropHandle {
-                        x: root.crop-x * box.width - self.width / 2;
-                        y: (root.crop-y + root.crop-h) * box.height - self.height / 2;
+                        x: root.crop-x * box.width;
+                        y: (root.crop-y + root.crop-h) * box.height - self.height;
                         box-w: root.crop-box-w; box-h: root.crop-box-h;
                         sign-x: -1; sign-y: 1;
                         pressed => { parent-overlay.begin-corner(); }
                         dragged(dx, dy) => { parent-overlay.corner(-1, 1, dx, dy); }
                     }
                     CropHandle {
-                        x: (root.crop-x + root.crop-w) * box.width - self.width / 2;
-                        y: (root.crop-y + root.crop-h) * box.height - self.height / 2;
+                        x: (root.crop-x + root.crop-w) * box.width - self.width;
+                        y: (root.crop-y + root.crop-h) * box.height - self.height;
                         box-w: root.crop-box-w; box-h: root.crop-box-h;
                         sign-x: 1; sign-y: 1;
                         pressed => { parent-overlay.begin-corner(); }
                         dragged(dx, dy) => { parent-overlay.corner(1, 1, dx, dy); }
+                    }
+                }
+
+                // Numeric crop fields (absolute pixels). The `value` bindings
+                // track the rectangle live as it is dragged; the `edited`
+                // handlers move/resize it when the user types.
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    VerticalLayout {
+                        spacing: 2px;
+                        FieldLabel { text: "X"; }
+                        SpinBox {
+                            width: 84px;
+                            minimum: 0;
+                            maximum: max(root.crop-img-w - 1, 0);
+                            value: Math.round(root.crop-x * root.crop-img-w);
+                            edited(v) => {
+                                root.crop-x = Math.clamp(v / root.crop-img-w, 0.0, 1.0 - root.crop-w);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        FieldLabel { text: "Y"; }
+                        SpinBox {
+                            width: 84px;
+                            minimum: 0;
+                            maximum: max(root.crop-img-h - 1, 0);
+                            value: Math.round(root.crop-y * root.crop-img-h);
+                            edited(v) => {
+                                root.crop-y = Math.clamp(v / root.crop-img-h, 0.0, 1.0 - root.crop-h);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        FieldLabel { text: "W"; }
+                        SpinBox {
+                            width: 84px;
+                            minimum: 1;
+                            maximum: root.crop-img-w;
+                            value: Math.round(root.crop-w * root.crop-img-w);
+                            edited(v) => {
+                                root.crop-w = Math.clamp(v / root.crop-img-w, 0.0, 1.0 - root.crop-x);
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        FieldLabel { text: "H"; }
+                        SpinBox {
+                            width: 84px;
+                            minimum: 1;
+                            maximum: root.crop-img-h;
+                            value: Math.round(root.crop-h * root.crop-img-h);
+                            edited(v) => {
+                                root.crop-h = Math.clamp(v / root.crop-img-h, 0.0, 1.0 - root.crop-y);
+                            }
+                        }
                     }
                 }
 

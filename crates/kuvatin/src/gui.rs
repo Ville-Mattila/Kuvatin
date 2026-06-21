@@ -225,6 +225,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             ui.set_crop_box_w((ow as f32 * scale).max(1.0));
             ui.set_crop_box_h((oh as f32 * scale).max(1.0));
 
+            // Expose the original dimensions so the numeric X/Y/W/H crop fields
+            // can show and edit absolute pixels.
+            ui.set_crop_img_w(ow as i32);
+            ui.set_crop_img_h(oh as i32);
+
             // Initialize the rect from any existing crop (normalized back to 0..1),
             // else the full image.
             if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
