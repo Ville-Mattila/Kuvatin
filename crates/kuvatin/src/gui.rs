@@ -1,6 +1,7 @@
 use crate::collect::collect_images;
 use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_batch;
+use kuvatin_core::format::OutputFormat;
 use kuvatin_core::preset::PresetStore;
 use slint::{Model, ModelRc, SharedString, VecModel};
 use std::path::PathBuf;
@@ -18,9 +19,28 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let names: Vec<SharedString> = store.presets.iter().map(|p| p.name.clone().into()).collect();
     ui.set_preset_names(ModelRc::new(VecModel::from(names)));
 
+    // Initialize the format/quality controls from the first preset so they reflect
+    // (and can override) what will actually be applied.
+    if let Some(first) = store.presets.first() {
+        ui.set_format(format_combo_str(first.job.format).into());
+        ui.set_quality(first.job.quality as i32);
+    }
+
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
     let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap())));
     ui.set_files(ModelRc::from(rows.clone()));
+
+    // Selecting a preset syncs the format/quality controls to that preset's job.
+    {
+        let store = store.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_preset_changed(move |idx| {
+            if let (Some(ui), Some(p)) = (ui_weak.upgrade(), store.presets.get(idx as usize)) {
+                ui.set_format(format_combo_str(p.job.format).into());
+                ui.set_quality(p.job.quality as i32);
+            }
+        });
+    }
 
     {
         let files = files.clone();
@@ -67,6 +87,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 Some(p) => p.clone(),
                 None => return,
             };
+            // Apply the live format/quality controls on top of the preset's job.
+            let mut job = preset.job.clone();
+            job.format = format_combo_to_format(&ui.get_format());
+            job.quality = ui.get_quality().clamp(0, 100) as u8;
+            let preset_name = preset.name.clone();
+
             ui.set_running(true);
             ui.set_progress(0.0);
 
@@ -75,7 +101,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             std::thread::spawn(move || {
                 let ui_for_progress = ui_weak2.clone();
                 let rows_paths = inputs.clone();
-                run_batch(&inputs, &preset.job, &preset.name, move |p| {
+                run_batch(&inputs, &job, &preset_name, move |p| {
                     let frac = p.done as f32 / total as f32;
                     let idx = rows_paths.iter().position(|x| *x == p.last.input);
                     let ok = p.last.outcome.is_ok();
@@ -120,6 +146,30 @@ fn rows_from(paths: &[PathBuf]) -> Vec<FileRow> {
             status: "queued".into(),
         })
         .collect()
+}
+
+/// The combo-box string for a format (matches the model in app.slint).
+fn format_combo_str(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Png => "png",
+        OutputFormat::Jpeg => "jpeg",
+        OutputFormat::Webp => "webp",
+        OutputFormat::Bmp => "bmp",
+        OutputFormat::Tiff => "tiff",
+        OutputFormat::Gif => "gif",
+    }
+}
+
+/// Parse a combo-box string back into a format; unknown values fall back to PNG.
+fn format_combo_to_format(s: &str) -> OutputFormat {
+    match s {
+        "jpeg" => OutputFormat::Jpeg,
+        "webp" => OutputFormat::Webp,
+        "bmp" => OutputFormat::Bmp,
+        "tiff" => OutputFormat::Tiff,
+        "gif" => OutputFormat::Gif,
+        _ => OutputFormat::Png,
+    }
 }
 
 fn refresh(rows: &Rc<VecModel<FileRow>>, paths: &[PathBuf]) {

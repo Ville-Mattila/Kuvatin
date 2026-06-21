@@ -44,10 +44,11 @@ impl PresetStore {
         self.presets.iter().find(|p| p.name == name)
     }
 
-    /// Default on-disk location: %APPDATA%\Kuvatin\presets.toml (or platform equiv).
+    /// Default on-disk location: %APPDATA%\Kuvatin\presets.toml (or platform equiv,
+    /// e.g. ~/.config/Kuvatin/presets.toml on Linux).
     pub fn default_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("fi", "Kuvatin", "Kuvatin")
-            .map(|d| d.config_dir().join("presets.toml"))
+        directories::BaseDirs::new()
+            .map(|d| d.config_dir().join("Kuvatin").join("presets.toml"))
     }
 
     /// Load from `path`, or return built-ins (and write them) if absent.

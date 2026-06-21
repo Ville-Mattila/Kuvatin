@@ -1,4 +1,4 @@
-import { Button, ComboBox, LineEdit, CheckBox, ProgressIndicator, ListView, StandardButton } from "std-widgets.slint";
+import { Button, ComboBox, ProgressIndicator, ListView, Slider } from "std-widgets.slint";
 
 export struct FileRow {
     name: string,
@@ -71,6 +71,12 @@ export component AppWindow inherits Window {
                 current-value <=> root.format;
             }
             Text { text: "Quality (\{root.quality})"; color: white; }
+            Slider {
+                minimum: 0;
+                maximum: 100;
+                value: root.quality;
+                changed(v) => { root.quality = Math.round(v); }
+            }
             Rectangle { height: 8px; }
             ProgressIndicator {
                 visible: root.running;
