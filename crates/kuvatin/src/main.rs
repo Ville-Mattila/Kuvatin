@@ -1,5 +1,8 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod cli;
 mod collect;
+mod gui;
 mod quickrun;
 mod shell;
 
@@ -17,9 +20,7 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Mode::Gui { paths } => {
-            println!("gui files={}", paths.len());
-        }
+        Mode::Gui { paths } => gui::run(paths)?,
     }
     Ok(())
 }
