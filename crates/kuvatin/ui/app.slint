@@ -1,0 +1,88 @@
+import { Button, ComboBox, LineEdit, CheckBox, ProgressIndicator, ListView, StandardButton } from "std-widgets.slint";
+
+export struct FileRow {
+    name: string,
+    status: string,
+}
+
+export component AppWindow inherits Window {
+    title: "Kuvatin";
+    preferred-width: 880px;
+    preferred-height: 560px;
+    background: #1d1f24;
+
+    in property <[FileRow]> files;
+    in property <[string]> preset-names;
+    in property <bool> running: false;
+    in property <float> progress: 0.0;
+    in-out property <int> current-preset: 0;
+    in-out property <string> format: "webp";
+    in-out property <int> quality: 80;
+
+    callback add-files();
+    callback clear-files();
+    callback preset-changed(int);
+    callback convert();
+
+    HorizontalLayout {
+        padding: 16px;
+        spacing: 16px;
+
+        VerticalLayout {
+            spacing: 8px;
+            Text { text: "Files"; color: white; font-size: 16px; font-weight: 700; }
+            Rectangle {
+                background: #26282e;
+                border-radius: 8px;
+                min-width: 460px;
+                ListView {
+                    for row in root.files: Rectangle {
+                        height: 36px;
+                        background: transparent;
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+                            Text { text: row.name; color: white; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                            Text { text: row.status; color: #9aa0aa; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: "Add files…"; clicked => { root.add-files(); } }
+                Button { text: "Clear"; clicked => { root.clear-files(); } }
+            }
+        }
+
+        VerticalLayout {
+            spacing: 12px;
+            min-width: 300px;
+            Text { text: "Preset"; color: white; font-weight: 700; }
+            ComboBox {
+                model: root.preset-names;
+                current-index <=> root.current-preset;
+                selected => { root.preset-changed(self.current-index); }
+            }
+            Text { text: "Format"; color: white; font-weight: 700; }
+            ComboBox {
+                model: ["png", "jpeg", "webp", "bmp", "tiff", "gif"];
+                current-value <=> root.format;
+            }
+            Text { text: "Quality (\{root.quality})"; color: white; }
+            Rectangle { height: 8px; }
+            ProgressIndicator {
+                visible: root.running;
+                progress: root.progress;
+            }
+            Rectangle { vertical-stretch: 1; }
+            Button {
+                text: root.running ? "Converting…" : "Convert";
+                enabled: !root.running;
+                primary: true;
+                clicked => { root.convert(); }
+            }
+        }
+    }
+}
