@@ -49,8 +49,10 @@ kuvatin/
 
 OS-agnostic, GUI-free, fully unit-testable. Owns:
 
-- **Format IO** via the `image` crate (decode/encode PNG, JPEG, WebP, BMP, TIFF, GIF).
-- **Resampling** via `fast_image_resize` (SIMD Lanczos) for the resize path.
+- **Format IO** via the `image` crate (decode all; encode PNG, JPEG, BMP, TIFF, GIF).
+  Lossy WebP encode goes through the `webp` crate (libwebp) for real quality control.
+- **Resampling** via a single `resample()` function (v1: `image::imageops` Lanczos3,
+  pure-Rust and correct; `fast_image_resize` SIMD is a drop-in post-v1 optimization).
 - **Job model:**
   - `Op` = `Resize` | `Crop` | `Convert` (with op-specific params).
   - `Job` = an ordered op pipeline `[Resize?, Crop?, Convert]` + `OutputPolicy`.
@@ -161,7 +163,8 @@ release-time concern.
 | Concern            | Crate |
 |--------------------|-------|
 | Image IO           | `image` |
-| Resampling         | `fast_image_resize` |
+| Lossy WebP encode  | `webp` (libwebp bindings) |
+| Resampling         | `image::imageops` (v1); `fast_image_resize` (post-v1) |
 | Parallelism        | `rayon` |
 | GUI                | `slint` |
 | CLI args           | `clap` |
