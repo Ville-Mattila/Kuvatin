@@ -1,15 +1,103 @@
-import { Button, ComboBox, ProgressIndicator, ListView, Slider } from "std-widgets.slint";
+import { Button, ComboBox, ProgressIndicator, ListView } from "std-widgets.slint";
 
 export struct FileRow {
     name: string,
     status: string,
 }
 
+// Palette ---------------------------------------------------------------
+// window     #16181d
+// card       #20242c   border #2c313b   radius 10px
+// text       #f2f4f8   muted  #9aa3b2
+// accent     #2dd4bf   (hover/pressed #14b8a6)
+// danger     #f87171
+
+// A clearly visible, fully custom quality slider (0..100). Replaces the
+// std-widgets Slider, which rendered invisibly against the dark theme.
+component QualitySlider inherits Rectangle {
+    in-out property <int> value;
+    height: 24px;
+    horizontal-stretch: 1;
+
+    // track
+    Rectangle {
+        y: parent.height / 2 - 3px;
+        height: 6px;
+        border-radius: 3px;
+        background: #2c313b;
+        // filled portion
+        Rectangle {
+            x: 0;
+            width: parent.width * (root.value / 100.0);
+            height: parent.height;
+            border-radius: 3px;
+            background: #2dd4bf;
+        }
+    }
+
+    // knob
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: ta.has-hover || ta.pressed ? #e6fffb : white;
+        border-width: 2px;
+        border-color: #2dd4bf;
+        y: parent.height / 2 - 8px;
+        x: (root.width - 16px) * (root.value / 100.0);
+    }
+
+    ta := TouchArea {
+        function set(mx: length) {
+            root.value = Math.clamp(Math.round(mx / root.width * 100), 0, 100);
+        }
+        moved => { ta.set(ta.mouse-x); }
+        clicked => { ta.set(ta.mouse-x); }
+    }
+}
+
+// A card surface used for the two main panels.
+component Card inherits Rectangle {
+    background: #20242c;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #2c313b;
+}
+
+// Secondary (card-colored) button used for Add/Clear.
+component SecondaryButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    height: 34px;
+    min-width: 96px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #2c313b;
+    background: ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c);
+    Text {
+        text: root.text;
+        color: #f2f4f8;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// Field label: bold, muted.
+component FieldLabel inherits Text {
+    color: #9aa3b2;
+    font-size: 12px;
+    font-weight: 700;
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
     preferred-width: 880px;
     preferred-height: 560px;
-    background: #1d1f24;
+    background: #16181d;
 
     in property <[FileRow]> files;
     in property <[string]> preset-names;
@@ -24,70 +112,189 @@ export component AppWindow inherits Window {
     callback preset-changed(int);
     callback convert();
 
-    HorizontalLayout {
+    VerticalLayout {
         padding: 16px;
         spacing: 16px;
 
+        // Header ---------------------------------------------------------
         VerticalLayout {
-            spacing: 8px;
-            Text { text: "Files"; color: white; font-size: 16px; font-weight: 700; }
-            Rectangle {
-                background: #26282e;
-                border-radius: 8px;
-                min-width: 460px;
-                ListView {
-                    for row in root.files: Rectangle {
-                        height: 36px;
-                        background: transparent;
-                        HorizontalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            spacing: 8px;
-                            Text { text: row.name; color: white; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                            Text { text: row.status; color: #9aa0aa; vertical-alignment: center; }
-                        }
-                    }
-                }
+            spacing: 2px;
+            Text {
+                text: "Kuvatin";
+                color: #f2f4f8;
+                font-size: 20px;
+                font-weight: 800;
             }
-            HorizontalLayout {
-                spacing: 8px;
-                Button { text: "Add files…"; clicked => { root.add-files(); } }
-                Button { text: "Clear"; clicked => { root.clear-files(); } }
+            Text {
+                text: "Batch convert · resize · crop";
+                color: #9aa3b2;
+                font-size: 12px;
             }
         }
 
-        VerticalLayout {
-            spacing: 12px;
-            min-width: 300px;
-            Text { text: "Preset"; color: white; font-weight: 700; }
-            ComboBox {
-                model: root.preset-names;
-                current-index <=> root.current-preset;
-                selected => { root.preset-changed(self.current-index); }
+        // Body -----------------------------------------------------------
+        HorizontalLayout {
+            spacing: 18px;
+
+            // Files card
+            Card {
+                min-width: 460px;
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "Files";
+                        color: #f2f4f8;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+
+                    // list / empty-state
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #181b21;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #2c313b;
+
+                        // empty-state
+                        if root.files.length == 0: VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "🖼";
+                                color: #2c313b;
+                                font-size: 40px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Drop images here\nor click Add files…";
+                                color: #9aa3b2;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        // populated list
+                        if root.files.length > 0: ListView {
+                            for row[i] in root.files: Rectangle {
+                                height: 38px;
+                                background: row-ta.has-hover
+                                    ? #262b34
+                                    : (Math.mod(i, 2) == 0 ? transparent : #1c2027);
+                                row-ta := TouchArea { }
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 8px;
+                                    Text {
+                                        text: row.name;
+                                        color: #f2f4f8;
+                                        font-size: 13px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: row.status;
+                                        color: row.status == "done"
+                                            ? #2dd4bf
+                                            : (row.status == "error" ? #f87171 : #9aa3b2);
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        SecondaryButton {
+                            text: "Add files…";
+                            clicked => { root.add-files(); }
+                        }
+                        SecondaryButton {
+                            text: "Clear";
+                            clicked => { root.clear-files(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
             }
-            Text { text: "Format"; color: white; font-weight: 700; }
-            ComboBox {
-                model: ["png", "jpeg", "webp", "bmp", "tiff", "gif"];
-                current-value <=> root.format;
-            }
-            Text { text: "Quality (\{root.quality})"; color: white; }
-            Slider {
-                minimum: 0;
-                maximum: 100;
-                value: root.quality;
-                changed(v) => { root.quality = Math.round(v); }
-            }
-            Rectangle { height: 8px; }
-            ProgressIndicator {
-                visible: root.running;
-                progress: root.progress;
-            }
-            Rectangle { vertical-stretch: 1; }
-            Button {
-                text: root.running ? "Converting…" : "Convert";
-                enabled: !root.running;
-                primary: true;
-                clicked => { root.convert(); }
+
+            // Settings card
+            Card {
+                min-width: 300px;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+
+                    Text {
+                        text: "Settings";
+                        color: #f2f4f8;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "PRESET"; }
+                        ComboBox {
+                            model: root.preset-names;
+                            current-index <=> root.current-preset;
+                            selected => { root.preset-changed(self.current-index); }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "FORMAT"; }
+                        ComboBox {
+                            model: ["png", "jpeg", "webp", "bmp", "tiff", "gif"];
+                            current-value <=> root.format;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "QUALITY (\{root.quality})"; }
+                        QualitySlider {
+                            value <=> root.quality;
+                        }
+                    }
+
+                    // spacer pushes the action block to the bottom
+                    Rectangle { vertical-stretch: 1; }
+
+                    if root.running: ProgressIndicator {
+                        height: 6px;
+                        progress: root.progress;
+                    }
+
+                    Rectangle {
+                        height: 42px;
+                        border-radius: 8px;
+                        background: root.running
+                            ? #1d6b62
+                            : (convert-ta.pressed
+                                ? #14b8a6
+                                : (convert-ta.has-hover ? #14b8a6 : #2dd4bf));
+                        Text {
+                            text: root.running ? "Converting…" : "Convert";
+                            color: root.running ? #9aa3b2 : #08110f;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        convert-ta := TouchArea {
+                            enabled: !root.running;
+                            clicked => { root.convert(); }
+                        }
+                    }
+                }
             }
         }
     }
