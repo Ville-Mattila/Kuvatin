@@ -15,14 +15,18 @@ kuvatin-core = { path = "../kuvatin-core" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 image = { workspace = true }
-slint = "1.8"
+slint = { version = "1.8", features = ["raw-window-handle-06"] }
 rfd = "0.14"
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 windows = { version = "0.58", features = [
     "Win32_System_Registry",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [build-dependencies]

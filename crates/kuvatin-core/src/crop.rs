@@ -24,6 +24,9 @@ pub enum CropMode {
     FixedSize { width: u32, height: u32, anchor: Anchor },
     /// Crop the largest w:h rectangle that fits, positioned by anchor.
     AspectRatio { w: u32, h: u32, anchor: Anchor },
+    /// An absolute pixel rectangle (origin x,y, size width,height), clamped to
+    /// the image. Used for interactive per-image crops drawn in the GUI.
+    Rect { x: u32, y: u32, width: u32, height: u32 },
 }
 
 /// (x, y, width, height) of the crop within a `src_w` x `src_h` image.
@@ -44,6 +47,13 @@ pub fn compute_crop_rect(mode: CropMode, src_w: u32, src_h: u32) -> (u32, u32, u
                 ((src_h as u64 * w as u64 / h as u64) as u32, src_h)
             };
             place(anchor, src_w, src_h, cw.max(1), ch.max(1))
+        }
+        CropMode::Rect { x, y, width, height } => {
+            let x = x.min(src_w.saturating_sub(1));
+            let y = y.min(src_h.saturating_sub(1));
+            let w = width.clamp(1, src_w - x);
+            let h = height.clamp(1, src_h - y);
+            (x, y, w, h)
         }
     }
 }
@@ -105,5 +115,25 @@ mod tests {
     fn aspect_square_from_landscape() {
         let m = CropMode::AspectRatio { w: 1, h: 1, anchor: Anchor::Center };
         assert_eq!(compute_crop_rect(m, 800, 600), (100, 0, 600, 600));
+    }
+
+    #[test]
+    fn rect_within_bounds_is_exact() {
+        let m = CropMode::Rect { x: 100, y: 50, width: 200, height: 150 };
+        assert_eq!(compute_crop_rect(m, 800, 600), (100, 50, 200, 150));
+    }
+
+    #[test]
+    fn rect_clamped_when_overflowing() {
+        let m = CropMode::Rect { x: 700, y: 500, width: 400, height: 400 };
+        // origin stays, size clamped to remaining 100x100
+        assert_eq!(compute_crop_rect(m, 800, 600), (700, 500, 100, 100));
+    }
+
+    #[test]
+    fn rect_origin_clamped_inside_image() {
+        let m = CropMode::Rect { x: 9999, y: 9999, width: 50, height: 50 };
+        let (x, y, w, h) = compute_crop_rect(m, 800, 600);
+        assert!(x < 800 && y < 600 && w >= 1 && h >= 1);
     }
 }

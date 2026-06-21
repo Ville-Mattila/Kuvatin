@@ -55,8 +55,9 @@ OS-agnostic, GUI-free, fully unit-testable. Owns:
   pure-Rust and correct; `fast_image_resize` SIMD is a drop-in post-v1 optimization).
 - **Job model:**
   - `Op` = `Resize` | `Crop` | `Convert` (with op-specific params).
-  - `Job` = an ordered op pipeline `[Resize?, Crop?, Convert]` + `OutputPolicy`.
-    Canonical order: resize → crop → convert/encode.
+  - `Job` = an ordered op pipeline `[Crop?, Resize?, Convert]` + `OutputPolicy`.
+    Canonical order: crop → resize → convert/encode (crop runs first so a crop
+    rectangle in source pixels selects the right region before scaling).
   - `Preset` = a named, serializable `Job`.
 - **Output naming** (`OutputPolicy`): sibling file using a token pattern,
   default `{name}_{w}x{h}.{ext}`. Tokens: `{name}`, `{w}`, `{h}`, `{ext}`, `{preset}`.
