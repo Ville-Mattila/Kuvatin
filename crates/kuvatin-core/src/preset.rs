@@ -21,7 +21,7 @@ impl PresetStore {
     /// The presets shipped on first run.
     pub fn builtin() -> Self {
         // Default preset: lossy PNG compression (libimagequant + oxipng final
-        // pass), tuned to approximate TinyPNG's default results. Uses quality.
+        // pass), tuned for strong size reduction with no visible loss. Uses quality.
         let compress_png = Job {
             format: OutputFormat::Png,
             png: PngOptimize::Lossy,
@@ -99,7 +99,7 @@ mod tests {
         let s = PresetStore::builtin();
         assert!(s.find("Convert to WebP").is_some());
         assert_eq!(s.presets.len(), 4);
-        // "Compress PNG" is the default (first) preset: PNG + lossy (TinyPNG-style).
+        // "Compress PNG" is the default (first) preset: PNG + lossy (libimagequant).
         assert_eq!(s.presets[0].name, "Compress PNG");
         assert_eq!(s.presets[0].job.format, OutputFormat::Png);
         assert_eq!(s.presets[0].job.png, PngOptimize::Lossy);

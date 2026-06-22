@@ -10,9 +10,9 @@ with Explorer context-menu integration. Built in Rust with a custom-framed
 
 ## Features
 
-- **Compress PNG** — TinyPNG-grade lossy compression via
-  [libimagequant](https://pngquant.org/lib/) (the pngquant/TinyPNG engine) with a
-  final [oxipng](https://github.com/shssoichiro/oxipng) pass, or fully **lossless**
+- **Compress PNG** — lossy compression via
+  [libimagequant](https://pngquant.org/lib/) (the pngquant engine) finished with an
+  [oxipng](https://github.com/shssoichiro/oxipng) pass, or fully **lossless**
   oxipng-only optimization. This is the default preset.
 - **Convert** between PNG, JPEG, WebP, BMP, TIFF, GIF (quality control for the
   lossy formats; the quality slider hides itself when it doesn't apply)
