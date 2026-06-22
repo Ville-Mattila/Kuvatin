@@ -78,7 +78,13 @@
             SummaryCodepage='1252'
             />
 
+        <!--
+          AllowSameVersionUpgrades makes the installer remove any existing
+          install (same OR lower version) before installing, so it always
+          replaces the old app rather than placing a second copy alongside it.
+        -->
         <MajorUpgrade
+            AllowSameVersionUpgrades='yes'
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
