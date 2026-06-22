@@ -108,7 +108,7 @@
   .eyebrow{color:var(--teal);font-weight:600;font-size:13px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:16px}
   .section-head h2{font-size:clamp(30px,5vw,54px);margin-bottom:18px}
   .features-head{text-align:center;padding:0 clamp(20px,4vw,48px)}
-  .features-title{display:inline-block;font-size:clamp(70px,15vw,240px);font-weight:700;letter-spacing:-.05em;margin:0;line-height:.92;
+  .features-title{display:inline-block;max-width:100%;font-size:clamp(60px,13vw,210px);font-weight:700;letter-spacing:-.05em;margin:0;line-height:.92;
     background:linear-gradient(135deg,#fff,var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent}
   .section-head p{color:var(--muted);font-size:17px;line-height:1.65}
 
@@ -549,8 +549,11 @@ cargo run <span class="c">-p</span> kuvatin</code>
         fw: f.offsetWidth, fh: f.offsetHeight, ctop: card.offsetTop
       };
     });
-    var d = "M " + (W/2).toFixed(1) + " 0";
-    d += " C " + (W/2).toFixed(1) + " " + (pts[0].y*0.5).toFixed(1) + ", " + pts[0].x.toFixed(1) + " " + (pts[0].y*0.5).toFixed(1) + ", " + pts[0].x.toFixed(1) + " " + pts[0].y.toFixed(1);
+    // Start with a short vertical drop straight into the first node's corner so
+    // the ball enters on the curve (no center-to-corner horizontal lead-in, which
+    // collapsed flat because the first card sits at the very top).
+    var d = "M " + pts[0].x.toFixed(1) + " " + Math.min(0, pts[0].y - 48).toFixed(1);
+    d += " L " + pts[0].x.toFixed(1) + " " + pts[0].y.toFixed(1);
     for(var i=1;i<pts.length;i++){
       var a=pts[i-1], b=pts[i], my=((a.y+b.y)/2).toFixed(1);
       d += " C " + a.x.toFixed(1) + " " + my + ", " + b.x.toFixed(1) + " " + my + ", " + b.x.toFixed(1) + " " + b.y.toFixed(1);
