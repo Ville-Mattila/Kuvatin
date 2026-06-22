@@ -569,6 +569,11 @@ cargo run <span class="c">-p</span> kuvatin</code>
   gsap.fromTo(traveler, { opacity:1 },
     { opacity:0, ease:"power3.in",
       scrollTrigger:{ trigger:featList, start:"bottom 80%", end:"bottom -45%", scrub:true } });
+  // soften it with a touch of blur as it grows (local blur is amplified by the scale)
+  ScrollTrigger.create({ trigger:featList, start:"bottom 80%", end:"bottom -45%", scrub:true,
+    onUpdate:function(self){
+      traveler.style.filter = "drop-shadow(0 0 16px #00d4bf) blur(" + (self.progress * 1.6).toFixed(2) + "px)";
+    }});
 
   // gentle sway through the lower sections (unchanged feel, smaller)
   var bt = { tx:0, tt:0, cx:0, ct:0 };
