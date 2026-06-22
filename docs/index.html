@@ -498,17 +498,17 @@ cargo run <span class="c">-p</span> kuvatin</code>
 
   /* ============ PHASE 1: pinned horizontal pan — travel LEFT, screenshot tilts in ============ */
   var introTl = gsap.timeline({
-    scrollTrigger:{ trigger:"#top", start:"top top", end:"+=185%", pin:true, scrub:1 }
+    defaults:{ duration:1, ease:"none" },
+    scrollTrigger:{ trigger:"#top", start:"top top", end:"+=240%", pin:true, scrub:1.2, anticipatePin:1 }
   });
-  // pan the 200vw stage left until the screenshot panel is centred
-  introTl.fromTo("#introStage", { xPercent:0 }, { xPercent:-50, ease:"none" }, 0)
-         // logo gently recedes as it leaves
-         .fromTo("#introLogo", { opacity:1 }, { opacity:0.25, ease:"power1.in" }, 0)
-         // the screenshot tilts into view as it arrives at centre
+  // pan + tilt run together over the whole pin so the motion is one smooth,
+  // continuous sweep instead of a pan then a separate snap-in.
+  introTl.fromTo("#introStage", { xPercent:0 }, { xPercent:-50 }, 0)
+         .fromTo("#introLogo", { opacity:1 }, { opacity:0.2, ease:"power1.in" }, 0)
          .fromTo("#shotFrame",
-            { rotateY:-48, rotateX:6, scale:.82, opacity:.25, transformPerspective:1600 },
-            { rotateY:0, rotateX:0, scale:1, opacity:1, ease:"power3.out" }, 0.34)
-         .to("#panhint", { opacity:0, duration:0.15 }, 0.06);
+            { rotateY:-40, rotateX:5, scale:.86, opacity:.4, transformPerspective:1600 },
+            { rotateY:0, rotateX:0, scale:1, opacity:1 }, 0)
+         .to("#panhint", { opacity:0, duration:0.2 }, 0);
 
   /* ============ PHASE 2: glowing path + travelling ball; cards tilt to face it ============ */
   var featList = document.getElementById("featList");
