@@ -234,14 +234,8 @@ export component AppWindow inherits Window {
             max-height: 36px;
             background: #16181d;
 
-            // Drag region across the whole bar; the buttons sit on top and
-            // consume their own clicks, so only the empty area drags.
-            TouchArea {
-                pointer-event(ev) => {
-                    if (ev.kind == PointerEventKind.down) { root.win-drag(); }
-                }
-            }
-
+            // Dragging is handled natively via WM_NCHITTEST (HTCAPTION) in the
+            // Win32 subclass; the window buttons stay clickable (HTCLIENT).
             HorizontalLayout {
                 padding-left: 14px;
                 spacing: 8px;

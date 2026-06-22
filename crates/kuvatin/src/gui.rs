@@ -615,12 +615,13 @@ mod win_drop {
     use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, SendMessageW, ShowWindow, HTBOTTOM,
-        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
         HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES, WM_NCLBUTTONDOWN,
     };
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
 
     /// Width of the invisible edge zone (in physical px) used for resize hit-testing.
     const RESIZE_BORDER: i32 = 6;
@@ -796,10 +797,21 @@ mod win_drop {
                 if let Some(code) = hit {
                     return LRESULT(code as isize);
                 }
+
+                // Title-bar band (excluding the right-side window buttons) acts
+                // as the caption, so Windows drags the window natively. This
+                // replaces firing WM_NCLBUTTONDOWN from inside Slint's pointer
+                // handler, which nested a modal move loop and broke client input.
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                let titlebar_h = (36.0 * scale) as i32;
+                let buttons_w = (3.0 * 46.0 * scale) as i32;
+                if pt.y < rc.top + titlebar_h && pt.x < rc.right - buttons_w {
+                    return LRESULT(HTCAPTION as isize);
+                }
             }
-            // Anywhere else is client area: Slint receives normal input, and the
-            // title-bar drag is initiated explicitly via win-drag()/SendMessage.
-            return LRESULT(HTCLIENT as isize);
+            // Everything else: let the default proc classify it (HTCLIENT, etc.)
+            // so winit/Slint receive normal mouse input.
+            return DefSubclassProc(hwnd, msg, wparam, lparam);
         }
         if msg == WM_DROPFILES {
             let hdrop = HDROP(wparam.0 as *mut std::ffi::c_void);
