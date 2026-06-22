@@ -71,7 +71,9 @@
   .btn-primary:hover{box-shadow:0 14px 44px -8px #00d4bfcc;transform:translateY(-1px)}
   .btn-ghost{border-color:var(--line);color:var(--ink);background:#ffffff08}
   .btn-ghost:hover{background:#ffffff12;border-color:#38414f}
-  .btn svg{width:16px;height:16px}
+  .btn svg{width:16px;height:16px;flex:none}
+  .dl-text{display:flex;flex-direction:column;align-items:flex-start;line-height:1.18;text-align:left}
+  .dl-file{font-family:"Space Grotesk",sans-serif;font-weight:500;font-size:11.5px;opacity:.72;letter-spacing:0}
 
   /* ============ INTRO (pinned horizontal pan) ============ */
   .intro{position:relative;height:100vh;overflow:hidden}
@@ -231,9 +233,9 @@
     <a href="#download">Download</a>
     <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">GitHub</a>
   </div>
-  <a class="btn btn-primary" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
+  <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-    Download
+    <span class="dl-main" data-vtmpl="Download {v}">Download</span>
   </a>
 </nav>
 
@@ -246,9 +248,9 @@
       <p class="hero-tag">Convert or/and shrink images <span class="accent">without</span> the busywork.</p>
       <p class="sub">A tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
+        <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-          Download the installer
+          <span class="dl-text"><span class="dl-main" data-vtmpl="Download Kuvatin {v}">Download the installer</span><span class="dl-file">latest .msi</span></span>
         </a>
         <a class="btn btn-ghost" href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 .1.8 1.7 2.6 1.2.1-.7.4-1.2.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
@@ -382,9 +384,9 @@
       <h2>Get Kuvatin</h2>
       <p>A single small <b style="color:var(--ink)">.msi</b> that adds a Start-menu shortcut, wires up the right-click menu, and upgrades any older version in place.</p>
       <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
+        <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-          Download latest .msi
+          <span class="dl-text"><span class="dl-main" data-vtmpl="Download Kuvatin {v}">Download latest .msi</span><span class="dl-file">latest .msi</span></span>
         </a>
         <a class="btn btn-ghost" href="https://github.com/Ville-Mattila/Kuvatin/releases" target="_blank" rel="noopener">All releases</a>
       </div>
@@ -638,6 +640,28 @@ cargo run <span class="c">-p</span> kuvatin</code>
     buildJourney(); computeBelowAmp(); ScrollTrigger.refresh();
   }, 200); });
   window.addEventListener("load", function(){ buildJourney(); computeBelowAmp(); ScrollTrigger.refresh(); });
+})();
+</script>
+<script>
+/* Point the download buttons straight at the latest release's .msi and show its
+   version + filename. Falls back to the releases page if the API is unreachable. */
+(function(){
+  fetch("https://api.github.com/repos/Ville-Mattila/Kuvatin/releases/latest", { headers:{ "Accept":"application/vnd.github+json" }})
+    .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function(rel){
+      var ver = (rel.tag_name || "").replace(/^v/i, "");
+      var asset = (rel.assets || []).filter(function(a){ return /\.msi$/i.test(a.name); })[0];
+      if(!ver || !asset){ return; }
+      document.querySelectorAll("a.dl").forEach(function(a){
+        a.href = asset.browser_download_url;
+        a.removeAttribute("target");
+        var main = a.querySelector(".dl-main");
+        if(main && main.dataset.vtmpl){ main.textContent = main.dataset.vtmpl.replace("{v}", ver); }
+        var file = a.querySelector(".dl-file");
+        if(file){ file.textContent = asset.name; }
+      });
+    })
+    .catch(function(){ /* keep the static releases/latest links */ });
 })();
 </script>
 </body>
