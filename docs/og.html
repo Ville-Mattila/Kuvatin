@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{--teal:#00d4bf;--ink:#eef2f7;--muted:#8b95a6}
+  html,body{width:1200px;height:630px;overflow:hidden}
+  .card{position:relative;width:1200px;height:630px;background:#0a0c10;
+    font-family:"Inter",system-ui,sans-serif;color:var(--ink);overflow:hidden}
+  /* faint hexagonal grid */
+  .grid{position:absolute;inset:0;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='49' viewBox='0 0 28 49'%3E%3Cg fill='%23ffffff' fill-opacity='0.03' fill-rule='evenodd'%3E%3Cpath d='M13.99 9.25l13 7.5v15l-13 7.5L1 31.75v-15l12.99-7.5zM3 17.9v12.7l10.99 6.34 11-6.35V17.9l-11-6.34L3 17.9zM0 15l12.98-7.5V0h-2v6.35L0 12.69v2.3zm0 18.5L12.98 41v8h-2v-6.85L0 35.81v-2.3zM15 0v7.5L27.99 15H28v-2.31h-.01L17 6.35V0h-2zm0 49v-8l12.99-7.5H28v2.31h-.01L17 42.15V49h-2z'/%3E%3C/g%3E%3C/svg%3E");
+    background-size:40px 70px;
+    -webkit-mask-image:radial-gradient(circle at 50% 38%,#000 0%,transparent 80%);
+    mask-image:radial-gradient(circle at 50% 38%,#000 0%,transparent 80%)}
+  .glow{position:absolute;border-radius:50%;filter:blur(120px)}
+  .glow.a{width:760px;height:760px;background:radial-gradient(circle,#00d4bf44,transparent 70%);top:-300px;left:-160px}
+  .glow.b{width:620px;height:620px;background:radial-gradient(circle,#1564ff26,transparent 70%);bottom:-280px;right:-140px}
+  .glow.c{width:520px;height:520px;background:radial-gradient(circle,#00d4bf30,transparent 70%);bottom:-220px;left:34%}
+  .inner{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 80px}
+  .pill{display:inline-flex;align-items:center;gap:11px;font-size:18px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--teal);background:#00d4bf14;border:1px solid #00d4bf33;padding:10px 22px;border-radius:999px;margin-bottom:42px}
+  .pill .dot{width:9px;height:9px;border-radius:50%;background:var(--teal);box-shadow:0 0 12px #00d4bf}
+  .logo{width:660px;height:auto;display:block;filter:drop-shadow(0 24px 70px #00d4bf33)}
+  .tag{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:40px;letter-spacing:-.02em;margin-top:40px}
+  .tag .accent{color:var(--teal)}
+  .feats{margin-top:30px;font-size:21px;color:var(--muted);font-weight:500;letter-spacing:.01em}
+  .feats b{color:var(--ink);font-weight:600}
+  .corner{position:absolute;left:54px;bottom:46px;display:flex;align-items:center;gap:16px}
+  .corner img{width:52px;height:52px;display:block}
+  .corner span{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:26px;color:var(--ink)}
+  .badge{position:absolute;right:54px;bottom:50px;font-family:"Space Grotesk",sans-serif;font-size:19px;color:var(--muted);letter-spacing:.04em}
+  .badge b{color:var(--teal)}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="grid"></div>
+  <div class="glow a"></div><div class="glow b"></div><div class="glow c"></div>
+  <div class="inner">
+    <span class="pill"><span class="dot"></span> Free &amp; open source · Windows · Rust</span>
+    <img class="logo" src="assets/kuvatin-logo.svg" alt="Kuvatin" />
+    <div class="tag">Shrink images <span class="accent">without</span> the busywork.</div>
+    <div class="feats"><b>Compress</b> · <b>Convert</b> · <b>Resize</b> · <b>Crop</b> · <b>Batch</b> — from the right-click menu</div>
+  </div>
+  <div class="corner"><img src="assets/kuvatin-icon.svg" alt="" /><span>Kuvatin</span></div>
+  <div class="badge"><b>GPL-3.0</b> · built in Rust</div>
+</div>
+</body>
+</html>
