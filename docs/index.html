@@ -97,14 +97,22 @@
   .section-head h2{font-size:clamp(30px,5vw,54px);margin-bottom:18px}
   .section-head p{color:var(--muted);font-size:17px;line-height:1.65}
 
-  /* ============ FEATURE SERPENTINE ============ */
-  .journey{position:relative;padding:120px 0 80px;overflow:hidden}
-  .feat-list{position:relative;max-width:1060px;margin:64px auto 0;padding:0 clamp(28px,5vw,56px);
-    display:flex;flex-direction:column;gap:clamp(60px,9vh,120px);will-change:transform}
-  .feat{position:relative;display:flex}
+  /* ============ FEATURE PATH (static cards, travelling ball) ============ */
+  .journey{position:relative;padding:120px 0 90px;overflow:hidden}
+  .feat-list{position:relative;max-width:1240px;margin:64px auto 0;padding:0 clamp(28px,5vw,56px);
+    display:flex;flex-direction:column;gap:clamp(80px,14vh,170px)}
+  .rail{position:absolute;inset:0 clamp(28px,5vw,56px);pointer-events:none;z-index:0}
+  .rail svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+  .rail-track{fill:none;stroke:#1c2430;stroke-width:2.5}
+  .rail-draw{fill:none;stroke:url(#tealgrad);stroke-width:4;stroke-linecap:round;filter:drop-shadow(0 0 10px #00d4bfaa)}
+  #traveler{filter:drop-shadow(0 0 16px #00d4bf)}
+  .feat{position:relative;display:flex;z-index:1}
   .feat.right{justify-content:flex-end}
   .feat.left{justify-content:flex-start}
-  .card{width:430px;max-width:82%;padding:28px 28px 26px;
+  .node{position:absolute;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;
+    background:var(--bg);border:2px solid var(--teal);box-shadow:0 0 0 6px #00d4bf1f,0 0 26px #00d4bf66;z-index:3}
+  .node::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--teal)}
+  .card{width:420px;max-width:80%;padding:28px 28px 26px;will-change:transform;transform-style:preserve-3d;
     background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);
     border-radius:18px;box-shadow:0 30px 70px -30px #000}
   .feat.right .card{text-align:right}
@@ -247,46 +255,55 @@
   <div class="wrap section-head reveal">
     <div class="eyebrow">The flow</div>
     <h2>One winding path,<br/>every image job.</h2>
-    <p>Follow the line as it slaloms down. Each turn is one thing Kuvatin does for whole folders at once — in parallel, without overwriting your originals.</p>
+    <p>Follow the glowing path as it winds down. Each stop is one thing Kuvatin does for whole folders at once — in parallel, without overwriting your originals.</p>
   </div>
 
   <div class="feat-list" id="featList">
-    <div class="feat right"><div class="card tilt">
+    <div class="rail" id="rail">
+      <svg id="railSvg" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="tealgrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#19e6cf"/><stop offset="1" stop-color="#00a896"/></linearGradient></defs>
+        <path class="rail-track" id="railTrack" d=""/>
+        <path class="rail-draw" id="railDraw" d="" pathLength="1"/>
+        <g id="traveler"><circle r="13" fill="#00d4bf"/><circle r="6" fill="#04201d"/><circle r="22" fill="none" stroke="#00d4bf" stroke-width="2" opacity="0.5"/></g>
+      </svg>
+    </div>
+    <div class="feat right"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m7.5 4.2 9 5.2M3.3 7 12 12l8.7-5M12 22V12"/></svg></span>
       <div class="step">STOP 01</div><h3>Compress PNG</h3>
       <p>The default. Lossy compression via libimagequant, finished with an oxipng pass — or go fully lossless. Big size drops, no visible loss.</p>
       <span class="tag">libimagequant + oxipng</span>
     </div></div>
 
-    <div class="feat left"><div class="card tilt">
+    <div class="feat left"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3m6 13H7l3 3"/></svg></span>
       <div class="step">STOP 02</div><h3>Convert</h3>
       <p>Move between PNG, JPEG, WebP, BMP, TIFF and GIF. The quality slider appears only for the formats that actually use it.</p>
       <span class="tag">6 formats</span>
     </div></div>
 
-    <div class="feat right"><div class="card tilt">
+    <div class="feat right"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></span>
       <div class="step">STOP 03</div><h3>Resize</h3>
       <p>By exact pixels, by percentage, or fit-to-box. Aspect-ratio aware with high-quality Lanczos3 resampling.</p>
       <span class="tag">Lanczos3</span>
     </div></div>
 
-    <div class="feat left"><div class="card tilt">
+    <div class="feat left"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/></svg></span>
       <div class="step">STOP 04</div><h3>Crop</h3>
       <p>Trim to a fixed size or aspect ratio with numeric width and height fields. Crop runs before resize for predictable output.</p>
       <span class="tag">numeric fields</span>
     </div></div>
 
-    <div class="feat right"><div class="card tilt">
+    <div class="feat right"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
       <div class="step">STOP 05</div><h3>Batch in parallel</h3>
       <p>Drop a whole folder or a multi-selection. Kuvatin runs every file across all your cores and saves next to the originals — never overwriting.</p>
       <span class="tag">rayon · multi-core</span>
     </div></div>
 
-    <div class="feat left"><div class="card tilt">
+    <div class="feat left"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18M3 12h18M3 19h18"/></svg></span>
       <div class="step">STOP 06</div><h3>Right-click presets</h3>
       <p>Reusable presets live in the Windows Explorer menu. Select images, right-click, pick a preset — done, no window needed.</p>
@@ -374,6 +391,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/MotionPathPlugin.min.js"></script>
 <script src="https://unpkg.com/lenis@1.1.13/dist/lenis.min.js"></script>
 <script>
 (function(){
@@ -389,7 +407,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
     if(!hasGSAP || reduce){ window.addEventListener("scroll", function(){ onScrollNav(window.scrollY); }); return; }
   }
 
-  gsap.registerPlugin(ScrollTrigger);
+  gsap.registerPlugin(ScrollTrigger, MotionPathPlugin);
 
   var lenis = new Lenis({ lerp:0.09, wheelMultiplier:1, smoothWheel:true });
   lenis.on("scroll", function(e){ ScrollTrigger.update(); onScrollNav(e.scroll); });
@@ -431,86 +449,88 @@ cargo run <span class="c">-p</span> kuvatin</code>
             { rotateY:0, rotateX:0, scale:1, opacity:1, ease:"power3.out" }, 0.34)
          .to("#panhint", { opacity:0, duration:0.15 }, 0.06);
 
-  /* ============ PHASE 2: the serpentine S ============ */
+  /* ============ PHASE 2: glowing path + travelling ball; cards tilt to face it ============ */
   var featList = document.getElementById("featList");
   var below = document.getElementById("below");
   var feats = gsap.utils.toArray(".feat");
-  var featTilt = gsap.utils.toArray(".feat .card");
+  var cards = gsap.utils.toArray(".feat .card");
   var belowTilt = gsap.utils.toArray("#below .tilt");
-  var setFeatX = gsap.quickSetter(featList, "x", "px");
   var setBelowX = gsap.quickSetter(below, "x", "px");
+  var TILT_MAX = 18;
+  function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
 
-  var A = 240;            // horizontal swing of the serpentine (px) — recomputed below
-  var stations = [];     // {p, x} the curve passes through, one per card
-  var TILT_MAX = 18, TILT_K = 0.0016;
-  var jt = { tx:0, tt:0, cx:0, ct:0 };   // journey x/tilt  (target/current)
-  var bt = { tx:0, tt:0, cx:0, ct:0 };   // below x/tilt
+  var rail = document.getElementById("rail");
+  var railSvg = document.getElementById("railSvg");
+  var railTrack = document.getElementById("railTrack");
+  var railDraw = document.getElementById("railDraw");
+  var traveler = document.getElementById("traveler");
 
-  // A = how far a side-aligned card sits from centre, so the swing lands it dead-centre.
-  function computeStations(){
-    var lc = featList.getBoundingClientRect();
-    var rc = document.querySelector(".feat.right .card");
-    if(rc){
-      var r = rc.getBoundingClientRect();
-      A = Math.abs((r.left + r.width/2) - (lc.left + lc.width/2));
-    }
-    A = Math.min(A, document.documentElement.clientWidth * 0.05, 95);  // subtle side-to-side hint of the S
-    var H = featList.offsetHeight || 1;
-    stations = feats.map(function(f){
-      var cy = f.offsetTop + f.offsetHeight/2;
-      var side = f.classList.contains("right") ? -1 : 1;   // right card centres when list moves left
-      return { p: cy / H, x: side * A };
+  // Build the S-spine that weaves between the cards' inner edges; pin nodes onto it.
+  function buildSpine(){
+    var W = rail.clientWidth, H = rail.clientHeight;
+    if(!W || !H){ return; }
+    railSvg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    var pts = feats.map(function(f){
+      var side = f.classList.contains("right") ? 1 : -1;
+      return { x: W/2 + side * (W * 0.27), y: f.offsetTop + f.offsetHeight/2, node: f.querySelector(".node") };
     });
-  }
-  computeStations();
-
-  // cosine-interpolated curve through the stations: flat (horizontal) AT each card,
-  // a full sweep across between them. Holds at the end stations beyond the range.
-  function serp(p){
-    if(!stations.length) return 0;
-    if(p <= stations[0].p) return stations[0].x;
-    var last = stations[stations.length-1];
-    if(p >= last.p) return last.x;
-    for(var i=0;i<stations.length-1;i++){
-      var a = stations[i], b = stations[i+1];
-      if(p >= a.p && p <= b.p){
-        var t = (p - a.p) / (b.p - a.p);
-        var e = (1 - Math.cos(t * Math.PI)) / 2;
-        return a.x + (b.x - a.x) * e;
-      }
+    var d = "M " + (W/2).toFixed(1) + " 0";
+    d += " C " + (W/2).toFixed(1) + " " + (pts[0].y*0.5).toFixed(1) + ", " + pts[0].x.toFixed(1) + " " + (pts[0].y*0.5).toFixed(1) + ", " + pts[0].x.toFixed(1) + " " + pts[0].y.toFixed(1);
+    for(var i=1;i<pts.length;i++){
+      var a=pts[i-1], b=pts[i], my=((a.y+b.y)/2).toFixed(1);
+      d += " C " + a.x.toFixed(1) + " " + my + ", " + b.x.toFixed(1) + " " + my + ", " + b.x.toFixed(1) + " " + b.y.toFixed(1);
     }
-    return last.x;
+    var last = pts[pts.length-1];
+    d += " C " + last.x.toFixed(1) + " " + ((last.y+H)/2).toFixed(1) + ", " + (W/2).toFixed(1) + " " + ((last.y+H)/2).toFixed(1) + ", " + (W/2).toFixed(1) + " " + H.toFixed(1);
+    railTrack.setAttribute("d", d); railDraw.setAttribute("d", d);
+    pts.forEach(function(p){ p.node.style.left = (p.x / W * 100) + "%"; });
   }
 
-  ScrollTrigger.create({
-    trigger: featList, start: "top center", end: "bottom center", scrub: true,
-    onUpdate: function(self){
-      var p = self.progress;
-      jt.tx = serp(p);
-      var slope = (serp(Math.min(1, p + 0.002)) - jt.tx) / 0.002;
-      jt.tt = TILT_MAX * Math.tanh(slope * TILT_K);
-    }
-  });
+  // (re)build the spine and the draw + ball-travel timeline together so resize is clean
+  var drawTL;
+  function buildJourney(){
+    buildSpine();
+    if(drawTL){ if(drawTL.scrollTrigger) drawTL.scrollTrigger.kill(); drawTL.kill(); }
+    gsap.set(railDraw, { strokeDasharray:1, strokeDashoffset:1 });
+    drawTL = gsap.timeline({ scrollTrigger:{ trigger:featList, start:"top 72%", end:"bottom 80%", scrub:0.6 }})
+      .to(railDraw, { strokeDashoffset:0, ease:"none" }, 0)
+      .to(traveler, { motionPath:{ path:railDraw, align:railDraw, alignOrigin:[0.5,0.5], start:0, end:1 }, ease:"none" }, 0);
+  }
+  buildJourney();
 
-  // gentle continuation of the curve through the lower sections
+  // gentle sway through the lower sections (unchanged feel, smaller)
+  var bt = { tx:0, tt:0, cx:0, ct:0 };
   var belowAmp = 0;
-  function computeBelowAmp(){ belowAmp = Math.min(document.documentElement.clientWidth * 0.05, 70); }
+  function computeBelowAmp(){ belowAmp = Math.min(document.documentElement.clientWidth * 0.04, 56); }
   computeBelowAmp();
   ScrollTrigger.create({
     trigger: below, start: "top bottom", end: "bottom bottom", scrub: true,
     onUpdate: function(self){
       var p = self.progress;
       bt.tx = -belowAmp * Math.sin(p * Math.PI * 2);
-      bt.tt = (TILT_MAX * 0.6) * Math.tanh((-belowAmp * Math.cos(p * Math.PI * 2) * Math.PI * 2) * 0.0016);
+      bt.tt = (TILT_MAX * 0.5) * Math.tanh((-belowAmp * Math.cos(p * Math.PI * 2) * Math.PI * 2) * 0.0016);
     }
   });
 
+  // every frame: each card turns to face the travelling ball (no sideways movement)
+  var curRX = [], curRY = [];
+  cards.forEach(function(){ curRX.push(0); curRY.push(0); });
   gsap.ticker.add(function(){
-    jt.cx += (jt.tx - jt.cx) * 0.1; jt.ct += (jt.tt - jt.ct) * 0.1;
-    setFeatX(jt.cx);
-    var jf = "perspective(1000px) rotateY(" + jt.ct.toFixed(2) + "deg)";
-    for(var i=0;i<featTilt.length;i++){ featTilt[i].style.transform = jf; }
-
+    var tr = traveler.getBoundingClientRect();
+    if(tr.width){
+      var bx = tr.left + tr.width/2, by = tr.top + tr.height/2;
+      for(var i=0;i<cards.length;i++){
+        var r = cards[i].getBoundingClientRect();          // centre is stable under centred rotation
+        var dx = bx - (r.left + r.width/2), dy = by - (r.top + r.height/2);
+        var dist = Math.hypot(dx, dy) + 1;
+        var strength = clamp(1 - (dist - 150) / 660, 0, 1); // only cards near the ball react
+        var tRY = clamp(dx / dist * 26, -19, 19) * strength;  // face it horizontally
+        var tRX = clamp(-dy / dist * 22, -16, 16) * strength; // nod toward it vertically
+        curRY[i] += (tRY - curRY[i]) * 0.12;
+        curRX[i] += (tRX - curRX[i]) * 0.12;
+        cards[i].style.transform = "perspective(1000px) rotateX(" + curRX[i].toFixed(2) + "deg) rotateY(" + curRY[i].toFixed(2) + "deg)";
+      }
+    }
     bt.cx += (bt.tx - bt.cx) * 0.1; bt.ct += (bt.tt - bt.ct) * 0.1;
     setBelowX(bt.cx);
     var bf = "perspective(1100px) rotateY(" + bt.ct.toFixed(2) + "deg)";
@@ -553,9 +573,9 @@ cargo run <span class="c">-p</span> kuvatin</code>
 
   var rt;
   window.addEventListener("resize", function(){ clearTimeout(rt); rt = setTimeout(function(){
-    computeStations(); computeBelowAmp(); ScrollTrigger.refresh();
+    buildJourney(); computeBelowAmp(); ScrollTrigger.refresh();
   }, 200); });
-  window.addEventListener("load", function(){ computeStations(); computeBelowAmp(); ScrollTrigger.refresh(); });
+  window.addEventListener("load", function(){ buildJourney(); computeBelowAmp(); ScrollTrigger.refresh(); });
 })();
 </script>
 </body>
