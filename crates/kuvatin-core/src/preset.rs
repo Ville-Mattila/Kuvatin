@@ -20,10 +20,12 @@ pub struct PresetStore {
 impl PresetStore {
     /// The presets shipped on first run.
     pub fn builtin() -> Self {
-        // Default preset: export PNG with lossless (oxipng) optimization.
-        let optimize_png = Job {
+        // Default preset: lossy PNG compression (libimagequant + oxipng final
+        // pass), tuned to approximate TinyPNG's default results. Uses quality.
+        let compress_png = Job {
             format: OutputFormat::Png,
-            png: PngOptimize::Lossless,
+            png: PngOptimize::Lossy,
+            quality: 80,
             ..Job::default()
         };
         let webp = Job { format: OutputFormat::Webp, quality: 80, ..Job::default() };
@@ -39,7 +41,7 @@ impl PresetStore {
         };
         PresetStore {
             presets: vec![
-                Preset { name: "Optimize PNG".into(), job: optimize_png },
+                Preset { name: "Compress PNG".into(), job: compress_png },
                 Preset { name: "Convert to WebP".into(), job: webp },
                 Preset { name: "Resize to 1080p".into(), job: p1080 },
                 Preset { name: "Resize to 50%".into(), job: half },
@@ -97,10 +99,10 @@ mod tests {
         let s = PresetStore::builtin();
         assert!(s.find("Convert to WebP").is_some());
         assert_eq!(s.presets.len(), 4);
-        // "Optimize PNG" is the default (first) preset: PNG + lossless.
-        assert_eq!(s.presets[0].name, "Optimize PNG");
+        // "Compress PNG" is the default (first) preset: PNG + lossy (TinyPNG-style).
+        assert_eq!(s.presets[0].name, "Compress PNG");
         assert_eq!(s.presets[0].job.format, OutputFormat::Png);
-        assert_eq!(s.presets[0].job.png, PngOptimize::Lossless);
+        assert_eq!(s.presets[0].job.png, PngOptimize::Lossy);
     }
 
     #[test]

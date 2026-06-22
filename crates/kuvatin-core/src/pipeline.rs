@@ -142,6 +142,8 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
         .collect();
 
     let mut liq = imagequant::new();
+    // Best quantization quality (slowest) — closest to TinyPNG/pngquant output.
+    liq.set_speed(1).map_err(|e| CoreError::Encode(e.to_string()))?;
     // Map our 0-100 quality to a (min, max) target window. Higher quality raises
     // the floor so the quantizer is allowed fewer color compromises.
     let qmax = quality.min(100);
