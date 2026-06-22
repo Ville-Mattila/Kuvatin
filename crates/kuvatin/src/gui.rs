@@ -1,7 +1,7 @@
 use crate::collect::collect_images;
 use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_jobs_to;
-use kuvatin_core::naming::ensure_unique;
+use kuvatin_core::naming::{ensure_unique, subfolder_name};
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::format::OutputFormat;
 use kuvatin_core::pipeline::{Job, PngOptimize};
@@ -46,6 +46,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 ui.set_format(format_combo_str(p.job.format).into());
                 ui.set_quality(p.job.quality as i32);
                 ui.set_png_mode(png_mode_to_idx(p.job.png));
+                ui.set_suffix(p.job.output.suffix.clone().into());
+                ui.set_save_subfolder(p.job.output.subfolder);
                 ui.set_preset_name(p.name.clone().into());
             }
         });
@@ -411,18 +413,21 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 })
                 .collect();
 
-            // Ask where to save. One file -> a Save dialog with the suffixed name
-            // pre-filled; several files -> a folder picker, then each output is
-            // `<stem><suffix>.<ext>` inside it. Cancelling either dialog aborts.
+            // Ask where to save. A single file with no subfolder -> a Save dialog
+            // with the suffixed name pre-filled. Otherwise -> a folder picker;
+            // when "save to a subfolder" is on, outputs nest into a folder named
+            // after the suffix. Each output is `<stem><suffix>.<ext>`, de-duplicated
+            // on collision. Cancelling either dialog aborts the run.
             let suffix = ui.get_suffix().to_string();
+            let subfolder = ui.get_save_subfolder();
             let ext = job.format.extension();
             let stem_of = |p: &std::path::Path| {
                 p.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string()
             };
-            let items_to: Vec<(PathBuf, Job, PathBuf)> = if items.len() == 1 {
+            let items_to: Vec<(PathBuf, Job, PathBuf)> = if items.len() == 1 && !subfolder {
                 let (input, j) = items[0].clone();
                 let mut dlg = rfd::FileDialog::new()
-                    .set_file_name(format!("{}{suffix}.{ext}", stem_of(&input)))
+                    .set_file_name(format!("{}{suffix}.{ext}", stem_of(input.as_path())))
                     .add_filter(ext, &[ext]);
                 if let Some(dir) = input.parent() {
                     dlg = dlg.set_directory(dir);
@@ -436,14 +441,19 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 if let Some(dir) = items[0].0.parent() {
                     dlg = dlg.set_directory(dir);
                 }
-                let folder = match dlg.pick_folder() {
+                let base = match dlg.pick_folder() {
                     Some(f) => f,
                     None => return,
+                };
+                let dir = if subfolder {
+                    base.join(subfolder_name(&suffix))
+                } else {
+                    base
                 };
                 items
                     .iter()
                     .map(|(input, j)| {
-                        let out = ensure_unique(folder.join(format!("{}{suffix}.{ext}", stem_of(input))));
+                        let out = ensure_unique(dir.join(format!("{}{suffix}.{ext}", stem_of(input.as_path()))));
                         (input.clone(), j.clone(), out)
                     })
                     .collect()
@@ -500,6 +510,8 @@ fn refresh_presets(ui: &AppWindow, store: &PresetStore, select: usize) {
         ui.set_format(format_combo_str(p.job.format).into());
         ui.set_quality(p.job.quality as i32);
         ui.set_png_mode(png_mode_to_idx(p.job.png));
+        ui.set_suffix(p.job.output.suffix.clone().into());
+        ui.set_save_subfolder(p.job.output.subfolder);
     }
 }
 
@@ -516,6 +528,8 @@ fn current_job(ui: &AppWindow, store: &PresetStore) -> Job {
     job.format = format_combo_to_format(&ui.get_format());
     job.quality = ui.get_quality().clamp(0, 100) as u8;
     job.png = png_mode_from(ui.get_png_mode());
+    job.output.suffix = ui.get_suffix().to_string();
+    job.output.subfolder = ui.get_save_subfolder();
     job
 }
 

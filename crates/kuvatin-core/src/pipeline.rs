@@ -187,16 +187,23 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
 
 /// Full single-file pipeline: decode -> process -> encode -> write. Returns the
 /// path written.
-pub fn process_file(input: &Path, job: &Job, preset_name: &str) -> CoreResult<PathBuf> {
+pub fn process_file(input: &Path, job: &Job, _preset_name: &str) -> CoreResult<PathBuf> {
     let img = image::open(input).map_err(|e| CoreError::Decode {
         path: input.to_path_buf(),
         source: e,
     })?;
-    let (out_img, w, h) = process_image(&img, job);
+    let (out_img, _w, _h) = process_image(&img, job);
     let bytes = encode(&out_img, job.format, job.quality, job.png)?;
-    let target = ensure_unique(render_output_path(
-        &job.output, input, job.format, w, h, preset_name,
-    ));
+    let target = ensure_unique(render_output_path(&job.output, input, job.format));
+    // The policy may point at a subfolder that doesn't exist yet.
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| CoreError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
     std::fs::write(&target, bytes).map_err(|e| CoreError::Io {
         path: target.clone(),
         source: e,

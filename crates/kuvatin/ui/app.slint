@@ -249,8 +249,10 @@ export component AppWindow inherits Window {
 
     // Default suffix appended to output file names (e.g. "photo-kuvatin.webp").
     // Seeds the Save dialog name for one file and is applied to every file when
-    // converting a batch into a chosen folder.
+    // converting a batch into a chosen folder. Saved with the preset.
     in-out property <string> suffix: "-kuvatin";
+    // When set, outputs go into a subfolder named after the suffix.
+    in-out property <bool> save-subfolder: false;
 
     // Custom window-frame controls (frameless window; wired to Win32 in gui.rs).
     callback win-minimize();
@@ -581,10 +583,9 @@ export component AppWindow inherits Window {
                             placeholder-text: "e.g. -kuvatin";
                             text <=> root.suffix;
                         }
-                        Text {
-                            text: "Added before the extension when saving";
-                            color: #9aa3b2;
-                            font-size: 11px;
+                        CheckBox {
+                            text: "Save to a subfolder (named after the suffix)";
+                            checked <=> root.save-subfolder;
                         }
                     }
 
