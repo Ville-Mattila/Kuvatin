@@ -201,10 +201,10 @@ export component AppWindow inherits Window {
     title: "Kuvatin";
     icon: @image-url("../assets/kuvatin-icon.png");
     no-frame: true;
-    preferred-width: 880px;
-    preferred-height: 560px;
-    min-width: 640px;
-    min-height: 440px;
+    preferred-width: 1320px;
+    preferred-height: 840px;
+    min-width: 760px;
+    min-height: 560px;
     background: #16181d;
 
     in property <[FileRow]> files;
@@ -326,11 +326,39 @@ export component AppWindow inherits Window {
                         // empty-state
                         if root.files.length == 0: VerticalLayout {
                             alignment: center;
-                            Text {
-                                text: "🖼";
-                                color: #2c313b;
-                                font-size: 40px;
-                                horizontal-alignment: center;
+                            spacing: 16px;
+
+                            // Minimalist line-art image glyph in the app accent:
+                            // a rounded frame with a sun and a mountain.
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 64px;
+                                    height: 64px;
+                                    border-radius: 14px;
+                                    border-width: 2px;
+                                    border-color: #2dd4bf;
+                                    background: transparent;
+                                    clip: true;
+                                    // sun
+                                    Rectangle {
+                                        width: 13px;
+                                        height: 13px;
+                                        border-radius: 7px;
+                                        x: 14px;
+                                        y: 14px;
+                                        background: #2dd4bf;
+                                    }
+                                    // mountains rising from the bottom edge
+                                    Path {
+                                        width: 64px;
+                                        height: 64px;
+                                        viewbox-width: 64;
+                                        viewbox-height: 64;
+                                        fill: #2dd4bf;
+                                        commands: "M0 64 L24 36 L37 49 L48 32 L64 52 L64 64 Z";
+                                    }
+                                }
                             }
                             Text {
                                 text: "Drop images here\nor click Add files…";
