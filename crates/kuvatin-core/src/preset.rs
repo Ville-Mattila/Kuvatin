@@ -1,5 +1,5 @@
 use crate::format::OutputFormat;
-use crate::pipeline::Job;
+use crate::pipeline::{Job, PngOptimize};
 use crate::resize::ResizeMode;
 use crate::{CoreError, CoreResult};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,12 @@ pub struct PresetStore {
 impl PresetStore {
     /// The presets shipped on first run.
     pub fn builtin() -> Self {
+        // Default preset: export PNG with lossless (oxipng) optimization.
+        let optimize_png = Job {
+            format: OutputFormat::Png,
+            png: PngOptimize::Lossless,
+            ..Job::default()
+        };
         let webp = Job { format: OutputFormat::Webp, quality: 80, ..Job::default() };
         let p1080 = Job {
             resize: ResizeMode::FitBox { width: 1920, height: 1080 },
@@ -33,6 +39,7 @@ impl PresetStore {
         };
         PresetStore {
             presets: vec![
+                Preset { name: "Optimize PNG".into(), job: optimize_png },
                 Preset { name: "Convert to WebP".into(), job: webp },
                 Preset { name: "Resize to 1080p".into(), job: p1080 },
                 Preset { name: "Resize to 50%".into(), job: half },
@@ -89,7 +96,11 @@ mod tests {
     fn builtins_present() {
         let s = PresetStore::builtin();
         assert!(s.find("Convert to WebP").is_some());
-        assert_eq!(s.presets.len(), 3);
+        assert_eq!(s.presets.len(), 4);
+        // "Optimize PNG" is the default (first) preset: PNG + lossless.
+        assert_eq!(s.presets[0].name, "Optimize PNG");
+        assert_eq!(s.presets[0].job.format, OutputFormat::Png);
+        assert_eq!(s.presets[0].job.png, PngOptimize::Lossless);
     }
 
     #[test]
