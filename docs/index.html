@@ -31,7 +31,7 @@
   h1,h2,h3{font-family:"Space Grotesk",sans-serif;font-weight:700;line-height:1.04;letter-spacing:-.02em}
   ::selection{background:var(--teal);color:#04201d}
 
-  /* ---------- fixed background ambience (never moves) ---------- */
+  /* fixed background ambience */
   .bg-fx{position:fixed;inset:0;z-index:-2;overflow:hidden;pointer-events:none}
   .glow{position:absolute;border-radius:50%;filter:blur(110px);opacity:.5}
   .glow.a{width:620px;height:620px;background:radial-gradient(circle,#00d4bf55,transparent 70%);top:-160px;left:-120px}
@@ -44,13 +44,9 @@
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
 
   .wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(28px,5vw,56px)}
-
-  /* ---------- the moving stage (weaves on an S as you scroll) ---------- */
-  #stage{position:relative;will-change:transform;transform-style:preserve-3d}
-  /* anything tagged .tilt banks toward the path each frame (JS-driven) */
   .tilt{will-change:transform;transform-style:preserve-3d;backface-visibility:hidden}
 
-  /* ---------- top nav ---------- */
+  /* nav */
   nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:center;justify-content:space-between;
     padding:18px 30px;transition:background .3s,backdrop-filter .3s,border-color .3s;border-bottom:1px solid transparent}
   nav.scrolled{background:#0a0c10cc;backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
@@ -67,56 +63,48 @@
   .btn-ghost:hover{background:#ffffff12;border-color:#38414f}
   .btn svg{width:16px;height:16px}
 
-  /* ---------- hero ---------- */
-  .hero{position:relative;min-height:100vh;display:flex;flex-direction:column;justify-content:center;
-    align-items:center;text-align:center;padding:140px clamp(28px,5vw,56px) 80px}
+  /* ============ INTRO (pinned horizontal pan) ============ */
+  .intro{position:relative;height:100vh;overflow:hidden}
+  .intro-stage{display:flex;width:200vw;height:100vh;will-change:transform}
+  .intro-panel{flex:0 0 100vw;width:100vw;height:100vh;display:flex;flex-direction:column;
+    justify-content:center;align-items:center;text-align:center;padding:120px clamp(28px,5vw,56px) 80px}
   .pill{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;letter-spacing:.02em;
     color:var(--teal);background:#00d4bf14;border:1px solid #00d4bf33;padding:7px 14px;border-radius:999px;margin-bottom:30px}
   .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 #00d4bf;animation:pulse 2.4s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 #00d4bf88}70%{box-shadow:0 0 0 9px #00d4bf00}100%{box-shadow:0 0 0 0 #00d4bf00}}
-  .hero h1{margin:0 0 26px;max-width:none}
-  .hero-logo{display:block;width:clamp(280px,56vw,740px);height:auto;
-    filter:drop-shadow(0 24px 70px #00d4bf2e)}
-  .hero-tag{font-family:"Space Grotesk",sans-serif;font-weight:600;
-    font-size:clamp(22px,3.4vw,40px);letter-spacing:-.02em;line-height:1.12;margin-bottom:22px}
+  .hero-logo{display:block;width:clamp(280px,56vw,760px);height:auto;filter:drop-shadow(0 24px 70px #00d4bf2e)}
+  .hero-tag{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:clamp(22px,3.4vw,40px);
+    letter-spacing:-.02em;line-height:1.12;margin:26px 0 22px}
   .hero-tag .accent{color:var(--teal)}
-  .hero .sub{font-size:clamp(16px,2vw,21px);color:var(--muted);max-width:60ch;line-height:1.6;margin-bottom:38px}
-  .hero .cta{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
-  .hero .cta .btn{padding:15px 26px;font-size:15.5px;border-radius:14px}
+  .sub{font-size:clamp(16px,2vw,21px);color:var(--muted);max-width:60ch;line-height:1.6;margin-bottom:34px}
+  .cta{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
+  .cta .btn{padding:15px 26px;font-size:15.5px;border-radius:14px}
   .meta-row{margin-top:26px;display:flex;gap:22px;flex-wrap:wrap;justify-content:center;color:var(--muted);font-size:13.5px}
   .meta-row b{color:var(--ink);font-weight:600}
-  .shot{position:relative;margin:70px auto 0;max-width:900px;width:100%}
-  .shot-frame{border-radius:16px;overflow:hidden;border:1px solid #2a323f;
-    box-shadow:0 50px 120px -30px #000,0 0 0 1px #ffffff08,0 0 90px -20px #00d4bf44}
+  .panhint{position:absolute;left:50%;bottom:38px;transform:translateX(-50%);display:flex;align-items:center;gap:12px;
+    color:var(--muted);font-size:12px;letter-spacing:.18em;text-transform:uppercase}
+  .panhint .arrow{width:46px;height:2px;background:linear-gradient(90deg,transparent,var(--teal));position:relative}
+  .panhint .arrow::after{content:"";position:absolute;right:0;top:-3px;width:8px;height:8px;border-top:2px solid var(--teal);border-right:2px solid var(--teal);transform:rotate(45deg)}
+  /* the screenshot that tilts into view */
+  .intro-shot{perspective:1600px}
+  .shot-frame{border-radius:16px;overflow:hidden;border:1px solid #2a323f;max-width:min(900px,86vw);will-change:transform;
+    box-shadow:0 50px 120px -30px #000,0 0 0 1px #ffffff08,0 0 90px -20px #00d4bf55}
   .shot-frame img{display:block;width:100%}
-  .shot::after{content:"";position:absolute;inset:auto 8% -28px 8%;height:60px;background:#00d4bf;filter:blur(60px);opacity:.4;z-index:-1}
-  .scrollcue{margin-top:60px;color:var(--muted);font-size:12px;letter-spacing:.18em;text-transform:uppercase;display:flex;flex-direction:column;align-items:center;gap:10px}
-  .scrollcue .mouse{width:24px;height:38px;border:2px solid #3a4350;border-radius:14px;position:relative}
-  .scrollcue .mouse::before{content:"";position:absolute;top:7px;left:50%;width:3px;height:7px;border-radius:2px;background:var(--teal);transform:translateX(-50%);animation:wheel 1.6s infinite}
-  @keyframes wheel{0%{opacity:0;transform:translate(-50%,0)}30%{opacity:1}100%{opacity:0;transform:translate(-50%,12px)}}
 
-  /* ---------- generic section ---------- */
+  /* generic section heads */
   .section-head{text-align:center;max-width:720px;margin:0 auto}
   .eyebrow{color:var(--teal);font-weight:600;font-size:13px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:16px}
   .section-head h2{font-size:clamp(30px,5vw,54px);margin-bottom:18px}
   .section-head p{color:var(--muted);font-size:17px;line-height:1.65}
 
-  /* ---------- the feature journey (alternating cards on the spine) ---------- */
-  .journey{position:relative;padding:120px 0 60px}
-  .feat-list{position:relative;max-width:1040px;margin:56px auto 0;padding:0 clamp(28px,5vw,56px);
-    display:flex;flex-direction:column;gap:120px}
-  .rail{position:absolute;inset:0 clamp(28px,5vw,56px);pointer-events:none;z-index:0}
-  .rail svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
-  .rail-track{fill:none;stroke:#1c2430;stroke-width:3}
-  .rail-draw{fill:none;stroke:url(#tealgrad);stroke-width:4;stroke-linecap:round;filter:drop-shadow(0 0 10px #00d4bfaa)}
-  #traveler{filter:drop-shadow(0 0 14px #00d4bf)}
-  .feat{position:relative;display:flex;z-index:1}
+  /* ============ FEATURE SERPENTINE ============ */
+  .journey{position:relative;padding:120px 0 80px;overflow:hidden}
+  .feat-list{position:relative;max-width:1240px;margin:64px auto 0;padding:0 clamp(28px,5vw,56px);
+    display:flex;flex-direction:column;gap:clamp(40px,6vh,96px);will-change:transform}
+  .feat{position:relative;display:flex}
   .feat.right{justify-content:flex-end}
   .feat.left{justify-content:flex-start}
-  .node{position:absolute;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;
-    background:var(--bg);border:2px solid var(--teal);box-shadow:0 0 0 6px #00d4bf1f,0 0 26px #00d4bf66;z-index:3}
-  .node::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--teal)}
-  .card{width:410px;max-width:76%;padding:28px 28px 26px;
+  .card{width:430px;max-width:82%;padding:28px 28px 26px;
     background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);
     border-radius:18px;box-shadow:0 30px 70px -30px #000}
   .feat.right .card{text-align:right}
@@ -130,8 +118,9 @@
   .card .tag{display:inline-block;margin-top:14px;font-size:12px;font-weight:600;color:var(--ink);
     background:#ffffff0c;border:1px solid var(--line);padding:5px 11px;border-radius:999px}
 
-  /* ---------- compression demo ---------- */
-  .demo{padding:140px 0}
+  /* ============ below the serpentine ============ */
+  #below{position:relative;will-change:transform}
+  .demo{padding:120px 0}
   .demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:50px;align-items:center;margin-top:60px}
   .bar-row{margin-bottom:26px}
   .bar-row .lab{display:flex;justify-content:space-between;font-size:14px;margin-bottom:9px;color:var(--muted)}
@@ -145,7 +134,6 @@
     background:linear-gradient(135deg,#fff,var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent}
   .savings .cap{color:var(--muted);font-family:"Inter";font-weight:500;font-size:17px;margin-top:18px;max-width:42ch;line-height:1.6}
 
-  /* ---------- right-click strip ---------- */
   .rclick{padding:40px 0 120px}
   .rcard{max-width:980px;margin:0 auto;background:linear-gradient(135deg,var(--panel),#0e1218);
     border:1px solid var(--line);border-radius:24px;padding:46px;display:grid;grid-template-columns:1.1fr .9fr;gap:40px;align-items:center;overflow:hidden;position:relative}
@@ -158,13 +146,12 @@
   .ctxmenu .item .k{width:18px;height:18px;color:var(--teal)}
   .ctxmenu .sep{height:1px;background:#2b3340;margin:6px 4px}
 
-  /* ---------- final CTA ---------- */
   .final{padding:120px 0 80px;text-align:center;position:relative}
   .final .iconbig{width:96px;height:96px;margin:0 auto 28px;border-radius:24px;overflow:hidden;box-shadow:0 0 0 1px #ffffff10,0 30px 70px -20px #00d4bf66}
   .final .iconbig img{width:100%;display:block}
   .final h2{font-size:clamp(36px,6vw,72px);margin-bottom:20px}
   .final p{color:var(--muted);font-size:18px;max-width:54ch;margin:0 auto 36px;line-height:1.6}
-  .final .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .final .cta{justify-content:center}
   .final .cta .btn{padding:16px 30px;font-size:16px}
   .install{margin:46px auto 0;max-width:560px;text-align:left;background:#0d1016;border:1px solid var(--line);border-radius:14px;
     font-family:"Space Grotesk";font-size:14px;color:#cdd5e0;overflow:hidden}
@@ -179,11 +166,8 @@
   footer a:hover{text-decoration-color:var(--teal)}
   footer .fbrand{height:22px;margin-bottom:14px;opacity:.85}
 
-  /* reveal helpers: .reveal moves+fades (no transform clash with tilt);
-     .fade only fades, safe to combine with .tilt */
   .reveal{opacity:0;transform:translateY(30px)}
   .fade{opacity:0}
-
   .progress{position:fixed;top:0;left:0;height:3px;width:100%;transform:scaleX(0);transform-origin:0 50%;
     background:linear-gradient(90deg,var(--teal),var(--teal-2));z-index:70;box-shadow:0 0 14px #00d4bf}
 
@@ -191,16 +175,20 @@
     nav .links{display:none}
     .demo-grid,.rcard{grid-template-columns:1fr;gap:30px}
     .rcard{padding:32px}
-    .feat-list{gap:46px}
-    .rail{display:none}
+    /* intro stacks vertically; no horizontal pan */
+    .intro{height:auto;overflow:visible}
+    .intro-stage{flex-direction:column;width:100%;height:auto;transform:none!important}
+    .intro-panel{flex:none;width:100%;height:auto;min-height:90vh}
+    .shot-frame{transform:none!important}
+    .panhint{display:none}
+    /* serpentine collapses to a clean stack */
+    .feat-list{gap:44px;transform:none!important}
     .feat{justify-content:stretch}
-    .node{display:none}
     .card{width:100%;max-width:none;text-align:left!important}
     .feat.right .card .ic{margin-left:0}
+    #below{transform:none!important}
   }
-  @media (prefers-reduced-motion:reduce){
-    .reveal,.fade{opacity:1;transform:none}
-  }
+  @media (prefers-reduced-motion:reduce){ .reveal,.fade{opacity:1;transform:none} }
 </style>
 </head>
 <body>
@@ -223,124 +211,91 @@
   </a>
 </nav>
 
-<div id="stage">
-<header class="hero" id="top">
-  <span class="pill"><span class="dot"></span> Free &amp; open source · Windows · Rust</span>
-  <h1><img class="hero-logo" src="assets/kuvatin-logo.svg" alt="Kuvatin" /></h1>
-  <p class="hero-tag">Shrink images <span class="accent">without</span> the busywork.</p>
-  <p class="sub">A tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
-  <div class="cta">
-    <a class="btn btn-primary" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-      Download the installer
-    </a>
-    <a class="btn btn-ghost" href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">
-      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 .1.8 1.7 2.6 1.2.1-.7.4-1.2.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
-      View source
-    </a>
+<!-- ================= INTRO: pan left, screenshot tilts in ================= -->
+<section class="intro" id="top">
+  <div class="intro-stage" id="introStage">
+    <div class="intro-panel" id="introLogo">
+      <span class="pill"><span class="dot"></span> Free &amp; open source · Windows · Rust</span>
+      <h1 style="margin:0"><img class="hero-logo" src="assets/kuvatin-logo.svg" alt="Kuvatin" /></h1>
+      <p class="hero-tag">Shrink images <span class="accent">without</span> the busywork.</p>
+      <p class="sub">A tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
+          Download the installer
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 .1.8 1.7 2.6 1.2.1-.7.4-1.2.7-1.5-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+          View source
+        </a>
+      </div>
+      <div class="meta-row">
+        <span><b>6</b> formats</span><span><b>1-click</b> right-click presets</span><span><b>GPL-3.0</b> licensed</span><span><b>~8&nbsp;MB</b> installer</span>
+      </div>
+    </div>
+    <div class="intro-panel intro-shot" id="introShot">
+      <div class="shot-frame" id="shotFrame"><img src="assets/app-window.png" alt="The Kuvatin app window" width="1320" height="840" /></div>
+    </div>
   </div>
-  <div class="meta-row">
-    <span><b>6</b> formats</span><span><b>1-click</b> right-click presets</span><span><b>GPL-3.0</b> licensed</span><span><b>~8&nbsp;MB</b> installer</span>
-  </div>
+  <div class="panhint" id="panhint"><span>Scroll</span><span class="arrow"></span></div>
+</section>
 
-  <div class="shot">
-    <div class="shot-frame tilt"><img src="assets/app-window.png" alt="The Kuvatin app window" width="1320" height="840" /></div>
-  </div>
+<div id="descentTop"></div>
 
-  <div class="scrollcue">
-    <span>Follow the path</span>
-    <span class="mouse"></span>
-  </div>
-</header>
-
-<!-- ================= FEATURE JOURNEY ================= -->
+<!-- ================= FEATURE SERPENTINE ================= -->
 <section class="journey" id="journey">
   <div class="wrap section-head reveal">
     <div class="eyebrow">The flow</div>
     <h2>One winding path,<br/>every image job.</h2>
-    <p>The page itself follows the line. Each turn is one thing Kuvatin does for whole folders at once — in parallel, without overwriting your originals.</p>
+    <p>Follow the line as it slaloms down. Each turn is one thing Kuvatin does for whole folders at once — in parallel, without overwriting your originals.</p>
   </div>
 
   <div class="feat-list" id="featList">
-    <div class="rail" id="rail">
-      <svg id="railSvg" preserveAspectRatio="none" aria-hidden="true">
-        <defs><linearGradient id="tealgrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stop-color="#19e6cf"/><stop offset="1" stop-color="#00a896"/>
-        </linearGradient></defs>
-        <path class="rail-track" id="railTrack" d=""/>
-        <path class="rail-draw" id="railDraw" d="" pathLength="1"/>
-        <g id="traveler"><circle r="12" fill="#00d4bf"/><circle r="5.5" fill="#04201d"/><circle r="20" fill="none" stroke="#00d4bf" stroke-width="2" opacity="0.5"/></g>
-      </svg>
-    </div>
+    <div class="feat right"><div class="card tilt">
+      <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m7.5 4.2 9 5.2M3.3 7 12 12l8.7-5M12 22V12"/></svg></span>
+      <div class="step">STOP 01</div><h3>Compress PNG</h3>
+      <p>The default. Lossy compression via libimagequant, finished with an oxipng pass — or go fully lossless. Big size drops, no visible loss.</p>
+      <span class="tag">libimagequant + oxipng</span>
+    </div></div>
 
-    <div class="feat right">
-      <span class="node"></span>
-      <div class="card tilt fade">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m7.5 4.2 9 5.2M3.3 7 12 12l8.7-5M12 22V12"/></svg></span>
-        <div class="step">STOP 01</div>
-        <h3>Compress PNG</h3>
-        <p>The default. Lossy compression via libimagequant, finished with an oxipng pass — or go fully lossless. Big size drops, no visible loss.</p>
-        <span class="tag">libimagequant + oxipng</span>
-      </div>
-    </div>
+    <div class="feat left"><div class="card tilt">
+      <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3m6 13H7l3 3"/></svg></span>
+      <div class="step">STOP 02</div><h3>Convert</h3>
+      <p>Move between PNG, JPEG, WebP, BMP, TIFF and GIF. The quality slider appears only for the formats that actually use it.</p>
+      <span class="tag">6 formats</span>
+    </div></div>
 
-    <div class="feat left">
-      <span class="node"></span>
-      <div class="card tilt fade">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3m6 13H7l3 3"/></svg></span>
-        <div class="step">STOP 02</div>
-        <h3>Convert</h3>
-        <p>Move between PNG, JPEG, WebP, BMP, TIFF and GIF. The quality slider appears only for the formats that actually use it.</p>
-        <span class="tag">6 formats</span>
-      </div>
-    </div>
+    <div class="feat right"><div class="card tilt">
+      <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></span>
+      <div class="step">STOP 03</div><h3>Resize</h3>
+      <p>By exact pixels, by percentage, or fit-to-box. Aspect-ratio aware with high-quality Lanczos3 resampling.</p>
+      <span class="tag">Lanczos3</span>
+    </div></div>
 
-    <div class="feat right">
-      <span class="node"></span>
-      <div class="card tilt fade">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></span>
-        <div class="step">STOP 03</div>
-        <h3>Resize</h3>
-        <p>By exact pixels, by percentage, or fit-to-box. Aspect-ratio aware with high-quality Lanczos3 resampling.</p>
-        <span class="tag">Lanczos3</span>
-      </div>
-    </div>
+    <div class="feat left"><div class="card tilt">
+      <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/></svg></span>
+      <div class="step">STOP 04</div><h3>Crop</h3>
+      <p>Trim to a fixed size or aspect ratio with numeric width and height fields. Crop runs before resize for predictable output.</p>
+      <span class="tag">numeric fields</span>
+    </div></div>
 
-    <div class="feat left">
-      <span class="node"></span>
-      <div class="card tilt fade">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/></svg></span>
-        <div class="step">STOP 04</div>
-        <h3>Crop</h3>
-        <p>Trim to a fixed size or aspect ratio with numeric width and height fields. Crop runs before resize for predictable output.</p>
-        <span class="tag">numeric fields</span>
-      </div>
-    </div>
+    <div class="feat right"><div class="card tilt">
+      <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
+      <div class="step">STOP 05</div><h3>Batch in parallel</h3>
+      <p>Drop a whole folder or a multi-selection. Kuvatin runs every file across all your cores and saves next to the originals — never overwriting.</p>
+      <span class="tag">rayon · multi-core</span>
+    </div></div>
 
-    <div class="feat right">
-      <span class="node"></span>
-      <div class="card tilt fade">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
-        <div class="step">STOP 05</div>
-        <h3>Batch in parallel</h3>
-        <p>Drop a whole folder or a multi-selection. Kuvatin runs every file across all your cores and saves next to the originals — never overwriting.</p>
-        <span class="tag">rayon · multi-core</span>
-      </div>
-    </div>
-
-    <div class="feat left">
-      <span class="node"></span>
-      <div class="card tilt fade">
-        <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18M3 12h18M3 19h18"/></svg></span>
-        <div class="step">STOP 06</div>
-        <h3>Right-click presets</h3>
-        <p>Reusable presets live in the Windows Explorer menu. Select images, right-click, pick a preset — done, no window needed.</p>
-        <span class="tag">Explorer integration</span>
-      </div>
-    </div>
+    <div class="feat left"><div class="card tilt">
+      <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18M3 12h18M3 19h18"/></svg></span>
+      <div class="step">STOP 06</div><h3>Right-click presets</h3>
+      <p>Reusable presets live in the Windows Explorer menu. Select images, right-click, pick a preset — done, no window needed.</p>
+      <span class="tag">Explorer integration</span>
+    </div></div>
   </div>
 </section>
 
+<div id="below">
 <!-- ================= COMPRESSION DEMO ================= -->
 <section class="demo" id="demo">
   <div class="wrap">
@@ -351,14 +306,8 @@
     </div>
     <div class="demo-grid">
       <div class="tilt fade">
-        <div class="bar-row">
-          <div class="lab"><span>Original PNG</span><b id="beforeKb">2.41 MB</b></div>
-          <div class="bar before"><i></i></div>
-        </div>
-        <div class="bar-row">
-          <div class="lab"><span>After Kuvatin</span><b id="afterKb">0.47 MB</b></div>
-          <div class="bar after"><i id="afterBar"></i></div>
-        </div>
+        <div class="bar-row"><div class="lab"><span>Original PNG</span><b>2.41 MB</b></div><div class="bar before"><i></i></div></div>
+        <div class="bar-row"><div class="lab"><span>After Kuvatin</span><b>0.47 MB</b></div><div class="bar after"><i id="afterBar"></i></div></div>
       </div>
       <div class="savings tilt fade">
         <span class="big"><span id="pct">0</span>%</span>
@@ -421,29 +370,27 @@ cargo run <span class="c">-p</span> kuvatin</code>
   <p>Built in Rust with <a href="https://slint.dev" target="_blank" rel="noopener">Slint</a> · compression by <a href="https://pngquant.org/lib/" target="_blank" rel="noopener">libimagequant</a> &amp; <a href="https://github.com/shssoichiro/oxipng" target="_blank" rel="noopener">oxipng</a> · <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">source on GitHub</a> · GPL-3.0</p>
   <p style="margin-top:10px;opacity:.6">Kuvatin — from Finnish <i>kuva</i>, “image.”</p>
 </footer>
-</div><!-- /#stage -->
+</div><!-- /#below -->
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/MotionPathPlugin.min.js"></script>
 <script src="https://unpkg.com/lenis@1.1.13/dist/lenis.min.js"></script>
 <script>
 (function(){
   "use strict";
   var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   var hasGSAP = typeof gsap !== "undefined";
+  var MOBILE = window.matchMedia("(max-width:860px)").matches;
   var nav = document.getElementById("nav");
   function onScrollNav(y){ nav.classList.toggle("scrolled", y > 30); }
 
-  if(!hasGSAP || reduce){
+  if(!hasGSAP || reduce || MOBILE){
     document.querySelectorAll(".reveal,.fade").forEach(function(el){ el.style.opacity=1; el.style.transform="none"; });
-    window.addEventListener("scroll", function(){ onScrollNav(window.scrollY); });
-    return;
+    if(!hasGSAP || reduce){ window.addEventListener("scroll", function(){ onScrollNav(window.scrollY); }); return; }
   }
 
-  gsap.registerPlugin(ScrollTrigger, MotionPathPlugin);
+  gsap.registerPlugin(ScrollTrigger);
 
-  /* ---- Lenis smooth scroll, wired to GSAP ---- */
   var lenis = new Lenis({ lerp:0.09, wheelMultiplier:1, smoothWheel:true });
   lenis.on("scroll", function(e){ ScrollTrigger.update(); onScrollNav(e.scroll); });
   gsap.ticker.add(function(t){ lenis.raf(t*1000); });
@@ -456,144 +403,143 @@ cargo run <span class="c">-p</span> kuvatin</code>
     });
   });
 
-  /* ---- progress bar ---- */
   gsap.to("#progress", { scaleX:1, ease:"none", scrollTrigger:{ start:0, end:"max", scrub:0.3 } });
 
-  /* ================= GLOBAL S-WEAVE + PSEUDO-3D TILT ================= */
-  /* The whole #stage slides horizontally on a sine wave as you scroll —
-     it moves LEFT first — and every .tilt block banks toward the path. */
-  var stage = document.getElementById("stage");
-  var tiltEls = gsap.utils.toArray(".tilt");
-  var setX = gsap.quickSetter(stage, "x", "px");
-  var WAVES = 2;            // left-right bends after the intro
-  var TILT_MAX = 17;        // degrees of pseudo-3D bank at full tilt
-  var TILT_K = 0.0011;      // how sharply slope maps to tilt (tanh)
-  var target = { x:0, t:0 }, cur = { x:0, t:0 };
-  var ampVal = 0;          // horizontal travel (px), self-limited so nothing clips
-  var hFrac = 0.12;        // share of scroll spent travelling straight left
+  /* intro content entrance (plays once on load) */
+  gsap.timeline({ defaults:{ ease:"power3.out" }})
+    .from(".pill", { y:20, opacity:0, duration:.6 })
+    .from(".hero-logo", { y:34, opacity:0, scale:.9, duration:1.0 }, "-=.2")
+    .from(".hero-tag", { y:22, opacity:0, duration:.6 }, "-=.55")
+    .from(".sub", { y:22, opacity:0, duration:.6 }, "-=.4")
+    .from(".cta", { y:22, opacity:0, duration:.55 }, "-=.4")
+    .from(".meta-row", { y:18, opacity:0, duration:.5 }, "-=.35")
+    .from(".panhint", { opacity:0, duration:.6 }, "-=.2");
 
-  // amplitude is as big as it can be without pushing any edge-sensitive block
-  // off-screen; hFrac is the first window-length of scroll (the straight-left run).
-  function computeGeom(){
-    var vw = document.documentElement.clientWidth;
-    var want = Math.min(vw * 0.15, 320);
-    var sel = document.querySelectorAll(".card,.section-head,.hero-tag,.hero-logo,.hero .sub,.shot,.rcard,.demo-grid,.savings,.install,.meta-row,.ctxmenu");
-    var minM = Infinity;
-    sel.forEach(function(e){
-      var r = e.getBoundingClientRect();
-      if(r.width){ minM = Math.min(minM, r.left - cur.x, vw - (r.right - cur.x)); }
+  if(MOBILE){ return; }   // no pin / no serpentine on small screens
+
+  /* ============ PHASE 1: pinned horizontal pan — travel LEFT, screenshot tilts in ============ */
+  var introTl = gsap.timeline({
+    scrollTrigger:{ trigger:"#top", start:"top top", end:"+=185%", pin:true, scrub:1 }
+  });
+  // pan the 200vw stage left until the screenshot panel is centred
+  introTl.fromTo("#introStage", { xPercent:0 }, { xPercent:-50, ease:"none" }, 0)
+         // logo gently recedes as it leaves
+         .fromTo("#introLogo", { opacity:1 }, { opacity:0.25, ease:"power1.in" }, 0)
+         // the screenshot tilts into view as it arrives at centre
+         .fromTo("#shotFrame",
+            { rotateY:-48, rotateX:6, scale:.82, opacity:.25, transformPerspective:1600 },
+            { rotateY:0, rotateX:0, scale:1, opacity:1, ease:"power3.out" }, 0.34)
+         .to("#panhint", { opacity:0, duration:0.15 }, 0.06);
+
+  /* ============ PHASE 2: the serpentine S ============ */
+  var featList = document.getElementById("featList");
+  var below = document.getElementById("below");
+  var feats = gsap.utils.toArray(".feat");
+  var featTilt = gsap.utils.toArray(".feat .card");
+  var belowTilt = gsap.utils.toArray("#below .tilt");
+  var setFeatX = gsap.quickSetter(featList, "x", "px");
+  var setBelowX = gsap.quickSetter(below, "x", "px");
+
+  var A = 240;            // horizontal swing of the serpentine (px) — recomputed below
+  var stations = [];     // {p, x} the curve passes through, one per card
+  var TILT_MAX = 18, TILT_K = 0.0016;
+  var jt = { tx:0, tt:0, cx:0, ct:0 };   // journey x/tilt  (target/current)
+  var bt = { tx:0, tt:0, cx:0, ct:0 };   // below x/tilt
+
+  // A = how far a side-aligned card sits from centre, so the swing lands it dead-centre.
+  function computeStations(){
+    var lc = featList.getBoundingClientRect();
+    var rc = document.querySelector(".feat.right .card");
+    if(rc){
+      var r = rc.getBoundingClientRect();
+      A = Math.abs((r.left + r.width/2) - (lc.left + lc.width/2));
+    }
+    var H = featList.offsetHeight || 1;
+    stations = feats.map(function(f){
+      var cy = f.offsetTop + f.offsetHeight/2;
+      var side = f.classList.contains("right") ? -1 : 1;   // right card centres when list moves left
+      return { p: cy / H, x: side * A };
     });
-    if(!isFinite(minM)) minM = want;
-    ampVal = Math.max(0, Math.min(want, minM - 18));
-    var total = document.body.scrollHeight - window.innerHeight;
-    hFrac = total > 0 ? Math.min(0.4, Math.max(0.06, window.innerHeight / total)) : 0.12;
   }
-  computeGeom();
+  computeStations();
 
-  // Horizontal offset as a function of scroll progress p:
-  //   p in [0, hFrac]  -> ramp straight LEFT to -ampVal (the first window length)
-  //   p in (hFrac, 1]  -> weave, picking up from the far-left position
-  function fx(p){
-    if(p <= hFrac){ var t = p / hFrac; return -ampVal * (1 - (1 - t) * (1 - t)); }
-    var q = (p - hFrac) / (1 - hFrac);
-    var x = -ampVal * Math.cos(q * Math.PI * 2 * WAVES);
-    if(p > 0.86){ x *= Math.max(0, (1 - p) / 0.14); }  // settle back to centre for the CTA/footer
-    return x;
+  // cosine-interpolated curve through the stations: flat (horizontal) AT each card,
+  // a full sweep across between them. Holds at the end stations beyond the range.
+  function serp(p){
+    if(!stations.length) return 0;
+    if(p <= stations[0].p) return stations[0].x;
+    var last = stations[stations.length-1];
+    if(p >= last.p) return last.x;
+    for(var i=0;i<stations.length-1;i++){
+      var a = stations[i], b = stations[i+1];
+      if(p >= a.p && p <= b.p){
+        var t = (p - a.p) / (b.p - a.p);
+        var e = (1 - Math.cos(t * Math.PI)) / 2;
+        return a.x + (b.x - a.x) * e;
+      }
+    }
+    return last.x;
   }
 
   ScrollTrigger.create({
-    trigger: document.body, start: "top top", end: "bottom bottom", scrub: true,
+    trigger: featList, start: "top center", end: "bottom center", scrub: true,
     onUpdate: function(self){
       var p = self.progress;
-      var x0 = fx(p), x1 = fx(Math.min(1, p + 0.0015));
-      target.x = x0;
-      var slope = (x1 - x0) / 0.0015;               // px per unit progress
-      target.t = TILT_MAX * Math.tanh(slope * TILT_K);  // bank toward travel direction
+      jt.tx = serp(p);
+      var slope = (serp(Math.min(1, p + 0.002)) - jt.tx) / 0.002;
+      jt.tt = TILT_MAX * Math.tanh(slope * TILT_K);
     }
   });
-  gsap.ticker.add(function(){
-    cur.x += (target.x - cur.x) * 0.085;
-    cur.t += (target.t - cur.t) * 0.085;
-    setX(cur.x);
-    var tf = "perspective(1000px) rotateY(" + cur.t.toFixed(2) + "deg)";
-    for(var i=0;i<tiltEls.length;i++){ tiltEls[i].style.transform = tf; }
+
+  // gentle continuation of the curve through the lower sections
+  var belowAmp = 0;
+  function computeBelowAmp(){ belowAmp = Math.min(document.documentElement.clientWidth * 0.05, 70); }
+  computeBelowAmp();
+  ScrollTrigger.create({
+    trigger: below, start: "top bottom", end: "bottom bottom", scrub: true,
+    onUpdate: function(self){
+      var p = self.progress;
+      bt.tx = -belowAmp * Math.sin(p * Math.PI * 2);
+      bt.tt = (TILT_MAX * 0.6) * Math.tanh((-belowAmp * Math.cos(p * Math.PI * 2) * Math.PI * 2) * 0.0016);
+    }
   });
 
-  /* ================= hero intro ================= */
-  var tl = gsap.timeline({ defaults:{ ease:"power3.out" }});
-  tl.from(".pill", { y:20, opacity:0, duration:.6 })
-    .from(".hero-logo", { y:34, opacity:0, scale:.9, duration:1.0, ease:"power3.out" }, "-=.2")
-    .from(".hero-tag", { y:22, opacity:0, duration:.6 }, "-=.55")
-    .from(".hero .sub", { y:24, opacity:0, duration:.7 }, "-=.4")
-    .from(".hero .cta", { y:24, opacity:0, duration:.6 }, "-=.45")
-    .from(".meta-row", { y:20, opacity:0, duration:.6 }, "-=.4")
-    .from(".shot", { y:60, opacity:0, scale:.96, duration:1.0 }, "-=.4")
-    .from(".scrollcue", { opacity:0, duration:.6 }, "-=.3");
+  gsap.ticker.add(function(){
+    jt.cx += (jt.tx - jt.cx) * 0.1; jt.ct += (jt.tt - jt.ct) * 0.1;
+    setFeatX(jt.cx);
+    var jf = "perspective(1000px) rotateY(" + jt.ct.toFixed(2) + "deg)";
+    for(var i=0;i<featTilt.length;i++){ featTilt[i].style.transform = jf; }
 
-  /* ================= reveals ================= */
+    bt.cx += (bt.tx - bt.cx) * 0.1; bt.ct += (bt.tt - bt.ct) * 0.1;
+    setBelowX(bt.cx);
+    var bf = "perspective(1100px) rotateY(" + bt.ct.toFixed(2) + "deg)";
+    for(var k=0;k<belowTilt.length;k++){ belowTilt[k].style.transform = bf; }
+  });
+
+  /* card reveal as each enters */
+  feats.forEach(function(f){
+    var card = f.querySelector(".card");
+    gsap.set(card, { opacity:0 });
+    ScrollTrigger.create({ trigger:f, start:"top 82%",
+      onEnter:function(){ gsap.to(card, { opacity:1, duration:.7, ease:"power2.out" }); },
+      onLeaveBack:function(){ gsap.to(card, { opacity:0, duration:.3 }); }
+    });
+  });
+
+  /* reveals + fades */
   gsap.utils.toArray(".reveal").forEach(function(el){
-    if(el.closest(".hero")) return;
-    gsap.to(el, { opacity:1, y:0, duration:.9, ease:"power3.out", scrollTrigger:{ trigger:el, start:"top 86%" }});
+    gsap.to(el, { opacity:1, y:0, duration:.9, ease:"power3.out", scrollTrigger:{ trigger:el, start:"top 88%" }});
   });
   gsap.utils.toArray(".fade").forEach(function(el){
-    gsap.to(el, { opacity:1, duration:1.0, ease:"power2.out", scrollTrigger:{ trigger:el, start:"top 88%" }});
+    gsap.to(el, { opacity:1, duration:1.0, ease:"power2.out", scrollTrigger:{ trigger:el, start:"top 90%" }});
   });
 
-  /* ================= build the spine through the feature cards ================= */
-  var svg = document.getElementById("railSvg");
-  var track = document.getElementById("railTrack");
-  var draw = document.getElementById("railDraw");
-  var list = document.getElementById("featList");
-  var rail = document.getElementById("rail");
-  var feats = gsap.utils.toArray(".feat");
-  var BENDS = 3;            // humps in the spine (an elongated serpentine S)
-
-  function buildSpine(){
-    if(!list || window.innerWidth <= 860){ return; }
-    var W = rail.clientWidth, H = rail.clientHeight;
-    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
-    var cx = W/2, A = Math.min(W*0.40, 340);
-    var d = "M " + cx.toFixed(1) + " 0";
-    var steps = 90;
-    for(var i=1;i<=steps;i++){
-      var y = H*i/steps;
-      var x = cx + A*Math.sin(i/steps*Math.PI*BENDS);
-      d += " L " + x.toFixed(1) + " " + y.toFixed(1);
-    }
-    track.setAttribute("d", d); draw.setAttribute("d", d);
-    // place a node on the spine at each card's vertical centre
-    feats.forEach(function(f){
-      var node = f.querySelector(".node"); if(!node) return;
-      var cy = f.offsetTop + f.offsetHeight/2;       // relative to feat-list
-      var x = cx + A*Math.sin((cy/H)*Math.PI*BENDS);
-      node.style.left = (x / W * 100) + "%";
-    });
-  }
-  buildSpine();
-
-  if(list && window.innerWidth > 860){
-    gsap.set(draw, { strokeDasharray:1, strokeDashoffset:1 });
-    var jtl = gsap.timeline({ scrollTrigger:{ trigger:list, start:"top 72%", end:"bottom 78%", scrub:0.6 }});
-    jtl.to(draw, { strokeDashoffset:0, ease:"none" }, 0)
-       .to("#traveler", { motionPath:{ path:"#railDraw", align:"#railDraw", alignOrigin:[0.5,0.5], start:0, end:1 }, ease:"none" }, 0);
-
-    feats.forEach(function(f){
-      var node = f.querySelector(".node");
-      gsap.set(node, { scale:0, transformOrigin:"50% 50%" });
-      ScrollTrigger.create({ trigger:f, start:"top 80%",
-        onEnter:function(){ gsap.to(node, { scale:1, duration:.5, ease:"back.out(2)" }); },
-        onLeaveBack:function(){ gsap.to(node, { scale:0, duration:.3 }); }
-      });
-    });
-  }
-
-  /* ================= compression demo counters ================= */
+  /* compression demo counters */
   var demo = document.getElementById("demo");
   if(demo){
     var afterBar = document.getElementById("afterBar");
     var pctEl = document.getElementById("pct");
-    var beforeMB = 2.41, afterMB = 0.47;
-    var pctTarget = Math.round((1 - afterMB/beforeMB)*100);
+    var beforeMB = 2.41, afterMB = 0.47, pctTarget = Math.round((1 - afterMB/beforeMB)*100);
     gsap.set(afterBar, { scaleX:1, transformOrigin:"0 50%" });
     ScrollTrigger.create({ trigger:demo, start:"top 65%", once:true,
       onEnter:function(){
@@ -604,10 +550,11 @@ cargo run <span class="c">-p</span> kuvatin</code>
     });
   }
 
-  /* rebuild spine + refresh on resize / load */
   var rt;
-  window.addEventListener("resize", function(){ clearTimeout(rt); rt = setTimeout(function(){ buildSpine(); computeGeom(); ScrollTrigger.refresh(); }, 200); });
-  window.addEventListener("load", function(){ buildSpine(); computeGeom(); ScrollTrigger.refresh(); });
+  window.addEventListener("resize", function(){ clearTimeout(rt); rt = setTimeout(function(){
+    computeStations(); computeBelowAmp(); ScrollTrigger.refresh();
+  }, 200); });
+  window.addEventListener("load", function(){ computeStations(); computeBelowAmp(); ScrollTrigger.refresh(); });
 })();
 </script>
 </body>
