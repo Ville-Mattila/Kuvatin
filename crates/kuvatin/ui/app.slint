@@ -148,20 +148,50 @@ component CropHandle inherits Rectangle {
     }
 }
 
-// A window-control button for the custom title bar (minimize/maximize/close).
+// A window-control button for the custom title bar. The icon is drawn as a
+// vector shape (not a font glyph) so it stays crisp: kind = "min" | "max" | "close".
 component WinButton inherits Rectangle {
-    in property <string> glyph;
+    in property <string> kind;
     in property <bool> danger: false;
     callback clicked();
     width: 46px;
     background: ta.has-hover ? (root.danger ? #e23b3b : #2c313b) : transparent;
-    Text {
-        text: root.glyph;
-        color: ta.has-hover && root.danger ? #f2f4f8 : #9aa3b2;
-        font-size: 13px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    property <color> ink: ta.has-hover && root.danger ? #ffffff : #c8ccd4;
+
+    // Minimize: a single horizontal line.
+    if root.kind == "min": Rectangle {
+        width: 11px;
+        height: 1px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: root.ink;
     }
+    // Maximize: a square outline.
+    if root.kind == "max": Rectangle {
+        width: 10px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-width: 1px;
+        border-color: root.ink;
+        background: transparent;
+    }
+    // Close: an X drawn as two diagonal strokes.
+    if root.kind == "close": Path {
+        width: 11px;
+        height: 11px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        stroke: root.ink;
+        stroke-width: 1.2px;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        MoveTo { x: 0; y: 0; }
+        LineTo { x: 100; y: 100; }
+        MoveTo { x: 100; y: 0; }
+        LineTo { x: 0; y: 100; }
+    }
+
     ta := TouchArea {
         clicked => { root.clicked(); }
     }
@@ -256,9 +286,9 @@ export component AppWindow inherits Window {
 
                 Rectangle { horizontal-stretch: 1; }
 
-                WinButton { glyph: "—"; clicked => { root.win-minimize(); } }
-                WinButton { glyph: "❐"; clicked => { root.win-maximize(); } }
-                WinButton { glyph: "✕"; danger: true; clicked => { root.win-close(); } }
+                WinButton { kind: "min"; clicked => { root.win-minimize(); } }
+                WinButton { kind: "max"; clicked => { root.win-maximize(); } }
+                WinButton { kind: "close"; danger: true; clicked => { root.win-close(); } }
             }
         }
 
