@@ -1,4 +1,4 @@
-use crate::pipeline::{process_file, Job};
+use crate::pipeline::{process_file, process_file_to, Job};
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,6 +46,27 @@ where
         .par_iter()
         .map(|(input, job)| {
             let outcome = process_file(input, job, preset_name).map_err(|e| e.to_string());
+            let result = FileResult { input: input.clone(), outcome };
+            let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+            on_progress(Progress { done: n, total, last: result.clone() });
+            result
+        })
+        .collect()
+}
+
+/// Like [`run_jobs`], but each item also carries the exact output path to write
+/// to (e.g. a user-chosen save location or a per-file path inside a chosen
+/// output folder). Same parallelism and failure-isolation semantics.
+pub fn run_jobs_to<F>(items: &[(PathBuf, Job, PathBuf)], on_progress: F) -> Vec<FileResult>
+where
+    F: Fn(Progress) + Sync,
+{
+    let total = items.len();
+    let done = AtomicUsize::new(0);
+    items
+        .par_iter()
+        .map(|(input, job, output)| {
+            let outcome = process_file_to(input, job, output).map_err(|e| e.to_string());
             let result = FileResult { input: input.clone(), outcome };
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
             on_progress(Progress { done: n, total, last: result.clone() });

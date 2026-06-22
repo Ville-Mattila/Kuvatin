@@ -1,6 +1,7 @@
 use crate::collect::collect_images;
 use anyhow::{anyhow, Result};
-use kuvatin_core::batch::run_jobs;
+use kuvatin_core::batch::run_jobs_to;
+use kuvatin_core::naming::ensure_unique;
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::format::OutputFormat;
 use kuvatin_core::pipeline::{Job, PngOptimize};
@@ -395,8 +396,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 };
             }
 
-            let preset_name = preset.name.clone();
-
             // Build a per-file job list: files with a stored crop get a
             // CropMode::Rect override; the rest use the base job unchanged. Clone
             // the crop data out now so we don't hold the lock across the thread.
@@ -412,15 +411,53 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 })
                 .collect();
 
+            // Ask where to save. One file -> a Save dialog with the suffixed name
+            // pre-filled; several files -> a folder picker, then each output is
+            // `<stem><suffix>.<ext>` inside it. Cancelling either dialog aborts.
+            let suffix = ui.get_suffix().to_string();
+            let ext = job.format.extension();
+            let stem_of = |p: &std::path::Path| {
+                p.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string()
+            };
+            let items_to: Vec<(PathBuf, Job, PathBuf)> = if items.len() == 1 {
+                let (input, j) = items[0].clone();
+                let mut dlg = rfd::FileDialog::new()
+                    .set_file_name(format!("{}{suffix}.{ext}", stem_of(&input)))
+                    .add_filter(ext, &[ext]);
+                if let Some(dir) = input.parent() {
+                    dlg = dlg.set_directory(dir);
+                }
+                match dlg.save_file() {
+                    Some(out) => vec![(input, j, out)],
+                    None => return,
+                }
+            } else {
+                let mut dlg = rfd::FileDialog::new();
+                if let Some(dir) = items[0].0.parent() {
+                    dlg = dlg.set_directory(dir);
+                }
+                let folder = match dlg.pick_folder() {
+                    Some(f) => f,
+                    None => return,
+                };
+                items
+                    .iter()
+                    .map(|(input, j)| {
+                        let out = ensure_unique(folder.join(format!("{}{suffix}.{ext}", stem_of(input))));
+                        (input.clone(), j.clone(), out)
+                    })
+                    .collect()
+            };
+
             ui.set_running(true);
             ui.set_progress(0.0);
 
             let ui_weak2 = ui_weak.clone();
-            let total = inputs.len();
+            let total = items_to.len();
+            let rows_paths = inputs.clone();
             std::thread::spawn(move || {
                 let ui_for_progress = ui_weak2.clone();
-                let rows_paths = inputs.clone();
-                run_jobs(&items, &preset_name, move |p| {
+                run_jobs_to(&items_to, move |p| {
                     let frac = p.done as f32 / total as f32;
                     let idx = rows_paths.iter().position(|x| *x == p.last.input);
                     let ok = p.last.outcome.is_ok();

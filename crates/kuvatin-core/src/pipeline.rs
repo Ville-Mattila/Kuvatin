@@ -204,6 +204,32 @@ pub fn process_file(input: &Path, job: &Job, preset_name: &str) -> CoreResult<Pa
     Ok(target)
 }
 
+/// Like [`process_file`], but writes to an explicit `output` path (creating any
+/// missing parent directories) instead of deriving one from the input and the
+/// job's [`OutputPolicy`]. Used by the GUI when the user picks a save location
+/// or an output folder. Overwrites `output` if it already exists.
+pub fn process_file_to(input: &Path, job: &Job, output: &Path) -> CoreResult<PathBuf> {
+    let img = image::open(input).map_err(|e| CoreError::Decode {
+        path: input.to_path_buf(),
+        source: e,
+    })?;
+    let (out_img, _w, _h) = process_image(&img, job);
+    let bytes = encode(&out_img, job.format, job.quality, job.png)?;
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| CoreError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
+    std::fs::write(output, &bytes).map_err(|e| CoreError::Io {
+        path: output.to_path_buf(),
+        source: e,
+    })?;
+    Ok(output.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -247,6 +247,11 @@ export component AppWindow inherits Window {
     in-out property <int> res-h: 0;
     in-out property <bool> res-lock: true;
 
+    // Default suffix appended to output file names (e.g. "photo-kuvatin.webp").
+    // Seeds the Save dialog name for one file and is applied to every file when
+    // converting a batch into a chosen folder.
+    in-out property <string> suffix: "-kuvatin";
+
     // Custom window-frame controls (frameless window; wired to Win32 in gui.rs).
     callback win-minimize();
     callback win-maximize();
@@ -564,6 +569,20 @@ export component AppWindow inherits Window {
                         }
                         Text {
                             text: "0 = keep preset size";
+                            color: #9aa3b2;
+                            font-size: 11px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "FILE NAME SUFFIX"; }
+                        LineEdit {
+                            placeholder-text: "e.g. -kuvatin";
+                            text <=> root.suffix;
+                        }
+                        Text {
+                            text: "Added before the extension when saving";
                             color: #9aa3b2;
                             font-size: 11px;
                         }
