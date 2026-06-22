@@ -199,6 +199,7 @@ component WinButton inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "Kuvatin";
+    icon: @image-url("../assets/kuvatin-icon.png");
     no-frame: true;
     preferred-width: 880px;
     preferred-height: 560px;
@@ -269,9 +270,15 @@ export component AppWindow inherits Window {
             // Dragging is handled natively via WM_NCHITTEST (HTCAPTION) in the
             // Win32 subclass; the window buttons stay clickable (HTCLIENT).
             HorizontalLayout {
-                padding-left: 14px;
+                padding-left: 12px;
                 spacing: 8px;
 
+                Image {
+                    source: @image-url("../assets/kuvatin-icon.png");
+                    width: 20px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                }
                 Text {
                     text: "Kuvatin";
                     color: #f2f4f8;
