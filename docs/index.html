@@ -101,7 +101,7 @@
   .section-head p{color:var(--muted);font-size:17px;line-height:1.65}
 
   /* ============ FEATURE PATH (static cards, travelling ball) ============ */
-  .journey{position:relative;padding:120px 0 90px;overflow:hidden}
+  .journey{position:relative;padding:120px 0 90px;overflow:visible}
   .feat-list{position:relative;max-width:1240px;margin:64px auto 0;padding:0 clamp(28px,5vw,56px);
     display:flex;flex-direction:column;gap:clamp(80px,14vh,170px)}
   .rail{position:absolute;inset:0 clamp(28px,5vw,56px);pointer-events:none;z-index:0}
@@ -503,6 +503,13 @@ cargo run <span class="c">-p</span> kuvatin</code>
       .to(traveler, { motionPath:{ path:railDraw, align:railDraw, alignOrigin:[0.5,0.5], start:0, end:1 }, ease:"none" }, 0);
   }
   buildJourney();
+
+  // once the ball reaches the path end, scrolling on balloons it into the
+  // background (×20) and fades it out — a zoom-through into the next section
+  gsap.fromTo(traveler,
+    { scale:1, opacity:1 },
+    { scale:20, opacity:0, ease:"power2.in", transformOrigin:"50% 50%",
+      scrollTrigger:{ trigger:featList, start:"bottom 80%", end:"bottom top", scrub:true } });
 
   // gentle sway through the lower sections (unchanged feel, smaller)
   var bt = { tx:0, tt:0, cx:0, ct:0 };
