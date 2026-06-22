@@ -634,6 +634,7 @@ mod win_drop {
     use windows::Win32::UI::Shell::{
         DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
     };
+    use windows::Win32::System::Ole::RevokeDragDrop;
     use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, SendMessageW, ShowWindow, HTBOTTOM,
@@ -747,6 +748,12 @@ mod win_drop {
         // SAFETY: hwnd is a valid window handle obtained from the shown window,
         // and we run on the UI/event-loop thread that owns it.
         unsafe {
+            // Slint's winit backend registers its own OLE drop target on the
+            // window (RegisterDragDrop). While that's in place our DragAcceptFiles
+            // call silently fails (RegisterDragDrop returns ALREADYREGISTERED), so
+            // WM_DROPFILES never arrives. Revoke winit's target first, then claim
+            // the window for the classic shell drag-drop that posts WM_DROPFILES.
+            let _ = RevokeDragDrop(hwnd);
             DragAcceptFiles(hwnd, true);
             // Subclass id 1, no per-instance refdata (we use a global inbox).
             if SetWindowSubclass(hwnd, Some(subclass_proc), 1, 0).as_bool() {
