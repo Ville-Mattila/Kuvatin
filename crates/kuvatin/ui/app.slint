@@ -483,7 +483,10 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    VerticalLayout {
+                    // Quality only applies to lossy outputs: JPEG, WebP, and PNG
+                    // in "Compress (lossy)" mode (png-mode == 2).
+                    if root.format == "jpeg" || root.format == "webp"
+                        || (root.format == "png" && root.png-mode == 2): VerticalLayout {
                         spacing: 6px;
                         FieldLabel { text: "QUALITY (\{root.quality})"; }
                         QualitySlider {
