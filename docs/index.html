@@ -54,8 +54,9 @@
   nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:center;justify-content:space-between;
     padding:18px 30px;transition:background .3s,backdrop-filter .3s,border-color .3s;border-bottom:1px solid transparent}
   nav.scrolled{background:#0a0c10cc;backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-  nav .brand{height:26px;display:flex;align-items:center}
-  nav .brand img{height:26px}
+  nav .brand{display:flex;align-items:center;gap:10px}
+  nav .brand img{height:28px;width:28px}
+  nav .brand span{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:18px;letter-spacing:-.01em;color:var(--ink)}
   nav .links{display:flex;gap:26px;align-items:center;font-size:14px;color:var(--muted);font-weight:500}
   nav .links a:hover{color:var(--ink)}
   .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-family:"Space Grotesk",sans-serif;
@@ -73,16 +74,18 @@
     color:var(--teal);background:#00d4bf14;border:1px solid #00d4bf33;padding:7px 14px;border-radius:999px;margin-bottom:30px}
   .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 #00d4bf;animation:pulse 2.4s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 #00d4bf88}70%{box-shadow:0 0 0 9px #00d4bf00}100%{box-shadow:0 0 0 0 #00d4bf00}}
-  .hero h1{font-size:clamp(42px,8.2vw,98px);max-width:14ch;margin-bottom:24px}
-  .hero h1 .word{display:inline-block;overflow:hidden;vertical-align:top}
-  .hero h1 .char{display:inline-block;will-change:transform}
-  .hero h1 .accent{color:var(--teal)}
+  .hero h1{margin:0 0 26px;max-width:none}
+  .hero-logo{display:block;width:clamp(280px,56vw,740px);height:auto;
+    filter:drop-shadow(0 24px 70px #00d4bf2e)}
+  .hero-tag{font-family:"Space Grotesk",sans-serif;font-weight:600;
+    font-size:clamp(22px,3.4vw,40px);letter-spacing:-.02em;line-height:1.12;margin-bottom:22px}
+  .hero-tag .accent{color:var(--teal)}
   .hero .sub{font-size:clamp(16px,2vw,21px);color:var(--muted);max-width:60ch;line-height:1.6;margin-bottom:38px}
   .hero .cta{display:flex;gap:14px;flex-wrap:wrap;justify-content:center}
   .hero .cta .btn{padding:15px 26px;font-size:15.5px;border-radius:14px}
   .meta-row{margin-top:26px;display:flex;gap:22px;flex-wrap:wrap;justify-content:center;color:var(--muted);font-size:13.5px}
   .meta-row b{color:var(--ink);font-weight:600}
-  .shot{position:relative;margin:70px auto 0;max-width:980px;width:100%}
+  .shot{position:relative;margin:70px auto 0;max-width:900px;width:100%}
   .shot-frame{border-radius:16px;overflow:hidden;border:1px solid #2a323f;
     box-shadow:0 50px 120px -30px #000,0 0 0 1px #ffffff08,0 0 90px -20px #00d4bf44}
   .shot-frame img{display:block;width:100%}
@@ -207,7 +210,7 @@
 <div class="progress" id="progress"></div>
 
 <nav id="nav">
-  <a class="brand" href="#top"><img src="assets/kuvatin-logo.svg" alt="Kuvatin" /></a>
+  <a class="brand" href="#top"><img src="assets/kuvatin-icon.svg" alt="" /><span>Kuvatin</span></a>
   <div class="links">
     <a href="#journey">How it works</a>
     <a href="#demo">Compression</a>
@@ -223,8 +226,9 @@
 <div id="stage">
 <header class="hero" id="top">
   <span class="pill"><span class="dot"></span> Free &amp; open source · Windows · Rust</span>
-  <h1 id="headline">Shrink images <span class="accent">without</span> the busywork.</h1>
-  <p class="sub">Kuvatin is a tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
+  <h1><img class="hero-logo" src="assets/kuvatin-logo.svg" alt="Kuvatin" /></h1>
+  <p class="hero-tag">Shrink images <span class="accent">without</span> the busywork.</p>
+  <p class="sub">A tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
   <div class="cta">
     <a class="btn btn-primary" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
@@ -431,26 +435,6 @@ cargo run <span class="c">-p</span> kuvatin</code>
   var nav = document.getElementById("nav");
   function onScrollNav(y){ nav.classList.toggle("scrolled", y > 30); }
 
-  /* split the headline into animatable chars */
-  (function splitHeadline(){
-    var h = document.getElementById("headline"); if(!h) return;
-    var nodes = Array.prototype.slice.call(h.childNodes); h.innerHTML = "";
-    nodes.forEach(function(node){
-      var isAccent = node.nodeType === 1 && node.classList && node.classList.contains("accent");
-      var words = node.textContent.split(/(\s+)/);
-      words.forEach(function(w){
-        if(w.trim() === ""){ h.appendChild(document.createTextNode(w)); return; }
-        var word = document.createElement("span"); word.className = "word";
-        for(var i=0;i<w.length;i++){
-          var c = document.createElement("span");
-          c.className = "char" + (isAccent ? " accent" : ""); c.textContent = w[i];
-          word.appendChild(c);
-        }
-        h.appendChild(word);
-      });
-    });
-  })();
-
   if(!hasGSAP || reduce){
     document.querySelectorAll(".reveal,.fade").forEach(function(el){ el.style.opacity=1; el.style.transform="none"; });
     window.addEventListener("scroll", function(){ onScrollNav(window.scrollY); });
@@ -481,46 +465,65 @@ cargo run <span class="c">-p</span> kuvatin</code>
   var stage = document.getElementById("stage");
   var tiltEls = gsap.utils.toArray(".tilt");
   var setX = gsap.quickSetter(stage, "x", "px");
-  var WAVES = 3;            // number of left-right bends down the page
-  var TILT_MAX = 7;         // degrees
+  var WAVES = 2;            // left-right bends after the intro
+  var TILT_MAX = 17;        // degrees of pseudo-3D bank at full tilt
+  var TILT_K = 0.0011;      // how sharply slope maps to tilt (tanh)
   var target = { x:0, t:0 }, cur = { x:0, t:0 };
-  var ampVal = 0;
-  // The weave amplitude is self-limiting: it never exceeds the smallest gap
-  // between an edge-sensitive block and the viewport edge, so nothing clips.
-  function computeAmp(){
+  var ampVal = 0;          // horizontal travel (px), self-limited so nothing clips
+  var hFrac = 0.12;        // share of scroll spent travelling straight left
+
+  // amplitude is as big as it can be without pushing any edge-sensitive block
+  // off-screen; hFrac is the first window-length of scroll (the straight-left run).
+  function computeGeom(){
     var vw = document.documentElement.clientWidth;
-    var want = Math.min(vw * 0.05, 80);
-    var sel = document.querySelectorAll(".card,.section-head,.hero .sub,.shot,.rcard,.demo-grid,.savings,.install,.meta-row,.ctxmenu");
+    var want = Math.min(vw * 0.15, 320);
+    var sel = document.querySelectorAll(".card,.section-head,.hero-tag,.hero-logo,.hero .sub,.shot,.rcard,.demo-grid,.savings,.install,.meta-row,.ctxmenu");
     var minM = Infinity;
     sel.forEach(function(e){
       var r = e.getBoundingClientRect();
       if(r.width){ minM = Math.min(minM, r.left - cur.x, vw - (r.right - cur.x)); }
     });
     if(!isFinite(minM)) minM = want;
-    ampVal = Math.max(0, Math.min(want, minM - 12));
+    ampVal = Math.max(0, Math.min(want, minM - 18));
+    var total = document.body.scrollHeight - window.innerHeight;
+    hFrac = total > 0 ? Math.min(0.4, Math.max(0.06, window.innerHeight / total)) : 0.12;
   }
-  computeAmp();
+  computeGeom();
+
+  // Horizontal offset as a function of scroll progress p:
+  //   p in [0, hFrac]  -> ramp straight LEFT to -ampVal (the first window length)
+  //   p in (hFrac, 1]  -> weave, picking up from the far-left position
+  function fx(p){
+    if(p <= hFrac){ var t = p / hFrac; return -ampVal * (1 - (1 - t) * (1 - t)); }
+    var q = (p - hFrac) / (1 - hFrac);
+    var x = -ampVal * Math.cos(q * Math.PI * 2 * WAVES);
+    if(p > 0.86){ x *= Math.max(0, (1 - p) / 0.14); }  // settle back to centre for the CTA/footer
+    return x;
+  }
 
   ScrollTrigger.create({
     trigger: document.body, start: "top top", end: "bottom bottom", scrub: true,
     onUpdate: function(self){
-      var phase = self.progress * Math.PI * 2 * WAVES;
-      target.x = -Math.sin(phase) * ampVal;         // negative slope at start => left first
-      target.t = -Math.cos(phase) * TILT_MAX;       // bank toward the direction of travel
+      var p = self.progress;
+      var x0 = fx(p), x1 = fx(Math.min(1, p + 0.0015));
+      target.x = x0;
+      var slope = (x1 - x0) / 0.0015;               // px per unit progress
+      target.t = TILT_MAX * Math.tanh(slope * TILT_K);  // bank toward travel direction
     }
   });
   gsap.ticker.add(function(){
-    cur.x += (target.x - cur.x) * 0.08;
-    cur.t += (target.t - cur.t) * 0.08;
+    cur.x += (target.x - cur.x) * 0.085;
+    cur.t += (target.t - cur.t) * 0.085;
     setX(cur.x);
-    var tf = "perspective(1100px) rotateY(" + cur.t.toFixed(2) + "deg)";
+    var tf = "perspective(1000px) rotateY(" + cur.t.toFixed(2) + "deg)";
     for(var i=0;i<tiltEls.length;i++){ tiltEls[i].style.transform = tf; }
   });
 
   /* ================= hero intro ================= */
   var tl = gsap.timeline({ defaults:{ ease:"power3.out" }});
   tl.from(".pill", { y:20, opacity:0, duration:.6 })
-    .from(".char", { yPercent:120, opacity:0, stagger:0.018, duration:.7 }, "-=.2")
+    .from(".hero-logo", { y:34, opacity:0, scale:.9, duration:1.0, ease:"power3.out" }, "-=.2")
+    .from(".hero-tag", { y:22, opacity:0, duration:.6 }, "-=.55")
     .from(".hero .sub", { y:24, opacity:0, duration:.7 }, "-=.4")
     .from(".hero .cta", { y:24, opacity:0, duration:.6 }, "-=.45")
     .from(".meta-row", { y:20, opacity:0, duration:.6 }, "-=.4")
@@ -549,7 +552,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
     if(!list || window.innerWidth <= 860){ return; }
     var W = rail.clientWidth, H = rail.clientHeight;
     svg.setAttribute("viewBox", "0 0 " + W + " " + H);
-    var cx = W/2, A = Math.min(W*0.30, 240);
+    var cx = W/2, A = Math.min(W*0.40, 340);
     var d = "M " + cx.toFixed(1) + " 0";
     var steps = 90;
     for(var i=1;i<=steps;i++){
@@ -603,8 +606,8 @@ cargo run <span class="c">-p</span> kuvatin</code>
 
   /* rebuild spine + refresh on resize / load */
   var rt;
-  window.addEventListener("resize", function(){ clearTimeout(rt); rt = setTimeout(function(){ buildSpine(); computeAmp(); ScrollTrigger.refresh(); }, 200); });
-  window.addEventListener("load", function(){ buildSpine(); computeAmp(); ScrollTrigger.refresh(); });
+  window.addEventListener("resize", function(){ clearTimeout(rt); rt = setTimeout(function(){ buildSpine(); computeGeom(); ScrollTrigger.refresh(); }, 200); });
+  window.addEventListener("load", function(){ buildSpine(); computeGeom(); ScrollTrigger.refresh(); });
 })();
 </script>
 </body>
