@@ -503,11 +503,14 @@ cargo run <span class="c">-p</span> kuvatin</code>
   });
   // pan + tilt run together over the whole pin so the motion is one smooth,
   // continuous sweep instead of a pan then a separate snap-in.
-  introTl.fromTo("#introStage", { xPercent:0 }, { xPercent:-50 }, 0)
+  introTl.fromTo("#introStage", { xPercent:0 }, { xPercent:-50, ease:"sine.out" }, 0)
+         // round the corner: as the horizontal pan eases out, drift upward (begin the
+         // downward scroll) so the motion arcs from sideways into down, not a hard 90°
+         .fromTo("#introStage", { yPercent:0 }, { yPercent:-24, ease:"sine.in" }, 0)
          .fromTo("#introLogo", { opacity:1 }, { opacity:0.2, ease:"power1.in" }, 0)
          .fromTo("#shotFrame",
             { rotateY:-40, rotateX:5, scale:.86, opacity:.4, transformPerspective:1600 },
-            { rotateY:0, rotateX:0, scale:1, opacity:1 }, 0)
+            { rotateY:0, rotateX:0, scale:1, opacity:1, ease:"sine.out" }, 0)
          .to("#panhint", { opacity:0, duration:0.2 }, 0);
 
   /* ============ PHASE 2: glowing path + travelling ball; cards tilt to face it ============ */
