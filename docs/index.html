@@ -97,7 +97,7 @@
   .panhint .arrow::after{content:"";position:absolute;right:0;top:-3px;width:8px;height:8px;border-top:2px solid var(--teal);border-right:2px solid var(--teal);transform:rotate(45deg)}
   /* the screenshot that tilts into view */
   .intro-shot{perspective:1600px}
-  .shot-frame{border-radius:16px;overflow:hidden;border:1px solid #2a323f;width:min(960px,88vw);will-change:transform;
+  .shot-frame{position:relative;left:-5vw;top:5vh;border-radius:16px;overflow:hidden;border:1px solid #2a323f;width:min(960px,88vw);will-change:transform;
     box-shadow:0 50px 120px -30px #000,0 0 0 1px #ffffff08,0 0 90px -20px #00d4bf55}
   .shot-frame img{display:block;width:100%;height:auto;aspect-ratio:1320/840}
 
@@ -203,7 +203,7 @@
     .intro{height:auto;overflow:visible}
     .intro-stage{flex-direction:column;width:100%;height:auto;transform:none!important}
     .intro-panel{flex:none;width:100%;height:auto;min-height:90vh}
-    .shot-frame{transform:none!important}
+    .shot-frame{transform:none!important;left:0;top:0}
     .panhint{display:none}
     /* cards collapse to a clean full-width stack; path/ball are desktop-only */
     .rail{display:none}
