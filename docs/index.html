@@ -113,8 +113,11 @@
   .feat.right{justify-content:flex-end}
   .feat.left{justify-content:flex-start}
   .node{position:absolute;top:50%;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;
-    background:var(--bg);border:2px solid var(--teal);box-shadow:0 0 0 6px #00d4bf1f,0 0 26px #00d4bf66;z-index:3}
-  .node::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--teal)}
+    background:var(--bg);border:2px solid #2b3442;box-shadow:none;z-index:3;
+    transition:border-color .35s ease,box-shadow .35s ease}
+  .node::after{content:"";position:absolute;inset:3px;border-radius:50%;background:#2b3442;transition:background .35s ease}
+  .node.lit{border-color:var(--teal);box-shadow:0 0 0 6px #00d4bf1f,0 0 26px #00d4bf88}
+  .node.lit::after{background:var(--teal)}
   .card{width:420px;max-width:80%;padding:28px 28px 26px;will-change:transform;transform-style:preserve-3d;
     background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);
     border-radius:18px;box-shadow:0 30px 70px -30px #000}
@@ -455,6 +458,8 @@ cargo run <span class="c">-p</span> kuvatin</code>
   var below = document.getElementById("below");
   var feats = gsap.utils.toArray(".feat");
   var cards = gsap.utils.toArray(".feat .card");
+  var nodes = feats.map(function(f){ return f.querySelector(".node"); });
+  var litState = nodes.map(function(){ return false; });
   var belowTilt = gsap.utils.toArray("#below .tilt");
   var setBelowX = gsap.quickSetter(below, "x", "px");
   var TILT_MAX = 18;
@@ -530,6 +535,12 @@ cargo run <span class="c">-p</span> kuvatin</code>
         curRY[i] += (tRY - curRY[i]) * 0.12;
         curRX[i] += (tRX - curRX[i]) * 0.12;
         cards[i].style.transform = "perspective(1000px) rotateX(" + curRX[i].toFixed(2) + "deg) rotateY(" + curRY[i].toFixed(2) + "deg)";
+      }
+      // light a card's node only while the travelling ball is on top of it
+      for(var n=0;n<nodes.length;n++){
+        var nr = nodes[n].getBoundingClientRect();
+        var on = Math.hypot(bx - (nr.left + nr.width/2), by - (nr.top + nr.height/2)) < 40;
+        if(on !== litState[n]){ litState[n] = on; nodes[n].classList.toggle("lit", on); }
       }
     }
     bt.cx += (bt.tx - bt.cx) * 0.1; bt.ct += (bt.tt - bt.ct) * 0.1;
