@@ -213,6 +213,8 @@ export component AppWindow inherits Window {
     in-out property <int> current-preset: 0;
     in-out property <string> format: "webp";
     in-out property <int> quality: 80;
+    // PNG optimization mode: 0 = Normal, 1 = Optimize (lossless), 2 = Compress (lossy).
+    in-out property <int> png-mode: 0;
     in-out property <string> preset-name;
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
@@ -468,6 +470,16 @@ export component AppWindow inherits Window {
                         ComboBox {
                             model: ["png", "jpeg", "webp", "bmp", "tiff", "gif"];
                             current-value <=> root.format;
+                        }
+                    }
+
+                    // PNG size optimization (only relevant for PNG output).
+                    if root.format == "png": VerticalLayout {
+                        spacing: 6px;
+                        FieldLabel { text: "PNG OPTIMIZATION"; }
+                        ComboBox {
+                            model: ["Normal", "Optimize (lossless)", "Compress (lossy · uses quality)"];
+                            current-index <=> root.png-mode;
                         }
                     }
 

@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_jobs;
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::format::OutputFormat;
-use kuvatin_core::pipeline::Job;
+use kuvatin_core::pipeline::{Job, PngOptimize};
 use kuvatin_core::preset::PresetStore;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::collections::HashMap;
@@ -44,6 +44,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             if let (Some(ui), Some(p)) = (ui_weak.upgrade(), store.presets.get(idx as usize)) {
                 ui.set_format(format_combo_str(p.job.format).into());
                 ui.set_quality(p.job.quality as i32);
+                ui.set_png_mode(png_mode_to_idx(p.job.png));
                 ui.set_preset_name(p.name.clone().into());
             }
         });
@@ -376,6 +377,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let mut job = preset.job.clone();
             job.format = format_combo_to_format(&ui.get_format());
             job.quality = ui.get_quality().clamp(0, 100) as u8;
+            job.png = png_mode_from(ui.get_png_mode());
 
             // Explicit output-resolution override from the Settings fields. When
             // either dimension is set (> 0) it replaces the preset's resize for
@@ -460,6 +462,7 @@ fn refresh_presets(ui: &AppWindow, store: &PresetStore, select: usize) {
     if let Some(p) = store.presets.get(idx) {
         ui.set_format(format_combo_str(p.job.format).into());
         ui.set_quality(p.job.quality as i32);
+        ui.set_png_mode(png_mode_to_idx(p.job.png));
     }
 }
 
@@ -475,7 +478,26 @@ fn current_job(ui: &AppWindow, store: &PresetStore) -> Job {
         .unwrap_or_default();
     job.format = format_combo_to_format(&ui.get_format());
     job.quality = ui.get_quality().clamp(0, 100) as u8;
+    job.png = png_mode_from(ui.get_png_mode());
     job
+}
+
+/// Map the PNG-optimization combo index to the core enum.
+fn png_mode_from(idx: i32) -> PngOptimize {
+    match idx {
+        1 => PngOptimize::Lossless,
+        2 => PngOptimize::Lossy,
+        _ => PngOptimize::None,
+    }
+}
+
+/// Map the core PNG-optimization enum back to its combo index.
+fn png_mode_to_idx(mode: PngOptimize) -> i32 {
+    match mode {
+        PngOptimize::None => 0,
+        PngOptimize::Lossless => 1,
+        PngOptimize::Lossy => 2,
+    }
 }
 
 fn rows_from(paths: &[PathBuf]) -> Vec<FileRow> {
