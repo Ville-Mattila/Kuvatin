@@ -564,7 +564,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
   // background (×50) and fades it out — a zoom-through into the next section.
   // Scale and opacity are separate so the ball stays visible a while as it grows.
   gsap.fromTo(traveler, { scale:1 },
-    { scale:50, ease:"power2.in", transformOrigin:"50% 50%",
+    { scale:75, ease:"power2.in", transformOrigin:"50% 50%",
       scrollTrigger:{ trigger:featList, start:"bottom 80%", end:"bottom -45%", scrub:true } });
   gsap.fromTo(traveler, { opacity:1 },
     { opacity:0, ease:"power3.in",
