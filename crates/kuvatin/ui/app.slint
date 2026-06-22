@@ -18,8 +18,15 @@ export struct FileRow {
 // std-widgets Slider, which rendered invisibly against the dark theme.
 component QualitySlider inherits Rectangle {
     in-out property <int> value;
-    height: 24px;
+    // Pin the height: inside a layout a plain `height` is only a preferred size
+    // and the slider would stretch to fill extra vertical space (dropping the
+    // track to the middle). min/max keep it a fixed 24px row.
+    min-height: 24px;
+    max-height: 24px;
     horizontal-stretch: 1;
+    // Do not absorb the panel's extra vertical space (that's the spacer's job);
+    // otherwise the QUALITY group stretches and the slider drops to its middle.
+    vertical-stretch: 0;
 
     // track
     Rectangle {
