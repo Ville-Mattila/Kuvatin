@@ -49,7 +49,7 @@ cargo wix -p kuvatin --nocapture
 ```
 
 The installer is written to `target/wix/kuvatin-<version>-x86_64.msi`
-(e.g. `kuvatin-1.1.0-x86_64.msi`). It is under `target/`, which is gitignored
+(e.g. `kuvatin-1.1.1-x86_64.msi`). It is under `target/`, which is gitignored
 and not committed.
 
 ## Regenerating main.wxs
