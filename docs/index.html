@@ -538,8 +538,16 @@ cargo run <span class="c">-p</span> kuvatin</code>
     if(!W || !H){ return; }
     railSvg.setAttribute("viewBox", "0 0 " + W + " " + H);
     var pts = feats.map(function(f){
-      var side = f.classList.contains("right") ? 1 : -1;
-      return { x: W/2 + side * (W * 0.27), y: f.offsetTop + f.offsetHeight/2, node: f.querySelector(".node") };
+      var card = f.querySelector(".card");
+      var right = f.classList.contains("right");
+      // node sits at the card's inner top corner (top-left for right-side cards,
+      // top-right for left-side cards). Layout offsets ignore the tilt transform.
+      return {
+        x: card.offsetLeft + (right ? 0 : card.offsetWidth),
+        y: f.offsetTop + card.offsetTop,
+        node: f.querySelector(".node"),
+        fw: f.offsetWidth, fh: f.offsetHeight, ctop: card.offsetTop
+      };
     });
     var d = "M " + (W/2).toFixed(1) + " 0";
     d += " C " + (W/2).toFixed(1) + " " + (pts[0].y*0.5).toFixed(1) + ", " + pts[0].x.toFixed(1) + " " + (pts[0].y*0.5).toFixed(1) + ", " + pts[0].x.toFixed(1) + " " + pts[0].y.toFixed(1);
@@ -550,7 +558,10 @@ cargo run <span class="c">-p</span> kuvatin</code>
     var last = pts[pts.length-1];
     d += " C " + last.x.toFixed(1) + " " + ((last.y+H)/2).toFixed(1) + ", " + (W/2).toFixed(1) + " " + ((last.y+H)/2).toFixed(1) + ", " + (W/2).toFixed(1) + " " + H.toFixed(1);
     railTrack.setAttribute("d", d); railDraw.setAttribute("d", d);
-    pts.forEach(function(p){ p.node.style.left = (p.x / W * 100) + "%"; });
+    pts.forEach(function(p){
+      p.node.style.left = (p.x / p.fw * 100) + "%";
+      p.node.style.top = (p.ctop / p.fh * 100) + "%";
+    });
   }
 
   // (re)build the spine and the draw + ball-travel timeline together so resize is clean
@@ -616,10 +627,11 @@ cargo run <span class="c">-p</span> kuvatin</code>
         curRX[i] += (tRX - curRX[i]) * 0.12;
         cards[i].style.transform = "perspective(1000px) rotateX(" + curRX[i].toFixed(2) + "deg) rotateY(" + curRY[i].toFixed(2) + "deg)";
       }
-      // light a card's node only while the travelling ball is on top of it
+      // a node stays lit once the ball has descended past it (and unlights on
+      // the way back up). The path runs top-to-bottom, so a vertical test holds.
       for(var n=0;n<nodes.length;n++){
         var nr = nodes[n].getBoundingClientRect();
-        var on = Math.hypot(bx - (nr.left + nr.width/2), by - (nr.top + nr.height/2)) < 40;
+        var on = by >= (nr.top + nr.height/2) - 4;
         if(on !== litState[n]){ litState[n] = on; nodes[n].classList.toggle("lit", on); }
       }
     }
