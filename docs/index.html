@@ -454,7 +454,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
       var r = rc.getBoundingClientRect();
       A = Math.abs((r.left + r.width/2) - (lc.left + lc.width/2));
     }
-    A = Math.min(A, document.documentElement.clientWidth * 0.11, 200);  // gentle, and tighter on narrow screens
+    A = Math.min(A, document.documentElement.clientWidth * 0.05, 95);  // subtle side-to-side hint of the S
     var H = featList.offsetHeight || 1;
     stations = feats.map(function(f){
       var cy = f.offsetTop + f.offsetHeight/2;
