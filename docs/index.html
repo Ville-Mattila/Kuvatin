@@ -72,7 +72,7 @@
     color:var(--teal);background:#00d4bf14;border:1px solid #00d4bf33;padding:7px 14px;border-radius:999px;margin-bottom:30px}
   .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 #00d4bf;animation:pulse 2.4s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 #00d4bf88}70%{box-shadow:0 0 0 9px #00d4bf00}100%{box-shadow:0 0 0 0 #00d4bf00}}
-  .hero-logo{display:block;width:clamp(280px,56vw,760px);height:auto;filter:drop-shadow(0 24px 70px #00d4bf2e)}
+  .hero-logo{display:block;width:clamp(320px,62vw,900px);height:auto;filter:drop-shadow(0 24px 70px #00d4bf2e)}
   .hero-tag{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:clamp(22px,3.4vw,40px);
     letter-spacing:-.02em;line-height:1.12;margin:26px 0 22px}
   .hero-tag .accent{color:var(--teal)}
@@ -87,9 +87,9 @@
   .panhint .arrow::after{content:"";position:absolute;right:0;top:-3px;width:8px;height:8px;border-top:2px solid var(--teal);border-right:2px solid var(--teal);transform:rotate(45deg)}
   /* the screenshot that tilts into view */
   .intro-shot{perspective:1600px}
-  .shot-frame{border-radius:16px;overflow:hidden;border:1px solid #2a323f;max-width:min(900px,86vw);will-change:transform;
+  .shot-frame{border-radius:16px;overflow:hidden;border:1px solid #2a323f;width:min(960px,88vw);will-change:transform;
     box-shadow:0 50px 120px -30px #000,0 0 0 1px #ffffff08,0 0 90px -20px #00d4bf55}
-  .shot-frame img{display:block;width:100%}
+  .shot-frame img{display:block;width:100%;height:auto;aspect-ratio:1320/840}
 
   /* generic section heads */
   .section-head{text-align:center;max-width:720px;margin:0 auto}
@@ -99,8 +99,8 @@
 
   /* ============ FEATURE SERPENTINE ============ */
   .journey{position:relative;padding:120px 0 80px;overflow:hidden}
-  .feat-list{position:relative;max-width:1240px;margin:64px auto 0;padding:0 clamp(28px,5vw,56px);
-    display:flex;flex-direction:column;gap:clamp(40px,6vh,96px);will-change:transform}
+  .feat-list{position:relative;max-width:1060px;margin:64px auto 0;padding:0 clamp(28px,5vw,56px);
+    display:flex;flex-direction:column;gap:clamp(60px,9vh,120px);will-change:transform}
   .feat{position:relative;display:flex}
   .feat.right{justify-content:flex-end}
   .feat.left{justify-content:flex-start}
@@ -454,6 +454,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
       var r = rc.getBoundingClientRect();
       A = Math.abs((r.left + r.width/2) - (lc.left + lc.width/2));
     }
+    A = Math.min(A, document.documentElement.clientWidth * 0.11, 200);  // gentle, and tighter on narrow screens
     var H = featList.offsetHeight || 1;
     stations = feats.map(function(f){
       var cy = f.offsetTop + f.offsetHeight/2;
