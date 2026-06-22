@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Affinity source files (the exported kuvatin-icon.png is the committed master)
+*.af
+*~lock~

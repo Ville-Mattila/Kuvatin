@@ -139,7 +139,8 @@
                                   Name='Kuvatin'
                                   Description='Batch image converter / resizer / cropper'
                                   Target='[Bin]kuvatin.exe'
-                                  WorkingDirectory='Bin'/>
+                                  WorkingDirectory='Bin'
+                                  Icon='ProductICO'/>
                         <RemoveFolder Id='RemoveApplicationProgramsFolder'
                                       On='uninstall'/>
                         <RegistryValue Root='HKCU'
@@ -216,8 +217,8 @@
           The product icon is the graphic that appears in the Add/Remove
           Programs control panel for the application.
         -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
-        <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
+        <Icon Id='ProductICO' SourceFile='assets\kuvatin.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
         
         <!--
