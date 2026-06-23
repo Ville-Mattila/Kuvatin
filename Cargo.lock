@@ -2707,7 +2707,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2727,7 +2727,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin-core"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "directories",
  "image",

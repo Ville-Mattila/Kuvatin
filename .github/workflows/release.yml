@@ -1,16 +1,12 @@
 name: release
 
 # Build the macOS universal .dmg and the Windows .msi. On a version tag
-# (v1.4.0) both are attached to the GitHub Release; on manual dispatch they are
+# (v1.5.0) both are attached to the GitHub Release; on manual dispatch they are
 # uploaded as workflow artifacts.
 on:
   push:
     tags:
       - "v*"
-    # Temporary: validate the build on the feature branch (release-attach steps
-    # below stay gated to tag pushes). Remove before merging to master.
-    branches:
-      - macos-support
   workflow_dispatch:
 
 permissions:
