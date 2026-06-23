@@ -207,7 +207,10 @@ component WinButton inherits Rectangle {
 export component AppWindow inherits Window {
     title: "Kuvatin";
     icon: @image-url("../assets/kuvatin-icon.png");
-    no-frame: true;
+    // Frameless with a custom titlebar by default (Windows); native OS
+    // decorations when `use-native-frame` is set (macOS). Bound to the property
+    // so Rust can flip it before the window is first shown.
+    no-frame: !root.use-native-frame;
     preferred-width: 1320px;
     preferred-height: 840px;
     min-width: 760px;
@@ -254,6 +257,16 @@ export component AppWindow inherits Window {
     // When set, outputs go into a subfolder named after the suffix.
     in-out property <bool> save-subfolder: false;
 
+    // macOS Finder right-click integration. `mac-platform` is set true from Rust
+    // only on macOS, so the toggle is hidden elsewhere.
+    in property <bool> mac-platform: false;
+    in-out property <bool> finder-integration: true;
+    callback toggle-finder-integration(bool);
+
+    // When true, use native OS window decorations and hide the custom titlebar.
+    // Set from Rust on macOS before show(); stays false on Windows.
+    in property <bool> use-native-frame: false;
+
     // Custom window-frame controls (frameless window; wired to Win32 in gui.rs).
     callback win-minimize();
     callback win-maximize();
@@ -275,8 +288,8 @@ export component AppWindow inherits Window {
         padding: 0px;
         spacing: 0px;
 
-        // Custom title bar ----------------------------------------------
-        Rectangle {
+        // Custom title bar (hidden when native OS decorations are used) -------
+        if !root.use-native-frame : Rectangle {
             min-height: 36px;
             max-height: 36px;
             background: #16181d;
@@ -586,6 +599,11 @@ export component AppWindow inherits Window {
                         CheckBox {
                             text: "Save to a subfolder (named after the suffix)";
                             checked <=> root.save-subfolder;
+                        }
+                        if root.mac-platform : CheckBox {
+                            text: "Finder right-click menu (Quick Actions)";
+                            checked <=> root.finder-integration;
+                            toggled => { root.toggle-finder-integration(self.checked); }
                         }
                     }
 

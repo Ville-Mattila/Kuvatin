@@ -14,15 +14,64 @@ use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
+/// Cross-platform inbox of file paths dropped onto the window, awaiting drain by
+/// the UI thread. Platform-specific drop *producers* (`win_drop` on Windows,
+/// `mac_drop` on macOS) push into it; a repeating UI-thread timer drains it into
+/// the add-files pipeline. This keeps the OS-specific drag glue isolated while
+/// the queue and the drain loop stay shared.
+#[cfg(any(windows, target_os = "macos"))]
+mod dropbox {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static INBOX: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+
+    fn inbox() -> &'static Mutex<Vec<PathBuf>> {
+        INBOX.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    /// Queue dropped paths for the UI thread to pick up. No-op if empty.
+    pub fn push(paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        inbox().lock().unwrap().extend(paths);
+    }
+
+    /// Drain all queued dropped paths. Called by the UI-thread timer.
+    pub fn take_dropped() -> Vec<PathBuf> {
+        std::mem::take(&mut *inbox().lock().unwrap())
+    }
+}
+
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
 
     let ui = AppWindow::new()?;
 
+    // macOS uses native window decorations (and hides the custom titlebar); the
+    // flag must be set before the window is first shown so `no-frame` picks it up.
+    #[cfg(target_os = "macos")]
+    ui.set_use_native_frame(true);
+
     // Initialize the preset-names model and the format/quality controls from the
     // first preset so they reflect (and can override) what will actually be applied.
     refresh_presets(&ui, &store.lock().unwrap(), 0);
+
+    // macOS Finder integration: surface the toggle and, if enabled, (re-)install
+    // the Quick Actions on launch so they always point at the current binary.
+    #[cfg(target_os = "macos")]
+    {
+        ui.set_mac_platform(true);
+        let enabled = store.lock().unwrap().finder_integration;
+        ui.set_finder_integration(enabled);
+        if enabled {
+            if let Err(e) = crate::shell::register() {
+                eprintln!("Finder integration: {e:#}");
+            }
+        }
+    }
 
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
     let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap())));
@@ -53,6 +102,31 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
+    // macOS Finder-integration toggle: persist the choice and add/remove the
+    // Quick Actions immediately. (The checkbox is only shown on macOS.)
+    {
+        let store = store.clone();
+        let store_path = store_path.clone();
+        ui.on_toggle_finder_integration(move |on| {
+            {
+                let mut s = store.lock().unwrap();
+                s.finder_integration = on;
+                let _ = s.save(&store_path);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let res = if on {
+                    crate::shell::register()
+                } else {
+                    crate::shell::unregister()
+                };
+                if let Err(e) = res {
+                    eprintln!("Finder integration: {e:#}");
+                }
+            }
+        });
+    }
+
     {
         let files = files.clone();
         let rows = rows.clone();
@@ -67,15 +141,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
-    // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
-    // and drain dropped paths into the same add-files pipeline. The native HWND
-    // is only available after the window is shown, so we wire it up from a
-    // single-shot timer that fires once the event loop is running.
+    // Native drag-and-drop. A platform-specific producer is wired to the native
+    // window once it exists (the handle is only available after the window is
+    // shown, so a single-shot timer fires it once the event loop is running),
+    // and a cross-platform repeating timer drains the shared `dropbox` queue
+    // into the same add-files pipeline.
     #[cfg(windows)]
     {
-        let files = files.clone();
-        let rows = rows.clone();
-        let ui_weak = ui.as_weak();
         let setup_weak = ui.as_weak();
         let setup_timer = slint::Timer::default();
         setup_timer.start(
@@ -89,14 +161,35 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         );
         // Keep the timer alive for the lifetime of the window.
         std::mem::forget(setup_timer);
+    }
 
-        // Drain dropped paths on the UI thread and feed them into add_paths.
+    #[cfg(target_os = "macos")]
+    {
+        let setup_weak = ui.as_weak();
+        let setup_timer = slint::Timer::default();
+        setup_timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(100),
+            move || {
+                if let Some(ui) = setup_weak.upgrade() {
+                    mac_drop::enable(&ui);
+                }
+            },
+        );
+        std::mem::forget(setup_timer);
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let files = files.clone();
+        let rows = rows.clone();
+        let ui_weak = ui.as_weak();
         let drain_timer = slint::Timer::default();
         drain_timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(150),
             move || {
-                let dropped = win_drop::take_dropped();
+                let dropped = dropbox::take_dropped();
                 if !dropped.is_empty() {
                     add_paths(dropped, &files, &rows, &ui_weak);
                 }
@@ -674,13 +767,154 @@ fn add_paths(
 /// Dropped paths are pushed into a process-global inbox that the UI thread
 /// drains on a repeating timer — this avoids passing Rust closures through the
 /// C callback boundary.
+/// macOS native drag-and-drop.
+///
+/// Slint's winit backend registers the content view as a dragging destination
+/// and swallows the resulting events, so — as on Windows — we install our own
+/// handler instead of relying on Slint. A transparent overlay `NSView` is laid
+/// over the content view: it accepts file drags (`NSFilenamesPboardType`) and
+/// pushes the dropped paths into the shared `dropbox`, while passing mouse
+/// events straight through (`hitTest:` returns nil) so the UI stays interactive.
+#[cfg(target_os = "macos")]
+mod mac_drop {
+    use super::{dropbox, AppWindow};
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+    use objc2::{define_class, msg_send, MainThreadOnly};
+    use objc2_app_kit::{
+        NSAutoresizingMaskOptions, NSDragOperation, NSDraggingDestination, NSDraggingInfo,
+        NSFilenamesPboardType, NSPasteboard, NSView,
+    };
+    use objc2_foundation::{MainThreadMarker, NSArray, NSPoint, NSRect, NSString};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use slint::ComponentHandle;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    /// Guards against attaching the overlay more than once.
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+
+    define_class!(
+        // Transparent overlay that accepts file drops and passes mouse events
+        // through to the Slint view beneath it.
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "KuvatinDropView"]
+        struct DropView;
+
+        unsafe impl NSObjectProtocol for DropView {}
+
+        impl DropView {
+            // Pass all mouse hit-testing through to the view below.
+            #[unsafe(method(hitTest:))]
+            fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+                std::ptr::null_mut()
+            }
+        }
+
+        unsafe impl NSDraggingDestination for DropView {
+            #[unsafe(method(draggingEntered:))]
+            fn dragging_entered(
+                &self,
+                _sender: &ProtocolObject<dyn NSDraggingInfo>,
+            ) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+
+            #[unsafe(method(draggingUpdated:))]
+            fn dragging_updated(
+                &self,
+                _sender: &ProtocolObject<dyn NSDraggingInfo>,
+            ) -> NSDragOperation {
+                NSDragOperation::Copy
+            }
+
+            #[unsafe(method(performDragOperation:))]
+            fn perform_drag_operation(
+                &self,
+                sender: &ProtocolObject<dyn NSDraggingInfo>,
+            ) -> bool {
+                let pb = unsafe { sender.draggingPasteboard() };
+                let paths = read_file_paths(&pb);
+                let any = !paths.is_empty();
+                dropbox::push(paths);
+                any
+            }
+        }
+    );
+
+    impl DropView {
+        fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(());
+            unsafe { msg_send![super(this), initWithFrame: frame] }
+        }
+    }
+
+    /// Read dropped file paths off the drag pasteboard via the classic
+    /// `NSFilenamesPboardType` property list (an array of path strings).
+    #[allow(deprecated)]
+    fn read_file_paths(pb: &NSPasteboard) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let ty = unsafe { NSFilenamesPboardType };
+        let Some(plist) = (unsafe { pb.propertyListForType(ty) }) else {
+            return out;
+        };
+        if let Ok(arr) = plist.downcast::<NSArray>() {
+            for item in arr.iter() {
+                if let Ok(s) = item.downcast::<NSString>() {
+                    out.push(PathBuf::from(s.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Attach the drop overlay to the window's content view. Idempotent: only
+    /// the first call installs the overlay. Must run after the window is shown
+    /// so the native view exists.
+    #[allow(deprecated)]
+    pub fn enable(ui: &AppWindow) {
+        if INSTALLED.get().is_some() {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(ptr) = ns_view_of(ui) else {
+            return;
+        };
+        // SAFETY: ptr is a live NSView from the shown window, used on the main thread.
+        let content: &NSView = unsafe { &*(ptr as *const NSView) };
+        let overlay = DropView::new(mtm, content.bounds());
+        overlay.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        let types = NSArray::from_slice(&[unsafe { NSFilenamesPboardType }]);
+        overlay.registerForDraggedTypes(&types);
+        content.addSubview(&overlay);
+        // The view tree now owns the overlay for the window's lifetime.
+        std::mem::forget(overlay);
+        let _ = INSTALLED.set(());
+    }
+
+    /// Extract the NSView pointer from a shown Slint window.
+    fn ns_view_of(ui: &AppWindow) -> Option<*mut std::ffi::c_void> {
+        let handle = ui.window().window_handle();
+        match handle.window_handle().ok()?.as_raw() {
+            RawWindowHandle::AppKit(h) => Some(h.ns_view.as_ptr()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(windows)]
 mod win_drop {
     use super::AppWindow;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use slint::ComponentHandle;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::UI::Shell::{
         DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
@@ -700,17 +934,11 @@ mod win_drop {
     /// Width of the invisible edge zone (in physical px) used for resize hit-testing.
     const RESIZE_BORDER: i32 = 6;
 
-    /// Inbox of paths dropped onto the window, awaiting drain by the UI thread.
-    static INBOX: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
     /// Guards against subclassing the window more than once.
     static INSTALLED: OnceLock<()> = OnceLock::new();
     /// The native window handle, captured in `enable()` so the win-* callbacks
     /// can reach it without re-deriving it from the Slint window each time.
     static HWND_RAW: OnceLock<isize> = OnceLock::new();
-
-    fn inbox() -> &'static Mutex<Vec<PathBuf>> {
-        INBOX.get_or_init(|| Mutex::new(Vec::new()))
-    }
 
     /// The captured HWND, if `enable()` has run.
     fn hwnd() -> Option<HWND> {
@@ -766,12 +994,6 @@ mod win_drop {
                 let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
-    }
-
-    /// Drain all queued dropped paths. Called by the UI-thread timer.
-    pub fn take_dropped() -> Vec<PathBuf> {
-        let mut guard = inbox().lock().unwrap();
-        std::mem::take(&mut *guard)
     }
 
     /// Enable Explorer drag-and-drop on the given window. Idempotent: only the
@@ -912,9 +1134,7 @@ mod win_drop {
                 }
             }
             DragFinish(hdrop);
-            if !dropped.is_empty() {
-                inbox().lock().unwrap().extend(dropped);
-            }
+            super::dropbox::push(dropped);
             return LRESULT(0);
         }
         DefSubclassProc(hwnd, msg, wparam, lparam)
