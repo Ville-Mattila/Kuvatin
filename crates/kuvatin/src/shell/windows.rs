@@ -9,16 +9,10 @@ use windows::Win32::System::Registry::{
     KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 
+use super::ITEMS;
+
 const ROOT: &str = r"Software\Classes\SystemFileAssociations\image\shell\Kuvatin";
 const STORE: &str = r"Software\Classes\Kuvatin.CommandStore\shell";
-
-/// (command id under CommandStore, menu label, preset name or empty for GUI)
-const ITEMS: &[(&str, &str, &str)] = &[
-    ("Kuvatin.Webp", "Convert to WebP", "Convert to WebP"),
-    ("Kuvatin.1080p", "Resize to 1080p", "Resize to 1080p"),
-    ("Kuvatin.Half", "Resize to 50%", "Resize to 50%"),
-    ("Kuvatin.Open", "Open in Kuvatin…", ""),
-];
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
