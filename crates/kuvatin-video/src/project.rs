@@ -111,7 +111,9 @@ impl Project {
         clip.set_inpoint(gst::ClockTime::from_nseconds(inpoint.as_nanos() as u64));
         clip.set_duration(gst::ClockTime::from_nseconds(duration.as_nanos() as u64));
         self.layer(track).add_clip(&clip)?;
-        self.timeline.commit_sync();
+        // Async commit (see append_clip): commit_sync() can deadlock during an
+        // async pipeline state-change, so never block on the commit here.
+        self.timeline.commit();
         Ok(ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()))
     }
 
@@ -138,7 +140,10 @@ impl Project {
             dur_ct,
             ges::TrackType::UNKNOWN,
         )?;
-        self.timeline.commit_sync();
+        // Async commit: never block the caller. commit_sync() deadlocks if the
+        // pipeline is mid async state-change (e.g. a second clip added right
+        // after play()), because the commit ack can't arrive until preroll ends.
+        self.timeline.commit();
         Ok(ClipInfo {
             id: ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()),
             track,
@@ -230,5 +235,24 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1200));
         assert!(count.load(Ordering::SeqCst) > 0, "no preview frames");
         assert!(project.duration().unwrap() > Duration::ZERO);
+    }
+
+    /// Reproduces the drag-two-files freeze: append a clip, start playing, then
+    /// append a second clip (which commits the timeline while the pipeline is
+    /// playing). Self-skips without `GST_TEST_FILE`; needs GStreamer on PATH.
+    #[test]
+    fn append_two_while_playing() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping append_two_while_playing: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&path, 0, None).expect("append1");
+        project.play().expect("play");
+        // No sleep: append #2 must not block while the pipeline is still
+        // prerolling. With commit_sync() this deadlocked the calling thread.
+        let info2 = project.append_clip(&path, 0, None).expect("append2");
+        assert!(info2.start > Duration::ZERO, "second clip should start after the first");
     }
 }
