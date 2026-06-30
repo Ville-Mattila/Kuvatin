@@ -1,8 +1,7 @@
 name: release
 
-# Build the macOS universal .dmg and the Windows .msi. On a version tag
-# (v1.5.0) both are attached to the GitHub Release; on manual dispatch they are
-# uploaded as workflow artifacts.
+# Build the Windows .msi. On a version tag (v1.5.0) it is attached to the GitHub
+# Release; on manual dispatch it is uploaded as a workflow artifact.
 on:
   push:
     tags:
@@ -13,46 +12,6 @@ permissions:
   contents: write
 
 jobs:
-  macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install librsvg (icon rendering)
-        run: brew install librsvg
-
-      - name: Read version
-        id: ver
-        run: echo "version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')" >> "$GITHUB_OUTPUT"
-
-      - name: Build (aarch64)
-        run: cargo build --release -p kuvatin --target aarch64-apple-darwin
-
-      - name: Build (x86_64)
-        run: cargo build --release -p kuvatin --target x86_64-apple-darwin
-
-      - name: Assemble .app and .dmg
-        run: |
-          chmod +x scripts/build-macos-dmg.sh
-          scripts/build-macos-dmg.sh "${{ steps.ver.outputs.version }}"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kuvatin-macos-universal
-          path: dist/*.dmg
-
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.dmg
-
   windows:
     runs-on: windows-latest
     steps:
