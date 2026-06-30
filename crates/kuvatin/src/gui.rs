@@ -247,10 +247,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             ui.set_crop_image(Image::from_rgba8(buf));
 
             // Preview BOX size that matches the original aspect within a max area.
-            let (max_w, max_h) = (560.0_f32, 420.0_f32);
-            let scale = (max_w / ow as f32).min(max_h / oh as f32).min(1.0);
-            ui.set_crop_box_w((ow as f32 * scale).max(1.0));
-            ui.set_crop_box_h((oh as f32 * scale).max(1.0));
+            let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
+            ui.set_crop_box_w(bw);
+            ui.set_crop_box_h(bh);
 
             // Expose the original dimensions so the numeric X/Y/W/H crop fields
             // can show and edit absolute pixels.

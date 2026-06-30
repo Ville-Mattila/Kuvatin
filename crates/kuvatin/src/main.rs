@@ -3,6 +3,7 @@
 mod cli;
 mod collect;
 mod gui;
+mod preview;
 mod quickrun;
 mod shell;
 
