@@ -597,14 +597,14 @@ export component AppWindow inherits Window {
 
                         if root.cropping : HorizontalLayout {
                             spacing: 6px;
-                            NumberDropdown { label: "X"; value: round(root.crop-x * root.crop-img-w); maximum: root.crop-img-w;
-                                edited(v) => { root.crop-x = v / Math.max(root.crop-img-w, 1); } }
-                            NumberDropdown { label: "Y"; value: round(root.crop-y * root.crop-img-h); maximum: root.crop-img-h;
-                                edited(v) => { root.crop-y = v / Math.max(root.crop-img-h, 1); } }
+                            NumberDropdown { label: "X"; value: round(root.crop-x * root.crop-img-w); maximum: root.crop-img-w - 1;
+                                edited(v) => { root.crop-x = Math.clamp(v / Math.max(root.crop-img-w, 1), 0.0, 1.0 - root.crop-w); } }
+                            NumberDropdown { label: "Y"; value: round(root.crop-y * root.crop-img-h); maximum: root.crop-img-h - 1;
+                                edited(v) => { root.crop-y = Math.clamp(v / Math.max(root.crop-img-h, 1), 0.0, 1.0 - root.crop-h); } }
                             NumberDropdown { label: "W"; value: round(root.crop-w * root.crop-img-w); minimum: 1; maximum: root.crop-img-w;
-                                edited(v) => { root.crop-w = v / Math.max(root.crop-img-w, 1); } }
+                                edited(v) => { root.crop-w = Math.clamp(v / Math.max(root.crop-img-w, 1), 0.0, 1.0 - root.crop-x); } }
                             NumberDropdown { label: "H"; value: round(root.crop-h * root.crop-img-h); minimum: 1; maximum: root.crop-img-h;
-                                edited(v) => { root.crop-h = v / Math.max(root.crop-img-h, 1); } }
+                                edited(v) => { root.crop-h = Math.clamp(v / Math.max(root.crop-img-h, 1), 0.0, 1.0 - root.crop-y); } }
                             Rectangle {
                                 width: 26px; border-radius: 6px;
                                 background: root.aspect-lock ? #2dd4bf : #16181d;

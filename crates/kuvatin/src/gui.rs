@@ -358,6 +358,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     model.set_row_data(i, row);
                 }
             }
+
+            // Close the still-present modal on Apply (its Apply button only calls
+            // apply-crop, with no follow-up). Harmless for the inline View-button
+            // path, which sets cropping=false itself afterward.
+            ui.set_cropping(false);
         });
     }
 
