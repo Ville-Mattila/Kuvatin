@@ -450,18 +450,25 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
-                SegToggle {
-                    width: 184px;
-                    labels: ["Images", "Videos"];
-                    selected: root.app-mode;
-                    select(i) => { root.app-mode = i; }
-                    y: (parent.height - self.height) / 2;
-                }
-                Rectangle { horizontal-stretch: 1; }
 
                 WinButton { kind: "min"; clicked => { root.win-minimize(); } }
                 WinButton { kind: "max"; clicked => { root.win-maximize(); } }
                 WinButton { kind: "close"; danger: true; clicked => { root.win-close(); } }
+            }
+        }
+
+        // Mode toggle bar — below the titlebar (client area) so clicks register.
+        // In the titlebar, the native drag hit-test (HTCAPTION) swallows clicks.
+        Rectangle {
+            height: 42px;
+            background: #16181d;
+            SegToggle {
+                width: 184px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                labels: ["Images", "Videos"];
+                selected: root.app-mode;
+                select(i) => { root.app-mode = i; }
             }
         }
 
