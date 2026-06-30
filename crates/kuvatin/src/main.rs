@@ -10,7 +10,28 @@ mod shell;
 use clap::Parser;
 use cli::{Cli, Mode};
 
+/// In an installed build the GStreamer **plugins** are bundled next to the exe
+/// (the core DLLs sit alongside the exe so the loader finds them at startup;
+/// plugins load later, at `gst::init`, via this path). In a dev build the
+/// directory is absent and GStreamer uses the system install on PATH. Must run
+/// before any GStreamer init.
+fn configure_bundled_gstreamer() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    let plugins = dir.join("gstreamer-plugins");
+    if plugins.is_dir() {
+        std::env::set_var("GST_PLUGIN_PATH", &plugins);
+        // Don't also scan a differently-versioned system GStreamer.
+        std::env::set_var("GST_PLUGIN_SYSTEM_PATH", "");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    configure_bundled_gstreamer();
     let mode = Cli::parse().into_mode();
     match mode {
         Mode::Register => shell::register()?,
