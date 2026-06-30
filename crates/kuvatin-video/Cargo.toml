@@ -9,4 +9,5 @@ description = "GStreamer-backed video playback for Kuvatin"
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
+gstreamer-editing-services = "0.23"
 anyhow = { workspace = true }

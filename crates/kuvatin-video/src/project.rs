@@ -1,0 +1,179 @@
+//! GES-backed editing project: a timeline of layers + clips with a composited
+//! preview. The GUI's timeline UI drives this; GES handles compositing,
+//! transforms, trims, and seeking (and, later, render-to-file for export).
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app::{AppSink, AppSinkCallbacks};
+use gstreamer_editing_services as ges;
+use ges::prelude::*;
+
+use crate::Frame;
+
+/// A handle to a clip on the timeline (its GES clip name).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClipId(pub String);
+
+/// A GES-backed editing project: one timeline, one preview pipeline. Layers are
+/// visual tracks, index 0 = bottom (top layers composite over lower ones).
+pub struct Project {
+    timeline: ges::Timeline,
+    layers: Vec<ges::Layer>,
+    pipeline: ges::Pipeline,
+}
+
+impl Project {
+    /// Build an empty project whose preview pushes RGBA frames to `on_frame`
+    /// (called from a GStreamer thread — the GUI must hop to the UI thread).
+    pub fn new(on_frame: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
+        gst::init()?;
+        ges::init()?;
+
+        let timeline = ges::Timeline::new_audio_video();
+        let layer = timeline.append_layer();
+        let pipeline = ges::Pipeline::new();
+        pipeline.set_timeline(&timeline)?;
+
+        let appsink = AppSink::builder()
+            .caps(
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .build(),
+            )
+            .max_buffers(2)
+            .drop(true)
+            .build();
+
+        let cb: Arc<dyn Fn(Frame) + Send + Sync> = Arc::new(on_frame);
+        appsink.set_callbacks(
+            AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let caps = sample.caps().ok_or(gst::FlowError::Error)?;
+                    let info = gstreamer_video::VideoInfo::from_caps(caps)
+                        .map_err(|_| gst::FlowError::Error)?;
+                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    cb(Frame {
+                        width: info.width(),
+                        height: info.height(),
+                        rgba: map.as_slice().to_vec(),
+                    });
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+        pipeline.preview_set_video_sink(Some(appsink.upcast_ref::<gst::Element>()));
+        pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
+
+        Ok(Self {
+            timeline,
+            layers: vec![layer],
+            pipeline,
+        })
+    }
+
+    /// Ensure at least `index + 1` layers exist; return the layer at `index`.
+    fn layer(&mut self, index: usize) -> ges::Layer {
+        while self.layers.len() <= index {
+            self.layers.push(self.timeline.append_layer());
+        }
+        self.layers[index].clone()
+    }
+
+    /// Add `path` as a clip on track `track` at timeline position `start`,
+    /// showing the source range `[inpoint, inpoint + duration)`.
+    pub fn add_clip(
+        &mut self,
+        path: &Path,
+        track: usize,
+        start: Duration,
+        inpoint: Duration,
+        duration: Duration,
+    ) -> Result<ClipId> {
+        let uri = gst::glib::filename_to_uri(path, None)?;
+        let clip = ges::UriClip::new(&uri)?;
+        clip.set_start(gst::ClockTime::from_nseconds(start.as_nanos() as u64));
+        clip.set_inpoint(gst::ClockTime::from_nseconds(inpoint.as_nanos() as u64));
+        clip.set_duration(gst::ClockTime::from_nseconds(duration.as_nanos() as u64));
+        self.layer(track).add_clip(&clip)?;
+        self.timeline.commit_sync();
+        Ok(ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()))
+    }
+
+    pub fn play(&self) -> Result<()> {
+        self.pipeline.set_state(gst::State::Playing)?;
+        Ok(())
+    }
+
+    pub fn pause(&self) -> Result<()> {
+        self.pipeline.set_state(gst::State::Paused)?;
+        Ok(())
+    }
+
+    pub fn seek(&self, pos: Duration) -> Result<()> {
+        self.pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
+        )?;
+        Ok(())
+    }
+
+    pub fn position(&self) -> Option<Duration> {
+        self.pipeline
+            .query_position::<gst::ClockTime>()
+            .map(|t| Duration::from_nanos(t.nseconds()))
+    }
+
+    pub fn duration(&self) -> Option<Duration> {
+        let d = self.timeline.duration();
+        (d.nseconds() > 0).then(|| Duration::from_nanos(d.nseconds()))
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Adds a clip to a project and asserts the preview produces frames. Self-
+    /// skips without `GST_TEST_FILE`; needs the GStreamer `bin` on PATH.
+    #[test]
+    fn previews_a_clip() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping previews_a_clip: set GST_TEST_FILE");
+            return;
+        };
+        let count = Arc::new(AtomicU32::new(0));
+        let c2 = count.clone();
+        let mut project = Project::new(move |f| {
+            assert_eq!(f.rgba.len() as u32, f.width * f.height * 4);
+            c2.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("project");
+        project
+            .add_clip(
+                Path::new(&path),
+                0,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::from_secs(2),
+            )
+            .expect("add_clip");
+        project.play().expect("play");
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(count.load(Ordering::SeqCst) > 0, "no preview frames");
+        assert!(project.duration().unwrap() > Duration::ZERO);
+    }
+}

@@ -3,3 +3,6 @@
 
 pub mod player;
 pub use player::{Frame, Player};
+
+pub mod project;
+pub use project::{ClipId, Project};
