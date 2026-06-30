@@ -261,64 +261,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
-    // Open the crop editor for a queued file.
-    {
-        let files = files.clone();
-        let crops = crops.clone();
-        let edit = edit.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_start_crop(move |index| {
-            let Some(ui) = ui_weak.upgrade() else {
-                return;
-            };
-            let path = match files.lock().unwrap().get(index as usize) {
-                Some(p) => p.clone(),
-                None => return,
-            };
-            let Ok(img) = image::open(&path) else {
-                return;
-            };
-            let (ow, oh) = (img.width(), img.height());
-            if ow == 0 || oh == 0 {
-                return;
-            }
-
-            // Downscale the decoded image for display; normalized coords keep the
-            // crop math independent of the preview size.
-            let preview = img.thumbnail(900, 620).to_rgba8();
-            let (pw, ph) = (preview.width(), preview.height());
-            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(preview.as_raw(), pw, ph);
-            ui.set_crop_image(Image::from_rgba8(buf));
-
-            // Preview BOX size that matches the original aspect within a max area.
-            let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
-            ui.set_crop_box_w(bw);
-            ui.set_crop_box_h(bh);
-
-            // Expose the original dimensions so the numeric X/Y/W/H crop fields
-            // can show and edit absolute pixels.
-            ui.set_crop_img_w(ow as i32);
-            ui.set_crop_img_h(oh as i32);
-
-            // Initialize the rect from any existing crop (normalized back to 0..1),
-            // else the full image.
-            if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
-                ui.set_crop_x(x as f32 / ow as f32);
-                ui.set_crop_y(y as f32 / oh as f32);
-                ui.set_crop_w(w as f32 / ow as f32);
-                ui.set_crop_h(h as f32 / oh as f32);
-            } else {
-                ui.set_crop_x(0.0);
-                ui.set_crop_y(0.0);
-                ui.set_crop_w(1.0);
-                ui.set_crop_h(1.0);
-            }
-
-            *edit.lock().unwrap() = Some((path, ow, oh));
-            ui.set_cropping(true);
-        });
-    }
-
     // Apply the current crop rectangle: normalized → absolute pixels.
     {
         let crops = crops.clone();
@@ -359,46 +301,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
             }
 
-            // Close the still-present modal on Apply (its Apply button only calls
-            // apply-crop, with no follow-up). Harmless for the inline View-button
-            // path, which sets cropping=false itself afterward.
-            ui.set_cropping(false);
-        });
-    }
-
-    // Cancel the crop edit: discard, keep any previously applied crop.
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_cancel_crop(move || {
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_cropping(false);
-            }
-        });
-    }
-
-    // Clear the crop for the file currently being edited.
-    {
-        let crops = crops.clone();
-        let edit = edit.clone();
-        let files = files.clone();
-        let ui_weak = ui.as_weak();
-        ui.on_clear_crop(move || {
-            let Some(ui) = ui_weak.upgrade() else {
-                return;
-            };
-            if let Some((path, _, _)) = edit.lock().unwrap().clone() {
-                crops.lock().unwrap().remove(&path);
-                // Reset the row status back to queued.
-                if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
-                    let model = ui.get_files();
-                    if let Some(mut row) = model.row_data(i) {
-                        if row.status == "cropped" {
-                            row.status = "queued".into();
-                            model.set_row_data(i, row);
-                        }
-                    }
-                }
-            }
+            // Exit crop mode; the inline View-button sets cropping=false itself
+            // afterward, so this is a harmless no-op on that path.
             ui.set_cropping(false);
         });
     }
