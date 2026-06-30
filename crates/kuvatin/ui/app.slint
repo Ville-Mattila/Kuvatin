@@ -205,27 +205,57 @@ component WinButton inherits Rectangle {
     }
 }
 
-component ModeToggle inherits Rectangle {
-    in-out property <int> mode;            // 0 = Images, 1 = Videos
-    width: 188px; height: 26px;
-    border-radius: 999px;
+// A clean segmented control: a rounded track with the active segment as a
+// rounded-rect that fills its slice. Used for the mode and the View/Crop toggles.
+component SegToggle inherits Rectangle {
+    in property <[string]> labels;
+    in property <int> selected;
+    callback select(int);
+    height: 28px;
+    border-radius: 8px;
     background: #14171c;
     border-width: 1px;
     border-color: #2c313b;
     HorizontalLayout {
-        padding: 2px; spacing: 2px;
-        for seg[i] in ["Images", "Videos"]: Rectangle {
+        padding: 3px;
+        spacing: 0px;
+        for seg[i] in root.labels: Rectangle {
             horizontal-stretch: 1;
-            border-radius: 999px;
-            background: root.mode == i ? #2dd4bf : (ta.has-hover ? #20242c : transparent);
+            border-radius: 6px;
+            background: root.selected == i ? #2dd4bf : (ta.has-hover ? #20242c : transparent);
+            animate background { duration: 120ms; }
             Text {
                 text: seg;
-                horizontal-alignment: center; vertical-alignment: center;
-                font-size: 12px; font-weight: 700;
-                color: root.mode == i ? #08110f : #9aa3b2;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 12.5px;
+                font-weight: 600;
+                color: root.selected == i ? #08110f : #9aa3b2;
             }
-            ta := TouchArea { clicked => { root.mode = i; } }
+            ta := TouchArea { clicked => { root.select(i); } }
         }
+    }
+}
+
+// A draggable vertical divider between body panels. Emits the horizontal drag
+// delta since press; the parent clamps it onto a panel width. (The divider moves
+// with the resized panel, so the per-event delta self-converges to track the cursor.)
+component Splitter inherits Rectangle {
+    callback dragged(length);
+    width: 12px;
+    background: transparent;
+    Rectangle {
+        width: 2px;
+        height: 56%;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 1px;
+        background: sta.has-hover || sta.pressed ? #2dd4bf : #2c313b;
+        animate background { duration: 120ms; }
+    }
+    sta := TouchArea {
+        mouse-cursor: ew-resize;
+        moved => { root.dragged(self.mouse-x - self.pressed-x); }
     }
 }
 
@@ -285,6 +315,10 @@ export component AppWindow inherits Window {
     in-out property <string> preset-name;
     // 0 = Images, 1 = Videos. Video mode is a placeholder until the GStreamer plan.
     in-out property <int> app-mode: 0;
+    // Adjustable side-panel widths (drag the splitters between cards). The viewer
+    // takes the remaining space.
+    in-out property <length> files-w: 280px;
+    in-out property <length> settings-w: 320px;
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -364,7 +398,13 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
-                ModeToggle { mode <=> root.app-mode; y: (parent.height - self.height) / 2; }
+                SegToggle {
+                    width: 184px;
+                    labels: ["Images", "Videos"];
+                    selected: root.app-mode;
+                    select(i) => { root.app-mode = i; }
+                    y: (parent.height - self.height) / 2;
+                }
                 Rectangle { horizontal-stretch: 1; }
 
                 WinButton { kind: "min"; clicked => { root.win-minimize(); } }
@@ -376,12 +416,11 @@ export component AppWindow inherits Window {
         // Body -----------------------------------------------------------
         if root.app-mode == 0: HorizontalLayout {
             padding: 16px;
-            spacing: 18px;
+            spacing: 0px;
 
             // Files card
             Card {
-                min-width: 460px;
-                horizontal-stretch: 1;
+                width: root.files-w;
                 VerticalLayout {
                     padding: 16px;
                     spacing: 12px;
@@ -530,10 +569,12 @@ export component AppWindow inherits Window {
                 }
             }
 
+            Splitter { dragged(dx) => { root.files-w = Math.clamp(root.files-w + dx, 180px, 620px); } }
+
             // Viewer card
             Card {
-                min-width: 360px;
-                horizontal-stretch: 2;
+                min-width: 280px;
+                horizontal-stretch: 1;
                 VerticalLayout {
                     padding: 12px; spacing: 8px;
 
@@ -547,44 +588,16 @@ export component AppWindow inherits Window {
 
                         // View / Crop segmented toggle. Selecting Crop enters crop
                         // mode; selecting View applies the current crop then exits.
-                        Rectangle {
-                            width: 140px;
-                            border-radius: 999px;
-                            background: #14171c;
-                            border-width: 1px;
-                            border-color: #2c313b;
-                            HorizontalLayout {
-                                padding: 2px; spacing: 2px;
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: 999px;
-                                    background: !root.cropping ? #2dd4bf : (view-ta.has-hover ? #20242c : transparent);
-                                    Text {
-                                        text: "View";
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                        font-size: 12px; font-weight: 700;
-                                        color: !root.cropping ? #08110f : #9aa3b2;
-                                    }
-                                    view-ta := TouchArea {
-                                        clicked => {
-                                            if (root.cropping) { root.apply-crop(); }
-                                            root.cropping = false;
-                                        }
-                                    }
-                                }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    border-radius: 999px;
-                                    background: root.cropping ? #2dd4bf : (crop-ta.has-hover ? #20242c : transparent);
-                                    Text {
-                                        text: "Crop";
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                        font-size: 12px; font-weight: 700;
-                                        color: root.cropping ? #08110f : #9aa3b2;
-                                    }
-                                    crop-ta := TouchArea {
-                                        clicked => { root.cropping = true; }
-                                    }
+                        SegToggle {
+                            width: 132px;
+                            labels: ["View", "Crop"];
+                            selected: root.cropping ? 1 : 0;
+                            select(i) => {
+                                if (i == 0) {
+                                    if (root.cropping) { root.apply-crop(); }
+                                    root.cropping = false;
+                                } else {
+                                    root.cropping = true;
                                 }
                             }
                         }
@@ -797,9 +810,11 @@ export component AppWindow inherits Window {
                 }
             }
 
+            Splitter { dragged(dx) => { root.settings-w = Math.clamp(root.settings-w - dx, 240px, 560px); } }
+
             // Settings card
             Card {
-                min-width: 300px;
+                width: root.settings-w;
                 VerticalLayout {
                     padding: 16px;
                     spacing: 14px;
