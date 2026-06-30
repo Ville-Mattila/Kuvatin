@@ -25,14 +25,15 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     refresh_presets(&ui, &store.lock().unwrap(), 0);
 
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
-    let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap())));
-    ui.set_files(ModelRc::from(rows.clone()));
-    spawn_thumbnails(ui.as_weak(), files.clone(), files.lock().unwrap().clone());
 
     // Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
     // not present here are converted with the base job (no crop override).
     type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
     let crops: Arc<Mutex<CropMap>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap(), &crops.lock().unwrap())));
+    ui.set_files(ModelRc::from(rows.clone()));
+    spawn_thumbnails(ui.as_weak(), files.clone(), files.lock().unwrap().clone());
     // The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
     let edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>> = Arc::new(Mutex::new(None));
 
@@ -56,13 +57,14 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     {
         let files = files.clone();
         let rows = rows.clone();
+        let crops = crops.clone();
         let ui_weak = ui.as_weak();
         ui.on_add_files(move || {
             if let Some(picked) = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
                 .pick_files()
             {
-                add_paths(picked, &files, &rows, &ui_weak);
+                add_paths(picked, &files, &rows, &crops, &ui_weak);
             }
         });
     }
@@ -75,6 +77,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     {
         let files = files.clone();
         let rows = rows.clone();
+        let crops = crops.clone();
         let ui_weak = ui.as_weak();
         let setup_weak = ui.as_weak();
         let setup_timer = slint::Timer::default();
@@ -98,7 +101,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             move || {
                 let dropped = win_drop::take_dropped();
                 if !dropped.is_empty() {
-                    add_paths(dropped, &files, &rows, &ui_weak);
+                    add_paths(dropped, &files, &rows, &crops, &ui_weak);
                 }
             },
         );
@@ -132,11 +135,19 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let edit = edit.clone();
+        let ui_weak = ui.as_weak();
         ui.on_clear_files(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
             let mut guard = files.lock().unwrap();
             guard.clear();
-            crops.lock().unwrap().clear();
-            refresh(&rows, &guard);
+            let mut crops_guard = crops.lock().unwrap();
+            crops_guard.clear();
+            refresh(&rows, &guard, &crops_guard);
+            drop(crops_guard);
+            ui.set_selected_index(-1);
+            ui.set_cropping(false);
+            *edit.lock().unwrap() = None;
         });
     }
 
@@ -238,8 +249,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let (pw, ph) = (preview.width(), preview.height());
             let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(preview.as_raw(), pw, ph);
             ui.set_viewer_image(Image::from_rgba8(buf));
-            ui.set_viewer_img_w(ow as i32);
-            ui.set_viewer_img_h(oh as i32);
             ui.set_selected_index(index);
 
             // Seed crop state for this file (used when the viewer enters Crop mode later).
@@ -296,7 +305,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
                 let model = ui.get_files();
                 if let Some(mut row) = model.row_data(i) {
-                    row.status = "cropped".into();
+                    row.cropped = true;
                     model.set_row_data(i, row);
                 }
             }
@@ -501,7 +510,7 @@ fn png_mode_to_idx(mode: PngOptimize) -> i32 {
     }
 }
 
-fn rows_from(paths: &[PathBuf]) -> Vec<FileRow> {
+fn rows_from(paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) -> Vec<FileRow> {
     paths
         .iter()
         .map(|p| FileRow {
@@ -514,6 +523,7 @@ fn rows_from(paths: &[PathBuf]) -> Vec<FileRow> {
             status: "queued".into(),
             thumb: Default::default(),
             dims: "".into(),
+            cropped: crops.contains_key(p),
         })
         .collect()
 }
@@ -588,8 +598,8 @@ fn format_combo_to_format(s: &str) -> OutputFormat {
     }
 }
 
-fn refresh(rows: &Rc<VecModel<FileRow>>, paths: &[PathBuf]) {
-    let new = rows_from(paths);
+fn refresh(rows: &Rc<VecModel<FileRow>>, paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) {
+    let new = rows_from(paths, crops);
     while rows.row_count() > 0 {
         rows.remove(0);
     }
@@ -606,13 +616,16 @@ fn add_paths(
     picked: Vec<PathBuf>,
     files: &Arc<Mutex<Vec<PathBuf>>>,
     rows: &Rc<VecModel<FileRow>>,
+    crops: &Arc<Mutex<HashMap<PathBuf, (u32, u32, u32, u32)>>>,
     ui_weak: &slint::Weak<AppWindow>,
 ) {
     let mut guard = files.lock().unwrap();
     guard.extend(collect_images(&picked));
     guard.sort();
     guard.dedup();
-    refresh(rows, &guard);
+    let crops_guard = crops.lock().unwrap();
+    refresh(rows, &guard, &crops_guard);
+    drop(crops_guard);
     spawn_thumbnails(ui_weak.clone(), files.clone(), guard.clone());
 }
 

@@ -5,6 +5,7 @@ export struct FileRow {
     status: string,
     thumb: image,
     dims: string,
+    cropped: bool,
 }
 
 // Palette ---------------------------------------------------------------
@@ -330,8 +331,6 @@ export component AppWindow inherits Window {
     // Central image viewer.
     in-out property <int> selected-index: -1;
     in property <image> viewer-image;
-    in-out property <int> viewer-img-w;
-    in-out property <int> viewer-img-h;
     callback select-file(int);
 
     VerticalLayout {
@@ -495,7 +494,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     Rectangle {
-                                        visible: row.status == "cropped";
+                                        visible: row.cropped;
                                         height: 16px; border-radius: 999px; background: #2dd4bf;
                                         y: (parent.height - self.height) / 2;
                                         HorizontalLayout {
