@@ -299,7 +299,7 @@ export component AppWindow inherits Window {
     no-frame: true;
     preferred-width: 1320px;
     preferred-height: 840px;
-    min-width: 760px;
+    min-width: 860px;
     min-height: 560px;
     background: #16181d;
 
@@ -318,7 +318,7 @@ export component AppWindow inherits Window {
     // Adjustable side-panel widths (drag the splitters between cards). The viewer
     // takes the remaining space.
     in-out property <length> files-w: 280px;
-    in-out property <length> settings-w: 320px;
+    in-out property <length> settings-w: 340px;
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -421,6 +421,7 @@ export component AppWindow inherits Window {
             // Files card
             Card {
                 width: root.files-w;
+                clip: true;
                 VerticalLayout {
                     padding: 16px;
                     spacing: 12px;
@@ -569,12 +570,17 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Splitter { dragged(dx) => { root.files-w = Math.clamp(root.files-w + dx, 180px, 620px); } }
+            // Lower bound = the Files list's content width; upper bound keeps the
+            // viewer at >= its min so nothing is squeezed off-screen.
+            Splitter { dragged(dx) => {
+                root.files-w = Math.clamp(root.files-w + dx, 200px, root.width - root.settings-w - 296px);
+            } }
 
             // Viewer card
             Card {
-                min-width: 280px;
+                min-width: 240px;
                 horizontal-stretch: 1;
+                clip: true;
                 VerticalLayout {
                     padding: 12px; spacing: 8px;
 
@@ -810,11 +816,16 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Splitter { dragged(dx) => { root.settings-w = Math.clamp(root.settings-w - dx, 240px, 560px); } }
+            // Lower bound = the Settings form's content width (the widest row is
+            // the "Save to a subfolder…" label); upper bound keeps the viewer alive.
+            Splitter { dragged(dx) => {
+                root.settings-w = Math.clamp(root.settings-w - dx, 330px, root.width - root.files-w - 296px);
+            } }
 
             // Settings card
             Card {
                 width: root.settings-w;
+                clip: true;
                 VerticalLayout {
                     padding: 16px;
                     spacing: 14px;
