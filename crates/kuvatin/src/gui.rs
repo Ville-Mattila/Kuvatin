@@ -43,6 +43,58 @@ fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Proje
     }
 }
 
+/// Append a media file to the video timeline: create the project if needed,
+/// place the clip at track 0's end, mirror it into the timeline model, and play.
+/// Shared by the Open-media button and drag-and-drop.
+fn add_video_media(
+    path: &std::path::Path,
+    ui_weak: &slint::Weak<AppWindow>,
+    project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
+    assets: &Rc<VecModel<SharedString>>,
+    tl_clips: &Rc<VecModel<TimelineClip>>,
+) {
+    if project_slot.borrow().is_none() {
+        *project_slot.borrow_mut() = make_project(ui_weak);
+    }
+    let mut slot = project_slot.borrow_mut();
+    let Some(project) = slot.as_mut() else {
+        return;
+    };
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif");
+    let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
+    match project.append_clip(path, 0, img_dur) {
+        Ok(info) => {
+            let name: SharedString = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .into();
+            assets.push(name.clone());
+            tl_clips.push(TimelineClip {
+                track: 0,
+                start: info.start.as_secs_f32(),
+                duration: info.duration.as_secs_f32(),
+                name,
+                kind: if is_img { 1 } else { 0 },
+                selected: false,
+                thumb: Image::default(),
+            });
+            let _ = project.play();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_video_playing(true);
+                if let Some(d) = project.duration() {
+                    ui.set_timeline_duration(d.as_secs_f32());
+                }
+            }
+        }
+        Err(e) => eprintln!("append clip: {e:#}"),
+    }
+}
+
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
@@ -98,10 +150,22 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
+    // Video editor shared state: the GES project and its timeline models. Created
+    // here so both the drag-and-drop drain (below) and the video callbacks (later)
+    // can reach the same project and reflect dropped/opened media onto the timeline.
+    let video_project: Rc<RefCell<Option<kuvatin_video::Project>>> = Rc::new(RefCell::new(None));
+    let video_assets = Rc::new(VecModel::<SharedString>::from(Vec::<SharedString>::new()));
+    ui.set_video_clips(ModelRc::from(video_assets.clone()));
+    let video_tl = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
+    ui.set_timeline_clips(ModelRc::from(video_tl.clone()));
+    ui.set_timeline_track_labels(ModelRc::from(Rc::new(VecModel::<SharedString>::from(vec![
+        SharedString::from("Track 1"),
+    ]))));
+
     // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
-    // and drain dropped paths into the same add-files pipeline. The native HWND
-    // is only available after the window is shown, so we wire it up from a
-    // single-shot timer that fires once the event loop is running.
+    // and drain dropped paths into the right pipeline (images → file list,
+    // videos → timeline). The native HWND is only available after the window is
+    // shown, so we wire it up from a single-shot timer once the loop is running.
     #[cfg(windows)]
     {
         let files = files.clone();
@@ -122,14 +186,26 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // Keep the timer alive for the lifetime of the window.
         std::mem::forget(setup_timer);
 
-        // Drain dropped paths on the UI thread and feed them into add_paths.
+        // Drain dropped paths on the UI thread. In Images mode they go to the
+        // file list; in Videos mode each becomes a clip on the timeline.
+        let video_project = video_project.clone();
+        let video_assets = video_assets.clone();
+        let video_tl = video_tl.clone();
         let drain_timer = slint::Timer::default();
         drain_timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(150),
             move || {
                 let dropped = win_drop::take_dropped();
-                if !dropped.is_empty() {
+                if dropped.is_empty() {
+                    return;
+                }
+                let videos = ui_weak.upgrade().map(|ui| ui.get_app_mode() == 1).unwrap_or(false);
+                if videos {
+                    for path in dropped {
+                        add_video_media(&path, &ui_weak, &video_project, &video_assets, &video_tl);
+                    }
+                } else {
                     add_paths(dropped, &files, &rows, &crops, &ui_weak);
                 }
             },
@@ -487,15 +563,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // Opening media appends a clip to track 0 and mirrors it into the timeline model.
     {
         let ui_weak = ui.as_weak();
-        let project_slot: Rc<RefCell<Option<kuvatin_video::Project>>> = Rc::new(RefCell::new(None));
-        let assets = Rc::new(VecModel::<SharedString>::from(Vec::<SharedString>::new()));
-        ui.set_video_clips(ModelRc::from(assets.clone()));
-        let tl_clips = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
-        ui.set_timeline_clips(ModelRc::from(tl_clips.clone()));
-        let tracks = Rc::new(VecModel::<SharedString>::from(vec![SharedString::from("Track 1")]));
-        ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
+        // Models + project are created earlier (shared with drag-and-drop); reuse them.
+        let project_slot = video_project.clone();
+        let assets = video_assets.clone();
+        let tl_clips = video_tl.clone();
 
-        // Open media: append a clip to track 0 and reflect it on the timeline.
+        // Open media via the file dialog. Drag-and-drop takes the same path
+        // through add_video_media (wired into the drop drain above).
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
@@ -514,46 +588,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
-                if project_slot.borrow().is_none() {
-                    *project_slot.borrow_mut() = make_project(&ui_weak);
-                }
-                let mut slot = project_slot.borrow_mut();
-                let Some(project) = slot.as_mut() else {
-                    return;
-                };
-                let ext = path
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_lowercase())
-                    .unwrap_or_default();
-                let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif");
-                let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
-                match project.append_clip(&path, 0, img_dur) {
-                    Ok(info) => {
-                        let name: SharedString = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                            .into();
-                        assets.push(name.clone());
-                        tl_clips.push(TimelineClip {
-                            track: 0,
-                            start: info.start.as_secs_f32(),
-                            duration: info.duration.as_secs_f32(),
-                            name,
-                            kind: if is_img { 1 } else { 0 },
-                            selected: false,
-                            thumb: Image::default(),
-                        });
-                        let _ = project.play();
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_video_playing(true);
-                            if let Some(d) = project.duration() {
-                                ui.set_timeline_duration(d.as_secs_f32());
-                            }
-                        }
-                    }
-                    Err(e) => eprintln!("append clip: {e:#}"),
-                }
+                add_video_media(&path, &ui_weak, &project_slot, &assets, &tl_clips);
             });
         }
 
