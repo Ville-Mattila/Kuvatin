@@ -320,6 +320,10 @@ export component AppWindow inherits Window {
     in-out property <length> files-w: 280px;
     in-out property <length> settings-w: 340px;
 
+    // Video mode: the current decoded frame (set from Rust) and the open action.
+    in property <image> video-frame;
+    callback video-open();
+
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
     // Rust maps normalized → absolute pixels using the original image dimensions.
@@ -979,13 +983,61 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        if root.app-mode == 1: Rectangle {
-            vertical-stretch: 1;
-            background: #16181d;
-            Text {
-                text: "Video mode — coming soon";
-                color: #9aa3b2; font-size: 15px;
-                horizontal-alignment: center; vertical-alignment: center;
+        if root.app-mode == 1: HorizontalLayout {
+            padding: 16px;
+            spacing: 16px;
+
+            // Media panel
+            Card {
+                width: root.files-w;
+                clip: true;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+                    Text { text: "Media"; color: #f2f4f8; font-size: 15px; font-weight: 700; }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #181b21;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #2c313b;
+                        // clip list arrives in the next task
+                    }
+                    SecondaryButton {
+                        text: "Open video…";
+                        clicked => { root.video-open(); }
+                    }
+                }
+            }
+
+            // Video preview
+            Card {
+                min-width: 240px;
+                horizontal-stretch: 1;
+                clip: true;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    Text { text: "Preview"; color: #f2f4f8; font-size: 15px; font-weight: 700; }
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #000;
+                        border-radius: 8px;
+                        border-width: 1.5px;
+                        border-color: #2dd4bf;
+                        clip: true;
+                        if root.video-frame.width > 0 : Image {
+                            source: root.video-frame;
+                            image-fit: contain;
+                            width: 100%; height: 100%;
+                        }
+                        if root.video-frame.width <= 0 : Text {
+                            text: "Open a video to play";
+                            color: #6b7585; font-size: 13px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                }
             }
         }
     }

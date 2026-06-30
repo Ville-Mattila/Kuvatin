@@ -7,6 +7,7 @@ use kuvatin_core::format::OutputFormat;
 use kuvatin_core::pipeline::{Job, PngOptimize};
 use kuvatin_core::preset::PresetStore;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -451,6 +452,49 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     }
                 });
             });
+        });
+    }
+
+    // Video mode: open a clip, decode it with GStreamer, and push each RGBA frame
+    // into the Slint viewer. A fresh Player is created per opened file (the old one
+    // drops, stopping its pipeline). Frames arrive on a GStreamer thread and hop to
+    // the UI thread via invoke_from_event_loop, keeping only the latest.
+    {
+        let ui_weak = ui.as_weak();
+        let player_slot: Rc<RefCell<Option<kuvatin_video::Player>>> = Rc::new(RefCell::new(None));
+        ui.on_video_open(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
+                .pick_file()
+            else {
+                return;
+            };
+            let pending: Arc<Mutex<Option<kuvatin_video::Frame>>> = Arc::new(Mutex::new(None));
+            let ui_for_frame = ui_weak.clone();
+            let player = kuvatin_video::Player::new(move |frame| {
+                *pending.lock().unwrap() = Some(frame);
+                let ui_for_frame = ui_for_frame.clone();
+                let pending = pending.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let (Some(ui), Some(f)) =
+                        (ui_for_frame.upgrade(), pending.lock().unwrap().take())
+                    {
+                        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                            &f.rgba, f.width, f.height,
+                        );
+                        ui.set_video_frame(Image::from_rgba8(buf));
+                    }
+                });
+            });
+            match player {
+                Ok(player) => {
+                    if let Err(e) = player.load(&path).and_then(|_| player.play()) {
+                        eprintln!("video playback error: {e:#}");
+                    }
+                    *player_slot.borrow_mut() = Some(player);
+                }
+                Err(e) => eprintln!("video init error: {e:#}"),
+            }
         });
     }
 

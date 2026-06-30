@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 kuvatin-core = { path = "../kuvatin-core" }
+kuvatin-video = { path = "../kuvatin-video" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 image = { workspace = true }
