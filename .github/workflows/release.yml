@@ -21,6 +21,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install GStreamer (runtime + devel)
+        shell: pwsh
+        run: |
+          $ver = "1.26.11"
+          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc"
+          foreach ($f in @("gstreamer-1.0-msvc-x86_64-$ver.msi", "gstreamer-1.0-devel-msvc-x86_64-$ver.msi")) {
+            Invoke-WebRequest -Uri "$base/$f" -OutFile "$env:TEMP\$f"
+            Start-Process msiexec -ArgumentList "/i", "`"$env:TEMP\$f`"", "/qn", "ADDLOCAL=ALL", "/norestart" -Wait -NoNewWindow
+          }
+          # The build env (PKG_CONFIG etc.) comes from .cargo/config.toml; add the
+          # runtime bin to PATH so the bundled-DLL harvest and any run can find it.
+          "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Install cargo-wix
         run: cargo install cargo-wix
 
