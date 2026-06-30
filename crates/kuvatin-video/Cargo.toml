@@ -1,0 +1,12 @@
+[package]
+name = "kuvatin-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GStreamer-backed video playback for Kuvatin"
+
+[dependencies]
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+anyhow = { workspace = true }

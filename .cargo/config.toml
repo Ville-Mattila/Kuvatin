@@ -1,0 +1,16 @@
+# GStreamer (MSVC) build environment.
+#
+# gstreamer-rs locates the native GStreamer libraries via pkg-config. The
+# GStreamer MSVC dev SDK installs to this path by default and bundles its own
+# pkg-config (under bin), so we point cargo at it here. This makes `cargo build`
+# find GStreamer without any manual env setup.
+#
+# To RUN the app or tests (which load the GStreamer DLLs), also put
+# "<root>\bin" on PATH. End users get the DLLs bundled by the installer.
+#
+# If GStreamer is installed elsewhere, override these in your own
+# ~/.cargo/config.toml or the environment.
+[env]
+GSTREAMER_1_0_ROOT_MSVC_X86_64 = "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\"
+PKG_CONFIG = "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\bin\\pkg-config.exe"
+PKG_CONFIG_PATH = "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\lib\\pkgconfig"
