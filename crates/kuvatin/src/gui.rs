@@ -217,6 +217,50 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
+    // Selecting a file shows it large in the viewer (and prepares crop state).
+    {
+        let files = files.clone();
+        let crops = crops.clone();
+        let edit = edit.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_select_file(move |index| {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            let path = match files.lock().unwrap().get(index as usize) {
+                Some(p) => p.clone(),
+                None => return,
+            };
+            let Ok(img) = image::open(&path) else { return; };
+            let (ow, oh) = (img.width(), img.height());
+            if ow == 0 || oh == 0 { return; }
+
+            // Decode a display-sized preview; normalized crop coords stay size-independent.
+            let preview = img.thumbnail(1280, 1280).to_rgba8();
+            let (pw, ph) = (preview.width(), preview.height());
+            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(preview.as_raw(), pw, ph);
+            ui.set_viewer_image(Image::from_rgba8(buf));
+            ui.set_viewer_img_w(ow as i32);
+            ui.set_viewer_img_h(oh as i32);
+            ui.set_selected_index(index);
+
+            // Seed crop state for this file (used when the viewer enters Crop mode later).
+            ui.set_crop_img_w(ow as i32);
+            ui.set_crop_img_h(oh as i32);
+            let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
+            ui.set_crop_box_w(bw);
+            ui.set_crop_box_h(bh);
+            if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
+                ui.set_crop_x(x as f32 / ow as f32);
+                ui.set_crop_y(y as f32 / oh as f32);
+                ui.set_crop_w(w as f32 / ow as f32);
+                ui.set_crop_h(h as f32 / oh as f32);
+            } else {
+                ui.set_crop_x(0.0); ui.set_crop_y(0.0);
+                ui.set_crop_w(1.0); ui.set_crop_h(1.0);
+            }
+            *edit.lock().unwrap() = Some((path, ow, oh));
+        });
+    }
+
     // Open the crop editor for a queued file.
     {
         let files = files.clone();

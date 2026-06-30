@@ -297,6 +297,13 @@ export component AppWindow inherits Window {
     callback cancel-crop();
     callback clear-crop();
 
+    // Central image viewer.
+    in-out property <int> selected-index: -1;
+    in property <image> viewer-image;
+    in property <int> viewer-img-w;
+    in property <int> viewer-img-h;
+    callback select-file(int);
+
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
@@ -414,11 +421,11 @@ export component AppWindow inherits Window {
                         if root.files.length > 0: ListView {
                             for row[i] in root.files: Rectangle {
                                 height: 44px;
-                                background: row-ta.has-hover
-                                    ? #262b34
-                                    : (Math.mod(i, 2) == 0 ? transparent : #1c2027);
+                                background: root.selected-index == i
+                                    ? #2dd4bf18
+                                    : (row-ta.has-hover ? #262b34 : (Math.mod(i, 2) == 0 ? transparent : #1c2027));
                                 row-ta := TouchArea {
-                                    clicked => { root.start-crop(i); }
+                                    clicked => { root.select-file(i); }
                                 }
                                 HorizontalLayout {
                                     padding-left: 12px;
@@ -489,6 +496,36 @@ export component AppWindow inherits Window {
                             clicked => { root.clear-files(); }
                         }
                         Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+            }
+
+            // Viewer card
+            Card {
+                min-width: 360px;
+                horizontal-stretch: 2;
+                VerticalLayout {
+                    padding: 12px; spacing: 8px;
+
+                    // viewer surface
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #0b0d11;
+                        border-radius: 8px;
+                        border-width: 1.5px;
+                        border-color: #2dd4bf;
+                        clip: true;
+
+                        if root.selected-index < 0: Text {
+                            text: "Select a file to preview";
+                            color: #6b7585; font-size: 13px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        if root.selected-index >= 0: Image {
+                            source: root.viewer-image;
+                            image-fit: contain;
+                            width: 100%; height: 100%;
+                        }
                     }
                 }
             }
