@@ -204,6 +204,30 @@ component WinButton inherits Rectangle {
     }
 }
 
+component ModeToggle inherits Rectangle {
+    in-out property <int> mode;            // 0 = Images, 1 = Videos
+    width: 188px; height: 26px;
+    border-radius: 999px;
+    background: #14171c;
+    border-width: 1px;
+    border-color: #2c313b;
+    HorizontalLayout {
+        padding: 2px; spacing: 2px;
+        for seg[i] in ["Images", "Videos"]: Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 999px;
+            background: root.mode == i ? #2dd4bf : (ta.has-hover ? #20242c : transparent);
+            Text {
+                text: seg;
+                horizontal-alignment: center; vertical-alignment: center;
+                font-size: 12px; font-weight: 700;
+                color: root.mode == i ? #08110f : #9aa3b2;
+            }
+            ta := TouchArea { clicked => { root.mode = i; } }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
     icon: @image-url("../assets/kuvatin-icon.png");
@@ -224,6 +248,8 @@ export component AppWindow inherits Window {
     // PNG optimization mode: 0 = Normal, 1 = Optimize (lossless), 2 = Compress (lossy).
     in-out property <int> png-mode: 0;
     in-out property <string> preset-name;
+    // 0 = Images, 1 = Videos. Video mode is a placeholder until the GStreamer plan.
+    in-out property <int> app-mode: 0;
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -302,6 +328,8 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle { horizontal-stretch: 1; }
+                ModeToggle { mode <=> root.app-mode; y: (parent.height - self.height) / 2; }
+                Rectangle { horizontal-stretch: 1; }
 
                 WinButton { kind: "min"; clicked => { root.win-minimize(); } }
                 WinButton { kind: "max"; clicked => { root.win-maximize(); } }
@@ -310,7 +338,7 @@ export component AppWindow inherits Window {
         }
 
         // Body -----------------------------------------------------------
-        HorizontalLayout {
+        if root.app-mode == 0: HorizontalLayout {
             padding: 16px;
             spacing: 18px;
 
@@ -619,6 +647,15 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+        if root.app-mode == 1: Rectangle {
+            vertical-stretch: 1;
+            background: #16181d;
+            Text {
+                text: "Video mode — coming soon";
+                color: #9aa3b2; font-size: 15px;
+                horizontal-alignment: center; vertical-alignment: center;
             }
         }
     }
