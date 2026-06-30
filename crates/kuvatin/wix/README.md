@@ -41,16 +41,27 @@ custom actions in `main.wxs`).
 This is a Cargo **workspace**, so the package must be selected with `-p`. The
 WiX source references its sidecar files (e.g. `License.rtf`) with paths relative
 to the `wix/` folder, so run the command **from the package directory** so those
-relative paths resolve:
+relative paths resolve.
+
+The app links GStreamer and bundles its **runtime** into the installer, so the
+build is two steps: harvest the runtime (needs the GStreamer SDK installed and
+`heat.exe` on PATH), then build with the staging path passed to the compiler.
 
 ```pwsh
+# 1. Stage the GStreamer runtime + generate wix/gstreamer.wxs (gitignored).
+crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir "$PWD\target\gst-staging"
+
+# 2. Build the MSI, pointing the compiler at the staged runtime.
 cd crates/kuvatin
-cargo wix -p kuvatin --nocapture
+cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$(Resolve-Path ..\..\target\gst-staging)"
 ```
 
+`main.wxs` references the harvested `GstRuntime` component group, so step 1 must
+run before step 2 (CI does both — see `.github/workflows/release.yml`).
+
 The installer is written to `target/wix/kuvatin-<version>-x86_64.msi`
-(e.g. `kuvatin-1.5.0-x86_64.msi`). It is under `target/`, which is gitignored
-and not committed.
+(e.g. `kuvatin-1.5.0-x86_64.msi`), now ~106 MB because it carries the GStreamer
+runtime. It is under `target/`, which is gitignored and not committed.
 
 ## Regenerating main.wxs
 

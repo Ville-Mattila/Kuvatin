@@ -168,9 +168,13 @@
               the license sidecar file from the installer.
             -->
             <ComponentRef Id='License'/>
-            
+
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='StartMenuShortcut'/>
+
+            <!-- Bundled GStreamer runtime (DLLs next to the exe + plugins subdir),
+                 harvested by wix/bundle-gstreamer.ps1 into wix/gstreamer.wxs. -->
+            <ComponentGroupRef Id='GstRuntime'/>
 
             <Feature
                 Id='Environment'
