@@ -358,8 +358,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     model.set_row_data(i, row);
                 }
             }
-
-            ui.set_cropping(false);
         });
     }
 
