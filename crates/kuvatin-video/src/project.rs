@@ -19,6 +19,15 @@ use crate::Frame;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClipId(pub String);
 
+/// Where a clip ended up on the timeline (returned after placing it).
+#[derive(Clone, Debug)]
+pub struct ClipInfo {
+    pub id: ClipId,
+    pub track: usize,
+    pub start: Duration,
+    pub duration: Duration,
+}
+
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
 /// visual tracks, index 0 = bottom (top layers composite over lower ones).
 pub struct Project {
@@ -104,6 +113,52 @@ impl Project {
         self.layer(track).add_clip(&clip)?;
         self.timeline.commit_sync();
         Ok(ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()))
+    }
+
+    /// Append `path` to the end of track `track`, using its natural duration
+    /// (videos) or `image_dur` (still images, which have no intrinsic length).
+    pub fn append_clip(
+        &mut self,
+        path: &Path,
+        track: usize,
+        image_dur: Option<Duration>,
+    ) -> Result<ClipInfo> {
+        let uri = gst::glib::filename_to_uri(path, None)?;
+        let asset = ges::UriClipAsset::request_sync(&uri)?;
+        let dur_ct = match image_dur {
+            Some(d) => gst::ClockTime::from_nseconds(d.as_nanos() as u64),
+            None => asset.duration().unwrap_or(gst::ClockTime::from_seconds(5)),
+        };
+        let start_ct = self.track_end(track);
+        let layer = self.layer(track);
+        let clip = layer.add_asset(
+            &asset,
+            start_ct,
+            gst::ClockTime::ZERO,
+            dur_ct,
+            ges::TrackType::UNKNOWN,
+        )?;
+        self.timeline.commit_sync();
+        Ok(ClipInfo {
+            id: ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()),
+            track,
+            start: Duration::from_nanos(start_ct.nseconds()),
+            duration: Duration::from_nanos(dur_ct.nseconds()),
+        })
+    }
+
+    /// End time (start + duration) of the last clip on `track`, or zero.
+    fn track_end(&self, track: usize) -> gst::ClockTime {
+        self.layers
+            .get(track)
+            .map(|l| {
+                l.clips()
+                    .iter()
+                    .map(|c| c.start() + c.duration())
+                    .max()
+                    .unwrap_or(gst::ClockTime::ZERO)
+            })
+            .unwrap_or(gst::ClockTime::ZERO)
     }
 
     pub fn play(&self) -> Result<()> {

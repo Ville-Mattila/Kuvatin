@@ -8,6 +8,18 @@ export struct FileRow {
     cropped: bool,
 }
 
+// A clip placed on the video timeline. Positions are in seconds; the UI maps
+// them to pixels via the pixels-per-second zoom.
+export struct TimelineClip {
+    track: int,        // 0 = bottom layer
+    start: float,      // seconds from the timeline origin
+    duration: float,   // seconds
+    name: string,
+    kind: int,         // 0 = video, 1 = image
+    selected: bool,
+    thumb: image,
+}
+
 // Palette ---------------------------------------------------------------
 // window     #16181d
 // card       #20242c   border #2c313b   radius 10px
@@ -371,6 +383,16 @@ export component AppWindow inherits Window {
     callback video-playpause();
     callback video-seek(float);            // fraction 0..1
     callback video-volume-changed(float);  // 0..1
+
+    // Timeline editor.
+    in property <[TimelineClip]> timeline-clips;
+    in property <[string]> timeline-track-labels;  // one per track, top row first
+    in property <float> timeline-pps: 14.0;   // pixels per second (zoom)
+    in property <float> playhead: 0.0;        // seconds
+    in property <float> timeline-duration: 0.0; // seconds (for the ruler end)
+    in property <string> inspector-name: "";  // selected clip name (or empty)
+    callback timeline-select(int);            // clip index
+    callback timeline-seek-time(float);       // seconds (from ruler/lane click)
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -1038,111 +1060,166 @@ export component AppWindow inherits Window {
                 }
             }
         }
-        if root.app-mode == 1: HorizontalLayout {
-            padding: 16px;
-            spacing: 16px;
+        if root.app-mode == 1: VerticalLayout {
+            spacing: 0px;
 
-            // Media panel
-            Card {
-                width: root.files-w;
-                clip: true;
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 12px;
-                    Text { text: "Media"; color: #f2f4f8; font-size: 15px; font-weight: 700; }
-                    Rectangle {
-                        vertical-stretch: 1;
-                        background: #181b21;
-                        border-radius: 8px;
-                        border-width: 1px;
-                        border-color: #2c313b;
-                        clip: true;
-                        if root.video-clips.length == 0 : Text {
-                            text: "No clips yet";
-                            color: #6b7585; font-size: 12px;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
-                        if root.video-clips.length > 0 : ListView {
-                            for clip[i] in root.video-clips : Rectangle {
-                                height: 36px;
-                                background: root.video-selected == i
-                                    ? #2dd4bf18
-                                    : (clip-ta.has-hover ? #262b34 : transparent);
-                                clip-ta := TouchArea { clicked => { root.video-select(i); } }
-                                HorizontalLayout {
-                                    padding-left: 10px; padding-right: 10px;
-                                    Text {
-                                        text: clip; color: #f2f4f8; font-size: 12px;
-                                        vertical-alignment: center; overflow: elide;
+            // ===== Main row: media bin · composited viewer + transport · inspector =====
+            HorizontalLayout {
+                vertical-stretch: 1;
+                padding: 12px;
+                spacing: 12px;
+
+                // Media bin
+                Card {
+                    width: 186px;
+                    clip: true;
+                    VerticalLayout {
+                        padding: 11px;
+                        spacing: 7px;
+                        Text { text: "MEDIA"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            if root.video-clips.length == 0 : Text {
+                                text: "Open a video or image\nto add it here";
+                                color: #6b7585; font-size: 11px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            if root.video-clips.length > 0 : ListView {
+                                for asset[i] in root.video-clips : Rectangle {
+                                    height: 33px; border-radius: 7px;
+                                    background: root.video-selected == i ? #2dd4bf18 : (asset-ta.has-hover ? #262b34 : transparent);
+                                    asset-ta := TouchArea { clicked => { root.video-select(i); } }
+                                    HorizontalLayout {
+                                        padding-left: 8px; padding-right: 8px; spacing: 8px;
+                                        Rectangle { width: 32px; height: 21px; y: (parent.height - self.height) / 2; border-radius: 4px; background: #2c313b; border-width: 1px; border-color: #ffffff14; }
+                                        Text { text: asset; color: #cdd3dc; font-size: 11px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                                     }
                                 }
                             }
                         }
-                    }
-                    SecondaryButton {
-                        text: "Open video…";
-                        clicked => { root.video-open(); }
+                        SecondaryButton { text: "Open media…"; clicked => { root.video-open(); } }
                     }
                 }
-            }
 
-            // Video preview
-            Card {
-                min-width: 240px;
-                horizontal-stretch: 1;
-                clip: true;
+                // Composited viewer + transport
                 VerticalLayout {
-                    padding: 12px;
+                    horizontal-stretch: 1;
                     spacing: 8px;
-                    Text { text: "Preview"; color: #f2f4f8; font-size: 15px; font-weight: 700; }
                     Rectangle {
                         vertical-stretch: 1;
                         background: #000;
-                        border-radius: 8px;
-                        border-width: 1.5px;
-                        border-color: #2dd4bf;
+                        border-radius: 9px; border-width: 1px; border-color: #2c313b;
                         clip: true;
-                        if root.video-frame.width > 0 : Image {
-                            source: root.video-frame;
-                            image-fit: contain;
-                            width: 100%; height: 100%;
-                        }
+                        if root.video-frame.width > 0 : Image { source: root.video-frame; image-fit: contain; width: 100%; height: 100%; }
                         if root.video-frame.width <= 0 : Text {
-                            text: "Open a video to play";
+                            text: "Add a clip to the timeline to preview";
                             color: #6b7585; font-size: 13px;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
                     }
-
-                    // Transport
                     HorizontalLayout {
-                        height: 26px;
-                        spacing: 10px;
+                        height: 30px; spacing: 9px;
                         Rectangle {
-                            width: 30px;
-                            border-radius: 6px;
+                            width: 32px; border-radius: 8px;
                             background: pp-ta.has-hover ? #20242c : transparent;
-                            Text {
-                                text: root.video-playing ? "⏸" : "▶";
-                                color: #e6e9ef; font-size: 14px;
-                                horizontal-alignment: center; vertical-alignment: center;
-                            }
+                            Text { text: root.video-playing ? "⏸" : "▶"; color: #e6e9ef; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
                             pp-ta := TouchArea { clicked => { root.video-playpause(); } }
                         }
-                        Text {
-                            text: root.video-time;
-                            color: #9aa3b2; font-size: 11px;
-                            vertical-alignment: center;
-                        }
-                        Scrubber {
-                            value: root.video-position;
-                            changed(f) => { root.video-seek(f); }
-                        }
+                        Text { text: root.video-time; color: #9aa3b2; font-size: 11px; vertical-alignment: center; }
+                        Scrubber { value: root.video-position; changed(f) => { root.video-seek(f); } }
                         Text { text: "🔊"; font-size: 12px; vertical-alignment: center; }
-                        Scrubber {
-                            width: 70px;
-                            value: root.video-volume;
-                            changed(f) => { root.video-volume-changed(f); }
+                        Scrubber { width: 70px; value: root.video-volume; changed(f) => { root.video-volume-changed(f); } }
+                    }
+                }
+
+                // Inspector (full editing wired in a later task)
+                Card {
+                    width: 238px;
+                    clip: true;
+                    VerticalLayout {
+                        padding: 11px;
+                        spacing: 9px;
+                        Text { text: root.inspector-name == "" ? "INSPECTOR" : "LAYER"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; }
+                        if root.inspector-name == "" : Text {
+                            text: "Select a clip to edit its\ntransform, audio & trim";
+                            color: #6b7585; font-size: 11px; vertical-alignment: center; horizontal-alignment: center;
+                        }
+                        if root.inspector-name != "" : Text { text: root.inspector-name; color: #f2f4f8; font-size: 13px; font-weight: 600; }
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+            }
+
+            // ===== Timeline band =====
+            Rectangle {
+                height: 176px;
+                background: #101319;
+                border-width: 1px; border-color: #2c313b;
+                VerticalLayout {
+                    spacing: 0px;
+
+                    // toolbar
+                    Rectangle {
+                        height: 26px; background: #13161c;
+                        HorizontalLayout {
+                            padding-left: 11px; padding-right: 11px; spacing: 8px;
+                            Text { text: "TIMELINE"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Text { text: "drag clips to arrange"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
+                        }
+                    }
+
+                    // rows: gutter (track headers) + lane area
+                    HorizontalLayout {
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            width: 94px;
+                            for lbl[t] in root.timeline-track-labels : Rectangle {
+                                height: 30px; background: #13161c; border-width: 1px; border-color: #181c23;
+                                HorizontalLayout {
+                                    padding-left: 9px; spacing: 6px;
+                                    Text { text: "◉"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
+                                    Text { text: lbl; color: #8b95a6; font-size: 9px; vertical-alignment: center; overflow: elide; }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            clip: true;
+                            background: #0e1116;
+
+                            // row background stripes
+                            VerticalLayout {
+                                for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
+                            }
+
+                            // clip blocks (absolute: x from start, y from track)
+                            for clip[i] in root.timeline-clips : Rectangle {
+                                x: (clip.start * root.timeline-pps) * 1px;
+                                y: clip.track * 30px + 4px;
+                                width: (clip.duration * root.timeline-pps) * 1px;
+                                height: 22px;
+                                border-radius: 6px;
+                                clip: true;
+                                background: clip.kind == 0
+                                    ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
+                                    : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
+                                border-width: clip.selected ? 2px : 1px;
+                                border-color: clip.selected ? #2dd4bf : #00000055;
+                                Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 7px; y: (parent.height - self.height) / 2; }
+                                Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
+                                Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                TouchArea { clicked => { root.timeline-select(i); } }
+                            }
+
+                            // playhead
+                            Rectangle {
+                                x: (root.playhead * root.timeline-pps) * 1px;
+                                width: 2px; height: parent.height;
+                                background: #ff5470;
+                            }
                         }
                     }
                 }

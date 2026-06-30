@@ -18,17 +18,12 @@ slint::include_modules!();
 /// Create a video Player for `path`, start playback, and store it in `slot`
 /// (dropping any previous player). Decoded RGBA frames are pushed to the UI's
 /// `video-frame` from the GStreamer thread via `invoke_from_event_loop`.
-fn start_video(
-    path: &std::path::Path,
-    ui_weak: &slint::Weak<AppWindow>,
-    slot: &Rc<RefCell<Option<kuvatin_video::Player>>>,
-) {
-    let Some(ui) = ui_weak.upgrade() else {
-        return;
-    };
+/// Create a GES editing project whose composited preview frames are pushed to
+/// the UI's `video-frame` (from a GStreamer thread, hopped to the UI thread).
+fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Project> {
     let pending: Arc<Mutex<Option<kuvatin_video::Frame>>> = Arc::new(Mutex::new(None));
     let ui_for_frame = ui_weak.clone();
-    let player = kuvatin_video::Player::new(move |frame| {
+    match kuvatin_video::Project::new(move |frame| {
         *pending.lock().unwrap() = Some(frame);
         let ui_for_frame = ui_for_frame.clone();
         let pending = pending.clone();
@@ -39,17 +34,12 @@ fn start_video(
                 ui.set_video_frame(Image::from_rgba8(buf));
             }
         });
-    });
-    match player {
-        Ok(player) => {
-            player.set_volume(ui.get_video_volume() as f64);
-            if let Err(e) = player.load(path).and_then(|_| player.play()) {
-                eprintln!("video playback error: {e:#}");
-            }
-            ui.set_video_playing(true);
-            *slot.borrow_mut() = Some(player);
+    }) {
+        Ok(project) => Some(project),
+        Err(e) => {
+            eprintln!("video project init error: {e:#}");
+            None
         }
-        Err(e) => eprintln!("video init error: {e:#}"),
     }
 }
 
@@ -493,125 +483,176 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
-    // Video mode: open/select clips, play them, and drive the transport. One
-    // shared player_slot holds the current Player so every control reaches it.
+    // Video editor: a GES Project drives the composited preview and the timeline.
+    // Opening media appends a clip to track 0 and mirrors it into the timeline model.
     {
         let ui_weak = ui.as_weak();
-        let player_slot: Rc<RefCell<Option<kuvatin_video::Player>>> = Rc::new(RefCell::new(None));
-        let clips: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
-        let clip_rows = Rc::new(VecModel::<SharedString>::from(Vec::<SharedString>::new()));
-        ui.set_video_clips(ModelRc::from(clip_rows.clone()));
+        let project_slot: Rc<RefCell<Option<kuvatin_video::Project>>> = Rc::new(RefCell::new(None));
+        let assets = Rc::new(VecModel::<SharedString>::from(Vec::<SharedString>::new()));
+        ui.set_video_clips(ModelRc::from(assets.clone()));
+        let tl_clips = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
+        ui.set_timeline_clips(ModelRc::from(tl_clips.clone()));
+        let tracks = Rc::new(VecModel::<SharedString>::from(vec![SharedString::from("Track 1")]));
+        ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
 
-        // Open a file: append to the clip list and play it.
+        // Open media: append a clip to track 0 and reflect it on the timeline.
         {
             let ui_weak = ui_weak.clone();
-            let player_slot = player_slot.clone();
-            let clips = clips.clone();
-            let clip_rows = clip_rows.clone();
+            let project_slot = project_slot.clone();
+            let assets = assets.clone();
+            let tl_clips = tl_clips.clone();
             ui.on_video_open(move || {
                 let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"])
+                    .add_filter(
+                        "Media",
+                        &[
+                            "mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv", "png", "jpg", "jpeg",
+                            "webp", "bmp", "gif",
+                        ],
+                    )
                     .pick_file()
                 else {
                     return;
                 };
-                let name: SharedString = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-                    .into();
-                clips.borrow_mut().push(path.clone());
-                clip_rows.push(name);
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_video_selected(clips.borrow().len() as i32 - 1);
+                if project_slot.borrow().is_none() {
+                    *project_slot.borrow_mut() = make_project(&ui_weak);
                 }
-                start_video(&path, &ui_weak, &player_slot);
+                let mut slot = project_slot.borrow_mut();
+                let Some(project) = slot.as_mut() else {
+                    return;
+                };
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif");
+                let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
+                match project.append_clip(&path, 0, img_dur) {
+                    Ok(info) => {
+                        let name: SharedString = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                            .into();
+                        assets.push(name.clone());
+                        tl_clips.push(TimelineClip {
+                            track: 0,
+                            start: info.start.as_secs_f32(),
+                            duration: info.duration.as_secs_f32(),
+                            name,
+                            kind: if is_img { 1 } else { 0 },
+                            selected: false,
+                            thumb: Image::default(),
+                        });
+                        let _ = project.play();
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_video_playing(true);
+                            if let Some(d) = project.duration() {
+                                ui.set_timeline_duration(d.as_secs_f32());
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("append clip: {e:#}"),
+                }
             });
         }
 
-        // Select an already-opened clip.
+        // Media-bin asset click: highlight it.
         {
             let ui_weak = ui_weak.clone();
-            let player_slot = player_slot.clone();
-            let clips = clips.clone();
             ui.on_video_select(move |i| {
-                let Some(path) = clips.borrow().get(i as usize).cloned() else {
-                    return;
-                };
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_video_selected(i);
                 }
-                start_video(&path, &ui_weak, &player_slot);
+            });
+        }
+
+        // Timeline clip click: select it (highlight + inspector).
+        {
+            let ui_weak = ui_weak.clone();
+            let tl_clips = tl_clips.clone();
+            ui.on_timeline_select(move |i| {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let mut name = SharedString::new();
+                for idx in 0..tl_clips.row_count() {
+                    if let Some(mut c) = tl_clips.row_data(idx) {
+                        c.selected = idx as i32 == i;
+                        if c.selected {
+                            name = c.name.clone();
+                        }
+                        tl_clips.set_row_data(idx, c);
+                    }
+                }
+                ui.set_inspector_name(name);
             });
         }
 
         // Play / pause.
         {
             let ui_weak = ui_weak.clone();
-            let player_slot = player_slot.clone();
+            let project_slot = project_slot.clone();
             ui.on_video_playpause(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
-                let slot = player_slot.borrow();
-                let Some(player) = slot.as_ref() else {
+                let slot = project_slot.borrow();
+                let Some(project) = slot.as_ref() else {
                     return;
                 };
                 if ui.get_video_playing() {
-                    let _ = player.pause();
+                    let _ = project.pause();
                     ui.set_video_playing(false);
                 } else {
-                    let _ = player.play();
+                    let _ = project.play();
                     ui.set_video_playing(true);
                 }
             });
         }
 
-        // Seek to a fraction of the duration.
+        // Seek to a fraction of the timeline.
         {
-            let player_slot = player_slot.clone();
+            let project_slot = project_slot.clone();
             ui.on_video_seek(move |frac| {
-                let slot = player_slot.borrow();
-                if let Some(player) = slot.as_ref() {
-                    if let Some(dur) = player.duration() {
-                        let _ = player.seek(dur.mul_f32(frac.clamp(0.0, 1.0)));
+                let slot = project_slot.borrow();
+                if let Some(project) = slot.as_ref() {
+                    if let Some(dur) = project.duration() {
+                        let _ = project.seek(dur.mul_f32(frac.clamp(0.0, 1.0)));
                     }
                 }
             });
         }
 
-        // Volume.
+        // Volume (wired to the GES project in a later task; updates the UI now).
         {
             let ui_weak = ui_weak.clone();
-            let player_slot = player_slot.clone();
             ui.on_video_volume_changed(move |v| {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_video_volume(v);
                 }
-                if let Some(player) = player_slot.borrow().as_ref() {
-                    player.set_volume(v as f64);
-                }
             });
         }
 
-        // Advance the scrubber + time label while playing.
+        // Advance the playhead + scrubber + time while playing.
         {
             let ui_weak = ui_weak.clone();
-            let player_slot = player_slot.clone();
+            let project_slot = project_slot.clone();
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
-                std::time::Duration::from_millis(250),
+                std::time::Duration::from_millis(200),
                 move || {
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };
-                    let slot = player_slot.borrow();
-                    let Some(player) = slot.as_ref() else {
+                    let slot = project_slot.borrow();
+                    let Some(project) = slot.as_ref() else {
                         return;
                     };
-                    let pos = player.position().unwrap_or_default();
-                    let dur = player.duration().unwrap_or_default();
+                    let pos = project.position().unwrap_or_default();
+                    let dur = project.duration().unwrap_or_default();
+                    ui.set_playhead(pos.as_secs_f32());
                     let frac = if dur.as_secs_f32() > 0.0 {
                         (pos.as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0)
                     } else {
