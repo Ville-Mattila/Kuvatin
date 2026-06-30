@@ -243,10 +243,10 @@
 <section class="intro" id="top">
   <div class="intro-stage" id="introStage">
     <div class="intro-panel" id="introLogo">
-      <span class="pill"><span class="dot"></span> Free &amp; open source · Windows &amp; macOS · Rust</span>
+      <span class="pill"><span class="dot"></span> Free &amp; open source · Windows · Rust</span>
       <h1 style="margin:0"><img class="hero-logo" src="assets/kuvatin-logo-anim.svg" alt="Kuvatin" /></h1>
       <p class="hero-tag">Convert or/and shrink images <span class="accent">without</span> the busywork.</p>
-      <p class="sub">A tiny native app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your right-click menu, on Windows and macOS.</p>
+      <p class="sub">A tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
       <div class="cta">
         <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
@@ -382,19 +382,14 @@
     <div class="tilt fade">
       <div class="iconbig"><img src="assets/kuvatin-icon.svg" alt="Kuvatin icon" /></div>
       <h2>Get Kuvatin</h2>
-      <p>A small <b style="color:var(--ink)">.msi</b> on Windows or a universal <b style="color:var(--ink)">.dmg</b> on macOS — both wire up the right-click menu (and on Windows a Start-menu shortcut), upgrading any older version in place.</p>
+      <p>A single small <b style="color:var(--ink)">.msi</b> that adds a Start-menu shortcut, wires up the right-click menu, and upgrades any older version in place.</p>
       <div class="cta">
-        <a class="btn btn-primary dl" data-os="win" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
+        <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-          <span class="dl-text"><span class="dl-main" data-vtmpl="Download Kuvatin {v}">Download for Windows</span><span class="dl-file">latest .msi</span></span>
-        </a>
-        <a class="btn btn-primary dl" data-os="mac" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-          <span class="dl-text"><span class="dl-main" data-vtmpl="Download Kuvatin {v}">Download for macOS</span><span class="dl-file">latest .dmg</span></span>
+          <span class="dl-text"><span class="dl-main" data-vtmpl="Download Kuvatin {v}">Download latest .msi</span><span class="dl-file">latest .msi</span></span>
         </a>
         <a class="btn btn-ghost" href="https://github.com/Ville-Mattila/Kuvatin/releases" target="_blank" rel="noopener">All releases</a>
       </div>
-      <p class="gatekeeper" style="margin:14px 0 0;font-size:12.5px;color:#9aa3b2;max-width:560px">macOS build isn't notarized — on first launch right-click the app → <b style="color:var(--ink)">Open</b>, or run <code style="background:rgba(255,255,255,.06);padding:1px 6px;border-radius:5px">xattr&nbsp;-dr&nbsp;com.apple.quarantine&nbsp;/Applications/Kuvatin.app</code></p>
       <div class="install">
         <div class="top">prefer to build it yourself?</div>
         <code><span class="m"># clone, build, run — needs the Rust MSVC toolchain</span>
@@ -667,22 +662,16 @@ cargo run <span class="c">-p</span> kuvatin</code>
 })();
 </script>
 <script>
-/* Point each download button straight at the latest release asset for its OS
-   (.msi for Windows, .dmg for macOS) and show its version + filename. A button's
-   data-os attribute selects the asset ("win" if absent). Falls back to the
-   releases page if the API is unreachable. */
+/* Point the download buttons straight at the latest release's .msi and show its
+   version + filename. Falls back to the releases page if the API is unreachable. */
 (function(){
   fetch("https://api.github.com/repos/Ville-Mattila/Kuvatin/releases/latest", { headers:{ "Accept":"application/vnd.github+json" }})
     .then(function(r){ return r.ok ? r.json() : Promise.reject(r.status); })
     .then(function(rel){
       var ver = (rel.tag_name || "").replace(/^v/i, "");
-      if(!ver){ return; }
-      var assets = rel.assets || [];
-      var msi = assets.filter(function(a){ return /\.msi$/i.test(a.name); })[0];
-      var dmg = assets.filter(function(a){ return /\.dmg$/i.test(a.name); })[0];
+      var asset = (rel.assets || []).filter(function(a){ return /\.msi$/i.test(a.name); })[0];
+      if(!ver || !asset){ return; }
       document.querySelectorAll("a.dl").forEach(function(a){
-        var asset = (a.dataset.os === "mac") ? dmg : msi;
-        if(!asset){ return; }
         a.href = asset.browser_download_url;
         a.removeAttribute("target");
         var main = a.querySelector(".dl-main");

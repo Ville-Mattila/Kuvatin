@@ -11,18 +11,10 @@ pub struct Preset {
     pub job: Job,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PresetStore {
     #[serde(default)]
     pub presets: Vec<Preset>,
-    /// Whether the OS right-click menu integration is enabled (macOS Finder
-    /// Quick Actions; the Windows installer manages this independently).
-    #[serde(default = "default_true")]
-    pub finder_integration: bool,
 }
 
 impl PresetStore {
@@ -54,7 +46,6 @@ impl PresetStore {
                 Preset { name: "Resize to 1080p".into(), job: p1080 },
                 Preset { name: "Resize to 50%".into(), job: half },
             ],
-            finder_integration: true,
         }
     }
 
