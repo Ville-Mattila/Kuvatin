@@ -15,6 +15,44 @@ use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
+/// Create a video Player for `path`, start playback, and store it in `slot`
+/// (dropping any previous player). Decoded RGBA frames are pushed to the UI's
+/// `video-frame` from the GStreamer thread via `invoke_from_event_loop`.
+fn start_video(
+    path: &std::path::Path,
+    ui_weak: &slint::Weak<AppWindow>,
+    slot: &Rc<RefCell<Option<kuvatin_video::Player>>>,
+) {
+    let Some(ui) = ui_weak.upgrade() else {
+        return;
+    };
+    let pending: Arc<Mutex<Option<kuvatin_video::Frame>>> = Arc::new(Mutex::new(None));
+    let ui_for_frame = ui_weak.clone();
+    let player = kuvatin_video::Player::new(move |frame| {
+        *pending.lock().unwrap() = Some(frame);
+        let ui_for_frame = ui_for_frame.clone();
+        let pending = pending.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let (Some(ui), Some(f)) = (ui_for_frame.upgrade(), pending.lock().unwrap().take()) {
+                let buf =
+                    SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&f.rgba, f.width, f.height);
+                ui.set_video_frame(Image::from_rgba8(buf));
+            }
+        });
+    });
+    match player {
+        Ok(player) => {
+            player.set_volume(ui.get_video_volume() as f64);
+            if let Err(e) = player.load(path).and_then(|_| player.play()) {
+                eprintln!("video playback error: {e:#}");
+            }
+            ui.set_video_playing(true);
+            *slot.borrow_mut() = Some(player);
+        }
+        Err(e) => eprintln!("video init error: {e:#}"),
+    }
+}
+
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
@@ -455,47 +493,140 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         });
     }
 
-    // Video mode: open a clip, decode it with GStreamer, and push each RGBA frame
-    // into the Slint viewer. A fresh Player is created per opened file (the old one
-    // drops, stopping its pipeline). Frames arrive on a GStreamer thread and hop to
-    // the UI thread via invoke_from_event_loop, keeping only the latest.
+    // Video mode: open/select clips, play them, and drive the transport. One
+    // shared player_slot holds the current Player so every control reaches it.
     {
         let ui_weak = ui.as_weak();
         let player_slot: Rc<RefCell<Option<kuvatin_video::Player>>> = Rc::new(RefCell::new(None));
-        ui.on_video_open(move || {
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v"])
-                .pick_file()
-            else {
-                return;
-            };
-            let pending: Arc<Mutex<Option<kuvatin_video::Frame>>> = Arc::new(Mutex::new(None));
-            let ui_for_frame = ui_weak.clone();
-            let player = kuvatin_video::Player::new(move |frame| {
-                *pending.lock().unwrap() = Some(frame);
-                let ui_for_frame = ui_for_frame.clone();
-                let pending = pending.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let (Some(ui), Some(f)) =
-                        (ui_for_frame.upgrade(), pending.lock().unwrap().take())
-                    {
-                        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                            &f.rgba, f.width, f.height,
-                        );
-                        ui.set_video_frame(Image::from_rgba8(buf));
-                    }
-                });
-            });
-            match player {
-                Ok(player) => {
-                    if let Err(e) = player.load(&path).and_then(|_| player.play()) {
-                        eprintln!("video playback error: {e:#}");
-                    }
-                    *player_slot.borrow_mut() = Some(player);
+        let clips: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let clip_rows = Rc::new(VecModel::<SharedString>::from(Vec::<SharedString>::new()));
+        ui.set_video_clips(ModelRc::from(clip_rows.clone()));
+
+        // Open a file: append to the clip list and play it.
+        {
+            let ui_weak = ui_weak.clone();
+            let player_slot = player_slot.clone();
+            let clips = clips.clone();
+            let clip_rows = clip_rows.clone();
+            ui.on_video_open(move || {
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Video", &["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                let name: SharedString = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+                    .into();
+                clips.borrow_mut().push(path.clone());
+                clip_rows.push(name);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_video_selected(clips.borrow().len() as i32 - 1);
                 }
-                Err(e) => eprintln!("video init error: {e:#}"),
-            }
-        });
+                start_video(&path, &ui_weak, &player_slot);
+            });
+        }
+
+        // Select an already-opened clip.
+        {
+            let ui_weak = ui_weak.clone();
+            let player_slot = player_slot.clone();
+            let clips = clips.clone();
+            ui.on_video_select(move |i| {
+                let Some(path) = clips.borrow().get(i as usize).cloned() else {
+                    return;
+                };
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_video_selected(i);
+                }
+                start_video(&path, &ui_weak, &player_slot);
+            });
+        }
+
+        // Play / pause.
+        {
+            let ui_weak = ui_weak.clone();
+            let player_slot = player_slot.clone();
+            ui.on_video_playpause(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let slot = player_slot.borrow();
+                let Some(player) = slot.as_ref() else {
+                    return;
+                };
+                if ui.get_video_playing() {
+                    let _ = player.pause();
+                    ui.set_video_playing(false);
+                } else {
+                    let _ = player.play();
+                    ui.set_video_playing(true);
+                }
+            });
+        }
+
+        // Seek to a fraction of the duration.
+        {
+            let player_slot = player_slot.clone();
+            ui.on_video_seek(move |frac| {
+                let slot = player_slot.borrow();
+                if let Some(player) = slot.as_ref() {
+                    if let Some(dur) = player.duration() {
+                        let _ = player.seek(dur.mul_f32(frac.clamp(0.0, 1.0)));
+                    }
+                }
+            });
+        }
+
+        // Volume.
+        {
+            let ui_weak = ui_weak.clone();
+            let player_slot = player_slot.clone();
+            ui.on_video_volume_changed(move |v| {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_video_volume(v);
+                }
+                if let Some(player) = player_slot.borrow().as_ref() {
+                    player.set_volume(v as f64);
+                }
+            });
+        }
+
+        // Advance the scrubber + time label while playing.
+        {
+            let ui_weak = ui_weak.clone();
+            let player_slot = player_slot.clone();
+            let timer = slint::Timer::default();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(250),
+                move || {
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    let slot = player_slot.borrow();
+                    let Some(player) = slot.as_ref() else {
+                        return;
+                    };
+                    let pos = player.position().unwrap_or_default();
+                    let dur = player.duration().unwrap_or_default();
+                    let frac = if dur.as_secs_f32() > 0.0 {
+                        (pos.as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    ui.set_video_position(frac);
+                    fn fmt(d: std::time::Duration) -> String {
+                        let s = d.as_secs();
+                        format!("{}:{:02}", s / 60, s % 60)
+                    }
+                    ui.set_video_time(format!("{} / {}", fmt(pos), fmt(dur)).into());
+                },
+            );
+            std::mem::forget(timer);
+        }
     }
 
     ui.run()?;

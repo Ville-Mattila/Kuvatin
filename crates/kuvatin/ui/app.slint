@@ -293,6 +293,44 @@ component NumberDropdown inherits Rectangle {
     }
 }
 
+// A thin 0..1 slider used for the video scrubber and volume. Reports the new
+// fraction via `changed` on click or drag.
+component Scrubber inherits Rectangle {
+    in property <float> value;     // 0..1
+    callback changed(float);
+    min-height: 18px;
+    max-height: 18px;
+    horizontal-stretch: 1;
+    Rectangle {
+        y: parent.height / 2 - 3px;
+        height: 6px;
+        border-radius: 3px;
+        background: #2c313b;
+        Rectangle {
+            x: 0;
+            width: parent.width * Math.clamp(root.value, 0, 1);
+            height: parent.height;
+            border-radius: 3px;
+            background: #2dd4bf;
+        }
+    }
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: sta.has-hover || sta.pressed ? #e6fffb : white;
+        border-width: 2px;
+        border-color: #2dd4bf;
+        y: parent.height / 2 - 6px;
+        x: (root.width - 12px) * Math.clamp(root.value, 0, 1);
+    }
+    sta := TouchArea {
+        function emit(mx: length) { root.changed(Math.clamp(mx / root.width, 0, 1)); }
+        moved => { sta.emit(sta.mouse-x); }
+        clicked => { sta.emit(sta.mouse-x); }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
     icon: @image-url("../assets/kuvatin-icon.png");
@@ -320,9 +358,19 @@ export component AppWindow inherits Window {
     in-out property <length> files-w: 280px;
     in-out property <length> settings-w: 340px;
 
-    // Video mode: the current decoded frame (set from Rust) and the open action.
+    // Video mode state (set from Rust) and actions.
     in property <image> video-frame;
+    in-out property <bool> video-playing: false;
+    in property <float> video-position: 0.0;        // 0..1 along the clip
+    in property <string> video-time: "0:00 / 0:00";
+    in-out property <float> video-volume: 1.0;       // 0..1
+    in property <[string]> video-clips;
+    in-out property <int> video-selected: -1;
     callback video-open();
+    callback video-select(int);
+    callback video-playpause();
+    callback video-seek(float);            // fraction 0..1
+    callback video-volume-changed(float);  // 0..1
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -1001,7 +1049,28 @@ export component AppWindow inherits Window {
                         border-radius: 8px;
                         border-width: 1px;
                         border-color: #2c313b;
-                        // clip list arrives in the next task
+                        clip: true;
+                        if root.video-clips.length == 0 : Text {
+                            text: "No clips yet";
+                            color: #6b7585; font-size: 12px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        if root.video-clips.length > 0 : ListView {
+                            for clip[i] in root.video-clips : Rectangle {
+                                height: 36px;
+                                background: root.video-selected == i
+                                    ? #2dd4bf18
+                                    : (clip-ta.has-hover ? #262b34 : transparent);
+                                clip-ta := TouchArea { clicked => { root.video-select(i); } }
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    Text {
+                                        text: clip; color: #f2f4f8; font-size: 12px;
+                                        vertical-alignment: center; overflow: elide;
+                                    }
+                                }
+                            }
+                        }
                     }
                     SecondaryButton {
                         text: "Open video…";
@@ -1035,6 +1104,38 @@ export component AppWindow inherits Window {
                             text: "Open a video to play";
                             color: #6b7585; font-size: 13px;
                             horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+
+                    // Transport
+                    HorizontalLayout {
+                        height: 26px;
+                        spacing: 10px;
+                        Rectangle {
+                            width: 30px;
+                            border-radius: 6px;
+                            background: pp-ta.has-hover ? #20242c : transparent;
+                            Text {
+                                text: root.video-playing ? "⏸" : "▶";
+                                color: #e6e9ef; font-size: 14px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            pp-ta := TouchArea { clicked => { root.video-playpause(); } }
+                        }
+                        Text {
+                            text: root.video-time;
+                            color: #9aa3b2; font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Scrubber {
+                            value: root.video-position;
+                            changed(f) => { root.video-seek(f); }
+                        }
+                        Text { text: "🔊"; font-size: 12px; vertical-alignment: center; }
+                        Scrubber {
+                            width: 70px;
+                            value: root.video-volume;
+                            changed(f) => { root.video-volume-changed(f); }
                         }
                     }
                 }
