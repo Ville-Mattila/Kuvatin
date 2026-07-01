@@ -213,6 +213,7 @@ impl Project {
         let new_start = (start + delta).max(0) as u64;
         clip.set_start(gst::ClockTime::from_nseconds(new_start));
         self.timeline.commit();
+        self.refresh();
         Some(clip_geom(&clip))
     }
 
@@ -272,6 +273,7 @@ impl Project {
             clip.set_duration(gst::ClockTime::from_nseconds(new_dur as u64));
         }
         self.timeline.commit();
+        self.refresh();
         Some(clip_geom(&clip))
     }
 
@@ -311,6 +313,7 @@ impl Project {
         let _ = clip.set_child_property("alpha", &t.alpha.to_value());
         let _ = clip.set_child_property("volume", &t.volume.to_value());
         self.timeline.commit();
+        self.refresh();
     }
 
     /// End time (start + duration) of the last clip on `track`, or zero.
@@ -343,6 +346,25 @@ impl Project {
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
         )?;
         Ok(())
+    }
+
+    /// Force the preview to re-render the current frame after an edit. While
+    /// actively playing, frames already flow so this is a no-op; when paused or
+    /// stopped at the end, a flushing seek to the current position repaints it.
+    fn refresh(&self) {
+        let playing = self.pipeline.current_state() == gst::State::Playing;
+        let at_end = matches!(
+            (self.position(), self.duration()),
+            (Some(p), Some(d)) if p + Duration::from_millis(60) >= d
+        );
+        if playing && !at_end {
+            return;
+        }
+        let pos = self.position().unwrap_or(Duration::ZERO);
+        let _ = self.pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
+        );
     }
 
     pub fn position(&self) -> Option<Duration> {

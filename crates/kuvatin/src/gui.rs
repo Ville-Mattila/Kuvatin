@@ -162,9 +162,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     ui.set_video_clips(ModelRc::from(video_assets.clone()));
     let video_tl = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
     ui.set_timeline_clips(ModelRc::from(video_tl.clone()));
+    // Rows are drawn top-to-bottom, highest GES layer first, so the overlay
+    // (layer 1) sits above the video (layer 0) — see the inverted clip `y`.
     ui.set_timeline_track_labels(ModelRc::from(Rc::new(VecModel::<SharedString>::from(vec![
-        SharedString::from("Video"),
         SharedString::from("Overlay"),
+        SharedString::from("Video"),
     ]))));
 
     // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window

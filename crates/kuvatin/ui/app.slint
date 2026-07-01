@@ -422,6 +422,9 @@ export component AppWindow inherits Window {
     // takes the remaining space.
     in-out property <length> files-w: 280px;
     in-out property <length> settings-w: 340px;
+    // Video mode: adjustable media-bin and inspector widths (draggable splitters).
+    in-out property <length> video-bin-w: 186px;
+    in-out property <length> video-insp-w: 238px;
 
     // Video mode state (set from Rust) and actions.
     in property <image> video-frame;
@@ -1134,7 +1137,7 @@ export component AppWindow inherits Window {
 
                 // Media bin
                 Card {
-                    width: 186px;
+                    width: root.video-bin-w;
                     clip: true;
                     VerticalLayout {
                         padding: 11px;
@@ -1161,6 +1164,12 @@ export component AppWindow inherits Window {
                             }
                         }
                         SecondaryButton { text: "Open media…"; clicked => { root.video-open(); } }
+                    }
+                }
+
+                Splitter {
+                    dragged(dx) => {
+                        root.video-bin-w = Math.clamp(root.video-bin-w + dx, 150px, root.width - root.video-insp-w - 320px);
                     }
                 }
 
@@ -1195,9 +1204,15 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                Splitter {
+                    dragged(dx) => {
+                        root.video-insp-w = Math.clamp(root.video-insp-w - dx, 200px, root.width - root.video-bin-w - 320px);
+                    }
+                }
+
                 // Inspector: edit the selected clip's transform, opacity & volume.
                 Card {
-                    width: 238px;
+                    width: root.video-insp-w;
                     clip: true;
                     VerticalLayout {
                         padding: 11px;
@@ -1275,7 +1290,8 @@ export component AppWindow inherits Window {
                             // live from the pointer delta. dmode: 0 idle,1 slide,2 ltrim,3 rtrim.
                             for clip[i] in root.timeline-clips : blk := Rectangle {
                                 x: (clip.start * root.timeline-pps) * 1px;
-                                y: clip.track * 30px + 4px;
+                                // Invert track → row so higher GES layers sit on top.
+                                y: ((root.timeline-track-labels.length - 1) - clip.track) * 30px + 4px;
                                 width: (clip.duration * root.timeline-pps) * 1px;
                                 height: 22px;
                                 background: transparent;
