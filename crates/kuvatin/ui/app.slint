@@ -1133,7 +1133,9 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 vertical-stretch: 1;
                 padding: 12px;
-                spacing: 12px;
+                // Zero spacing: the 12px Splitter is the whole inter-panel gap
+                // (matches the image view's thin handles).
+                spacing: 0px;
 
                 // Media bin
                 Card {
