@@ -441,10 +441,12 @@ export component AppWindow inherits Window {
     in property <[VideoAsset]> video-clips;
     in-out property <int> video-selected: -1;
     callback video-open();
-    callback video-select(int);
+    callback video-select(int);            // highlight a media-bin item
+    callback video-add(int);               // add a media-bin item to the timeline
     callback video-playpause();
     callback video-seek(float);            // fraction 0..1
     callback video-volume-changed(float);  // 0..1
+    in-out property <bool> video-repeat: false;  // loop playback at the end
 
     // Timeline editor.
     in property <[TimelineClip]> timeline-clips;
@@ -1171,10 +1173,11 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             if root.video-clips.length > 0 : ListView {
+                                // Click a bin item to add it to the timeline.
                                 for asset[i] in root.video-clips : Rectangle {
                                     height: 33px; border-radius: 7px;
-                                    background: root.video-selected == i ? #2dd4bf18 : (asset-ta.has-hover ? #262b34 : transparent);
-                                    asset-ta := TouchArea { clicked => { root.video-select(i); } }
+                                    background: asset-ta.has-hover ? #262b34 : transparent;
+                                    asset-ta := TouchArea { clicked => { root.video-add(i); } }
                                     HorizontalLayout {
                                         padding-left: 8px; padding-right: 8px; spacing: 8px;
                                         Rectangle {
@@ -1184,6 +1187,10 @@ export component AppWindow inherits Window {
                                             Image { source: asset.thumb; image-fit: cover; width: 100%; height: 100%; }
                                         }
                                         Text { text: asset.name; color: #cdd3dc; font-size: 11px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                                        Text {
+                                            text: "＋"; color: #2dd4bf; font-size: 14px; font-weight: 700;
+                                            vertical-alignment: center; opacity: asset-ta.has-hover ? 1.0 : 0.0;
+                                        }
                                     }
                                 }
                             }
@@ -1291,6 +1298,13 @@ export component AppWindow inherits Window {
                             background: pp-ta.has-hover ? #20242c : transparent;
                             Text { text: root.video-playing ? "⏸" : "▶"; color: #e6e9ef; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
                             pp-ta := TouchArea { clicked => { root.video-playpause(); } }
+                        }
+                        // Repeat / loop toggle.
+                        Rectangle {
+                            width: 32px; border-radius: 8px;
+                            background: root.video-repeat ? #2dd4bf22 : (rp-ta.has-hover ? #20242c : transparent);
+                            Text { text: "↻"; color: root.video-repeat ? #2dd4bf : #9aa3b2; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                            rp-ta := TouchArea { clicked => { root.video-repeat = !root.video-repeat; } }
                         }
                         Text { text: root.video-time; color: #9aa3b2; font-size: 11px; vertical-alignment: center; }
                         Scrubber { value: root.video-position; changed(f) => { root.video-seek(f); } }

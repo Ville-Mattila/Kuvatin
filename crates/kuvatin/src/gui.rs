@@ -43,9 +43,6 @@ fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Proje
     }
 }
 
-/// Append a media file to the video timeline: create the project if needed,
-/// place the clip at track 0's end, mirror it into the timeline model, and play.
-/// Shared by the Open-media button and drag-and-drop.
 /// Convert an optional RGBA frame into a Slint image (empty image if None).
 fn frame_to_image(frame: Option<kuvatin_video::Frame>) -> Image {
     match frame {
@@ -57,11 +54,22 @@ fn frame_to_image(frame: Option<kuvatin_video::Frame>) -> Image {
     }
 }
 
-fn add_video_media(
+/// Add a media file to the media bin (the library in the left panel).
+fn add_to_bin(assets: &Rc<VecModel<VideoAsset>>, path: &std::path::Path, thumb: Image) {
+    let name: SharedString = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .into();
+    assets.push(VideoAsset { name, thumb });
+}
+
+/// Append a media file to the timeline as a clip: create the project if needed,
+/// place it at its track's end, mirror it into the model, and play.
+fn add_to_timeline(
     path: &std::path::Path,
     ui_weak: &slint::Weak<AppWindow>,
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
-    assets: &Rc<VecModel<VideoAsset>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
 ) {
@@ -88,10 +96,6 @@ fn add_video_media(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
                 .into();
-            assets.push(VideoAsset {
-                name: name.clone(),
-                thumb: thumb.clone(),
-            });
             tl_clips.push(TimelineClip {
                 id: info.id.0.clone().into(),
                 track: info.track as i32,
@@ -176,6 +180,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let video_project: Rc<RefCell<Option<kuvatin_video::Project>>> = Rc::new(RefCell::new(None));
     let video_assets = Rc::new(VecModel::<VideoAsset>::from(Vec::<VideoAsset>::new()));
     ui.set_video_clips(ModelRc::from(video_assets.clone()));
+    // Source path of each media-bin entry (parallel to video_assets) so a bin
+    // click can add that file to the timeline.
+    let bin_paths: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
     let video_tl = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
     ui.set_timeline_clips(ModelRc::from(video_tl.clone()));
     // Timeline tracks (GES layers, top = index 0 = composited on top). Kept
@@ -659,6 +666,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let assets = assets.clone();
+            let bin_paths = bin_paths.clone();
             let tl_clips = tl_clips.clone();
             let ready = import_ready.clone();
             let import_total = import_total.clone();
@@ -674,7 +682,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             break;
                         };
                         let thumb = frame_to_image(thumb_frame);
-                        add_video_media(&path, &ui_weak, &project_slot, &assets, &tl_clips, thumb);
+                        add_to_bin(&assets, &path, thumb.clone());
+                        bin_paths.borrow_mut().push(path.clone());
+                        // Only the first file (when the timeline is empty) goes on
+                        // the timeline; the rest wait in the bin for the user.
+                        if tl_clips.row_count() == 0 {
+                            add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
+                        }
                         import_done.set(import_done.get() + 1);
                     }
                     if let Some(ui) = ui_weak.upgrade() {
@@ -697,6 +711,25 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_video_selected(i);
                 }
+            });
+        }
+
+        // Media-bin item "add": append that file to the timeline as a new clip.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = tl_clips.clone();
+            let assets = assets.clone();
+            let bin_paths = bin_paths.clone();
+            ui.on_video_add(move |i| {
+                let Some(path) = bin_paths.borrow().get(i as usize).cloned() else {
+                    return;
+                };
+                let thumb = assets
+                    .row_data(i as usize)
+                    .map(|a| a.thumb)
+                    .unwrap_or_default();
+                add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
             });
         }
 
@@ -981,6 +1014,14 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     project.refresh_preview();
                     let pos = project.position().unwrap_or_default();
                     let dur = project.duration().unwrap_or_default();
+                    // Loop at the end when repeat is on.
+                    if ui.get_video_repeat()
+                        && ui.get_video_playing()
+                        && dur.as_secs_f32() > 0.1
+                        && pos.as_secs_f32() + 0.12 >= dur.as_secs_f32()
+                    {
+                        let _ = project.seek(std::time::Duration::ZERO);
+                    }
                     ui.set_playhead(pos.as_secs_f32());
                     let frac = if dur.as_secs_f32() > 0.0 {
                         (pos.as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0)
