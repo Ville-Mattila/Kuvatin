@@ -63,21 +63,92 @@ fn find_by_factory(bin: &gst::Bin, factory: &str) -> Option<gst::Element> {
     None
 }
 
+/// Extract an RGBA `Frame` from a GStreamer sample.
+fn sample_to_frame(sample: &gst::Sample) -> Option<Frame> {
+    let caps = sample.caps()?;
+    let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
+    let buffer = sample.buffer()?;
+    let map = buffer.map_readable().ok()?;
+    Some(Frame {
+        width: info.width(),
+        height: info.height(),
+        rgba: map.as_slice().to_vec(),
+    })
+}
+
 /// Push one RGBA video sample to the frame callback.
 fn emit_sample(
     sample: &gst::Sample,
     cb: &(dyn Fn(Frame) + Send + Sync),
 ) -> std::result::Result<gst::FlowSuccess, gst::FlowError> {
-    let caps = sample.caps().ok_or(gst::FlowError::Error)?;
-    let info = gstreamer_video::VideoInfo::from_caps(caps).map_err(|_| gst::FlowError::Error)?;
-    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-    cb(Frame {
-        width: info.width(),
-        height: info.height(),
-        rgba: map.as_slice().to_vec(),
-    });
+    let frame = sample_to_frame(sample).ok_or(gst::FlowError::Error)?;
+    cb(frame);
     Ok(gst::FlowSuccess::Ok)
+}
+
+/// Grab a representative thumbnail frame (RGBA, ~`width`px wide at the source's
+/// natural aspect) for a media file. Safe to call off the UI thread; None on
+/// failure. Seeks a little in to skip black intro frames.
+pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
+    gst::init().ok()?;
+    let uri = gst::glib::filename_to_uri(path, None).ok()?;
+    let pipeline = gst::Pipeline::new();
+    let src = gst::ElementFactory::make("uridecodebin")
+        .property("uri", &uri)
+        .build()
+        .ok()?;
+    let convert = gst::ElementFactory::make("videoconvert").build().ok()?;
+    let scale = gst::ElementFactory::make("videoscale").build().ok()?;
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "RGBA")
+        .field("width", width as i32)
+        .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+        .build();
+    let sink = AppSink::builder().caps(&caps).build();
+    pipeline
+        .add_many([&src, &convert, &scale, sink.upcast_ref::<gst::Element>()])
+        .ok()?;
+    gst::Element::link_many([&convert, &scale, sink.upcast_ref::<gst::Element>()]).ok()?;
+    // uridecodebin exposes decoded pads dynamically — link only the video one.
+    let convert_weak = convert.downgrade();
+    src.connect_pad_added(move |_, pad| {
+        let Some(convert) = convert_weak.upgrade() else {
+            return;
+        };
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+        let is_video = caps
+            .structure(0)
+            .map(|s| s.name().starts_with("video/"))
+            .unwrap_or(false);
+        if !is_video {
+            return;
+        }
+        if let Some(sinkpad) = convert.static_pad("sink") {
+            if !sinkpad.is_linked() {
+                let _ = pad.link(&sinkpad);
+            }
+        }
+    });
+    if pipeline.set_state(gst::State::Paused).is_err() {
+        return None;
+    }
+    if pipeline.state(gst::ClockTime::from_seconds(5)).0.is_err() {
+        let _ = pipeline.set_state(gst::State::Null);
+        return None;
+    }
+    if let Some(dur) = pipeline.query_duration::<gst::ClockTime>() {
+        let target = (dur.nseconds() / 2).min(gst::ClockTime::from_seconds(1).nseconds());
+        if target > 0 {
+            let _ = pipeline.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_nseconds(target),
+            );
+            let _ = pipeline.state(gst::ClockTime::from_seconds(3));
+        }
+    }
+    let frame = sink.pull_preroll().ok().and_then(|s| sample_to_frame(&s));
+    let _ = pipeline.set_state(gst::State::Null);
+    frame
 }
 
 /// Read a GES clip's current timeline geometry.
@@ -639,6 +710,23 @@ mod tests {
             );
             project.refresh_preview();
         }
+    }
+
+    /// Grabs a thumbnail frame off the UI thread and checks it's a sane RGBA image.
+    #[test]
+    fn grabs_a_thumbnail() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping grabs_a_thumbnail: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let frame = std::thread::spawn(move || thumbnail(&path, 160))
+            .join()
+            .unwrap()
+            .expect("thumbnail");
+        assert_eq!(frame.width, 160, "thumbnail width");
+        assert!(frame.height > 0);
+        assert_eq!(frame.rgba.len() as u32, frame.width * frame.height * 4);
     }
 
     /// Verifies asset discovery works on a worker thread (so imports can happen

@@ -46,12 +46,24 @@ fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Proje
 /// Append a media file to the video timeline: create the project if needed,
 /// place the clip at track 0's end, mirror it into the timeline model, and play.
 /// Shared by the Open-media button and drag-and-drop.
+/// Convert an optional RGBA frame into a Slint image (empty image if None).
+fn frame_to_image(frame: Option<kuvatin_video::Frame>) -> Image {
+    match frame {
+        Some(f) if f.width > 0 && f.height > 0 => {
+            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&f.rgba, f.width, f.height);
+            Image::from_rgba8(buf)
+        }
+        _ => Image::default(),
+    }
+}
+
 fn add_video_media(
     path: &std::path::Path,
     ui_weak: &slint::Weak<AppWindow>,
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
-    assets: &Rc<VecModel<SharedString>>,
+    assets: &Rc<VecModel<VideoAsset>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
+    thumb: Image,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -76,7 +88,10 @@ fn add_video_media(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
                 .into();
-            assets.push(name.clone());
+            assets.push(VideoAsset {
+                name: name.clone(),
+                thumb: thumb.clone(),
+            });
             tl_clips.push(TimelineClip {
                 id: info.id.0.clone().into(),
                 track: info.track as i32,
@@ -86,7 +101,7 @@ fn add_video_media(
                 name,
                 kind: if is_img { 1 } else { 0 },
                 selected: false,
-                thumb: Image::default(),
+                thumb,
             });
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
@@ -159,7 +174,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // here so both the drag-and-drop drain (below) and the video callbacks (later)
     // can reach the same project and reflect dropped/opened media onto the timeline.
     let video_project: Rc<RefCell<Option<kuvatin_video::Project>>> = Rc::new(RefCell::new(None));
-    let video_assets = Rc::new(VecModel::<SharedString>::from(Vec::<SharedString>::new()));
+    let video_assets = Rc::new(VecModel::<VideoAsset>::from(Vec::<VideoAsset>::new()));
     ui.set_video_clips(ModelRc::from(video_assets.clone()));
     let video_tl = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
     ui.set_timeline_clips(ModelRc::from(video_tl.clone()));
@@ -175,8 +190,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // thread (warming the GES asset cache); a UI timer then adds each cache-warm
     // clip quickly. So importing many files shows a progress modal instead of
     // freezing the app for the whole batch.
+    type ImportItem = (PathBuf, Option<kuvatin_video::Frame>);
     let (import_tx, import_rx) = std::sync::mpsc::channel::<PathBuf>();
-    let import_ready: Arc<Mutex<std::collections::VecDeque<PathBuf>>> =
+    let import_ready: Arc<Mutex<std::collections::VecDeque<ImportItem>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let import_total = Rc::new(std::cell::Cell::new(0usize));
     let import_done = Rc::new(std::cell::Cell::new(0usize));
@@ -185,7 +201,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         std::thread::spawn(move || {
             for path in import_rx {
                 let _ = kuvatin_video::warm_asset(&path);
-                ready.lock().unwrap().push_back(path);
+                let thumb = kuvatin_video::thumbnail(&path, 160);
+                ready.lock().unwrap().push_back((path, thumb));
             }
         });
     }
@@ -653,10 +670,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 move || {
                     loop {
                         let next = ready.lock().unwrap().pop_front();
-                        let Some(path) = next else {
+                        let Some((path, thumb_frame)) = next else {
                             break;
                         };
-                        add_video_media(&path, &ui_weak, &project_slot, &assets, &tl_clips);
+                        let thumb = frame_to_image(thumb_frame);
+                        add_video_media(&path, &ui_weak, &project_slot, &assets, &tl_clips, thumb);
                         import_done.set(import_done.get() + 1);
                     }
                     if let Some(ui) = ui_weak.upgrade() {
