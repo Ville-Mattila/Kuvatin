@@ -28,10 +28,11 @@ fn configure_bundled_gstreamer() {
         // Don't also scan a differently-versioned system GStreamer.
         std::env::set_var("GST_PLUGIN_SYSTEM_PATH", "");
     }
-    // Prefer the software x264 encoder for MP4 export — hardware encoders (NVENC
-    // etc.) rank higher but fail to init on some machines. Set before any gst init.
+    // H.264 export encoder ranks (must be set before any gst init). Prefer NVENC
+    // auto-GPU mode (fast, works with GES output); most other hardware encoders
+    // fail to init, so x264enc (software) sits above them as the fallback.
     if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
-        std::env::set_var("GST_PLUGIN_FEATURE_RANK", "x264enc:512");
+        std::env::set_var("GST_PLUGIN_FEATURE_RANK", "nvautogpuh264enc:512,x264enc:300");
     }
 }
 

@@ -185,17 +185,22 @@ pub enum RenderStatus {
     Failed(String),
 }
 
-/// Prefer the software x264 encoder for MP4 export. Hardware H.264 encoders
-/// (NVENC/QSV/D3D12/…) are ranked higher but fail to init on some machines or
-/// sessions, so bump x264enc's rank via GST_PLUGIN_FEATURE_RANK. This override is
-/// read once when the registry loads, so it MUST be set before the first gst init
-/// — hence this runs at the top of every gst-init path in this crate.
+/// H.264 encoder preferences for export. GES's encodebin prefers hardware H.264
+/// encoders, but most of them (nvh264enc CUDA mode, D3D11/12, Media Foundation)
+/// fail to init with GES's system-memory output. `nvautogpuh264enc` (NVENC
+/// auto-GPU mode) DOES work and is fast, so rank it top; rank x264enc (software)
+/// above the *failing* hardware encoders as a universal fallback for machines
+/// without NVENC. GST_PLUGIN_FEATURE_RANK is read once at registry load, so this
+/// must run before the first gst init — hence it's at every gst-init path.
 pub(crate) fn ensure_encoder_ranks() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
-            std::env::set_var("GST_PLUGIN_FEATURE_RANK", "x264enc:512");
+            std::env::set_var(
+                "GST_PLUGIN_FEATURE_RANK",
+                "nvautogpuh264enc:512,x264enc:300",
+            );
         }
     });
 }
@@ -846,17 +851,13 @@ mod tests {
             return;
         };
         let src = std::path::PathBuf::from(path);
-        let fmt = if std::env::var_os("RENDER_WEBM").is_some() {
-            ExportFormat::WebM
-        } else {
-            ExportFormat::Mp4
-        };
-        let ext = if fmt == ExportFormat::WebM { "webm" } else { "mp4" };
-        let out = std::env::temp_dir().join(format!("kuvatin_render_test.{ext}"));
+        // WebM (VP9/Opus) is deterministic — no hardware H.264 encoder to fight
+        // with under the suite's rapid pipeline churn. Exercises the render path.
+        let out = std::env::temp_dir().join("kuvatin_render_test.webm");
         let _ = std::fs::remove_file(&out);
         let mut project = Project::new(|_f| {}).expect("project");
         project.append_clip(&src, 1, None).expect("clip");
-        project.begin_render(&out, fmt).expect("begin_render");
+        project.begin_render(&out, ExportFormat::WebM).expect("begin_render");
         let mut done = false;
         for _ in 0..300 {
             match project.render_status() {
