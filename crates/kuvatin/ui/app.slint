@@ -1188,7 +1188,7 @@ export component AppWindow inherits Window {
                                         }
                                         Text { text: asset.name; color: #cdd3dc; font-size: 11px; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                                         Text {
-                                            text: "＋"; color: #2dd4bf; font-size: 14px; font-weight: 700;
+                                            text: "+"; color: #2dd4bf; font-size: 18px; font-weight: 700;
                                             vertical-alignment: center; opacity: asset-ta.has-hover ? 1.0 : 0.0;
                                         }
                                     }
@@ -1296,19 +1296,27 @@ export component AppWindow inherits Window {
                         Rectangle {
                             width: 32px; border-radius: 8px;
                             background: pp-ta.has-hover ? #20242c : transparent;
-                            Text { text: root.video-playing ? "⏸" : "▶"; color: #e6e9ef; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                            Image {
+                                source: root.video-playing ? @image-url("../assets/ic_pause.svg") : @image-url("../assets/ic_play.svg");
+                                colorize: #e6e9ef; width: 15px; height: 15px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                            }
                             pp-ta := TouchArea { clicked => { root.video-playpause(); } }
                         }
                         // Repeat / loop toggle.
                         Rectangle {
                             width: 32px; border-radius: 8px;
                             background: root.video-repeat ? #2dd4bf22 : (rp-ta.has-hover ? #20242c : transparent);
-                            Text { text: "↻"; color: root.video-repeat ? #2dd4bf : #9aa3b2; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                            Image {
+                                source: @image-url("../assets/ic_repeat.svg");
+                                colorize: root.video-repeat ? #2dd4bf : #9aa3b2; width: 16px; height: 16px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                            }
                             rp-ta := TouchArea { clicked => { root.video-repeat = !root.video-repeat; } }
                         }
                         Text { text: root.video-time; color: #9aa3b2; font-size: 11px; vertical-alignment: center; }
                         Scrubber { value: root.video-position; changed(f) => { root.video-seek(f); } }
-                        Text { text: "🔊"; font-size: 12px; vertical-alignment: center; }
+                        Image { source: @image-url("../assets/ic_volume.svg"); colorize: #9aa3b2; width: 15px; height: 15px; }
                         Scrubber { width: 70px; value: root.video-volume; changed(f) => { root.video-volume-changed(f); } }
                     }
                 }
@@ -1424,25 +1432,6 @@ export component AppWindow inherits Window {
                             // row background stripes (fixed; span the visible lane)
                             VerticalLayout {
                                 for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
-                            }
-
-                            // "new track" drop zone, shown while dragging a clip.
-                            // Teal-tinted so it's visible against the dark lane; sits
-                            // behind the clip blocks so the dragged clip stays on top.
-                            if root.clip-dragging : Rectangle {
-                                property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                y: root.timeline-track-labels.length * 30px + 3px;
-                                x: 4px; width: parent.width - 8px; height: 22px;
-                                border-radius: 6px;
-                                background: active ? #2dd4bf3a : #14302b;
-                                border-width: active ? 2px : 1px;
-                                border-color: active ? #2dd4bf : #2dd4bf99;
-                                Text {
-                                    text: "＋  Drop here for a new track";
-                                    color: active ? #ffffff : #5fdccb;
-                                    font-size: 10px; font-weight: 700;
-                                    horizontal-alignment: center; vertical-alignment: center;
-                                }
                             }
 
                             // clip blocks. The wrapper `blk` keeps the clip's MODEL
@@ -1564,6 +1553,26 @@ export component AppWindow inherits Window {
                                     }
                                     moved => { sbta.set(self.mouse-x); }
                                     pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { sbta.set(self.mouse-x); } }
+                                }
+                            }
+
+                            // "new track" drop indicator — TOPMOST (nothing can hide
+                            // it) and pinned near the bottom of the visible lane so
+                            // it's always on screen while a clip is being dragged.
+                            if root.clip-dragging : Rectangle {
+                                property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
+                                // Just below the last track, but never off the lane.
+                                y: Math.min(root.timeline-track-labels.length * 30px + 4px, parent.height - 34px);
+                                x: 4px; width: parent.width - 8px; height: 24px;
+                                border-radius: 6px;
+                                background: active ? #2dd4bfe6 : #14302bf2;
+                                border-width: active ? 2px : 1px;
+                                border-color: active ? #ffffff : #2dd4bf;
+                                Text {
+                                    text: "+  Drop here for a new track";
+                                    color: active ? #08110f : #7ee6d8;
+                                    font-size: 11px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
                         }
