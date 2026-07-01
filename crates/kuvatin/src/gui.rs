@@ -630,6 +630,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // Rapid slider drags only stash a value here; no GES work per event.
         let pending_xform: Rc<RefCell<Option<(String, kuvatin_video::Layout)>>> =
             Rc::new(RefCell::new(None));
+        // True while an export/render is running (pauses the preview timer, whose
+        // seeks/commits would corrupt the render).
+        let export_active = Rc::new(std::cell::Cell::new(false));
 
         // Open media via the file dialog → the same import queue as drag-and-drop.
         {
@@ -989,16 +992,113 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
+        // Export: pick an output file + format, then start rendering.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let export_active = export_active.clone();
+            ui.on_video_export(move || {
+                if export_active.get() || project_slot.borrow().is_none() {
+                    return;
+                }
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("MP4 video", &["mp4"])
+                    .add_filter("WebM video", &["webm"])
+                    .set_file_name("export.mp4")
+                    .save_file()
+                else {
+                    return;
+                };
+                let fmt = if path
+                    .extension()
+                    .map(|e| e.eq_ignore_ascii_case("webm"))
+                    .unwrap_or(false)
+                {
+                    kuvatin_video::ExportFormat::WebM
+                } else {
+                    kuvatin_video::ExportFormat::Mp4
+                };
+                let started = project_slot
+                    .borrow()
+                    .as_ref()
+                    .map(|p| p.begin_render(&path, fmt).is_ok())
+                    .unwrap_or(false);
+                if let Some(ui) = ui_weak.upgrade() {
+                    if started {
+                        export_active.set(true);
+                        ui.set_exporting(true);
+                        ui.set_export_progress(0.0);
+                        ui.set_export_status("Starting…".into());
+                    } else {
+                        ui.set_export_status("Could not start export".into());
+                    }
+                }
+            });
+        }
+
+        // Export progress: poll the render; finish or fail restores the preview.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let export_active = export_active.clone();
+            let timer = slint::Timer::default();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(200),
+                move || {
+                    if !export_active.get() {
+                        return;
+                    }
+                    let slot = project_slot.borrow();
+                    let Some(p) = slot.as_ref() else {
+                        return;
+                    };
+                    match p.render_status() {
+                        kuvatin_video::RenderStatus::Rendering(f) => {
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_export_progress(f);
+                                ui.set_export_status(format!("{:.0}%", f * 100.0).into());
+                            }
+                        }
+                        kuvatin_video::RenderStatus::Done => {
+                            let _ = p.end_render();
+                            drop(slot);
+                            export_active.set(false);
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_exporting(false);
+                            }
+                        }
+                        kuvatin_video::RenderStatus::Failed(e) => {
+                            let _ = p.end_render();
+                            drop(slot);
+                            export_active.set(false);
+                            eprintln!("export failed: {e}");
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_export_status("Export failed".into());
+                                ui.set_exporting(false);
+                            }
+                        }
+                    }
+                },
+            );
+            std::mem::forget(timer);
+        }
+
         // Advance the playhead + scrubber + time, and apply coalesced edits.
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let pending_xform = pending_xform.clone();
+            let export_active = export_active.clone();
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
                 std::time::Duration::from_millis(100),
                 move || {
+                    // Never touch the pipeline while a render is in progress.
+                    if export_active.get() {
+                        return;
+                    }
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };

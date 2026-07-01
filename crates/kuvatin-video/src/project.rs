@@ -13,6 +13,7 @@ use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_editing_services as ges;
 use ges::prelude::*;
+use gstreamer_pbutils as gst_pbutils;
 
 use crate::Frame;
 
@@ -41,6 +42,7 @@ pub struct ClipGeom {
 /// the UI thread; a subsequent `add_clip`/`append_clip` then hits the warm cache
 /// and returns immediately instead of blocking the UI on discovery.
 pub fn warm_asset(path: &Path) -> Result<()> {
+    ensure_encoder_ranks();
     gst::init()?;
     ges::init()?;
     let uri = gst::glib::filename_to_uri(path, None)?;
@@ -90,6 +92,7 @@ fn emit_sample(
 /// natural aspect) for a media file. Safe to call off the UI thread; None on
 /// failure. Seeks a little in to skip black intro frames.
 pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
+    ensure_encoder_ranks();
     gst::init().ok()?;
     let uri = gst::glib::filename_to_uri(path, None).ok()?;
     let pipeline = gst::Pipeline::new();
@@ -165,6 +168,68 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
 pub const CANVAS_W: i32 = 1280;
 pub const CANVAS_H: i32 = 720;
 
+/// Output container/codec for export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// MP4 with H.264 video + AAC audio.
+    Mp4,
+    /// WebM with VP9 video + Opus audio.
+    WebM,
+}
+
+/// Progress of an export/render.
+#[derive(Clone, Debug)]
+pub enum RenderStatus {
+    Rendering(f32), // 0..1
+    Done,
+    Failed(String),
+}
+
+/// Prefer the software x264 encoder for MP4 export. Hardware H.264 encoders
+/// (NVENC/QSV/D3D12/…) are ranked higher but fail to init on some machines or
+/// sessions, so bump x264enc's rank via GST_PLUGIN_FEATURE_RANK. This override is
+/// read once when the registry loads, so it MUST be set before the first gst init
+/// — hence this runs at the top of every gst-init path in this crate.
+pub(crate) fn ensure_encoder_ranks() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
+            std::env::set_var("GST_PLUGIN_FEATURE_RANK", "x264enc:512");
+        }
+    });
+}
+
+/// The GES encoding profile for an export format.
+fn encoding_profile(fmt: ExportFormat) -> gst_pbutils::EncodingContainerProfile {
+    let (container, video, audio) = match fmt {
+        ExportFormat::Mp4 => (
+            gst::Caps::builder("video/quicktime")
+                .field("variant", "iso")
+                .build(),
+            // qtmux needs H.264 in avc stream-format; be explicit so encodebin
+            // inserts h264parse (generic caps let it pick byte-stream and fail).
+            gst::Caps::builder("video/x-h264")
+                .field("stream-format", "avc")
+                .build(),
+            gst::Caps::builder("audio/mpeg")
+                .field("mpegversion", 4i32)
+                .build(),
+        ),
+        ExportFormat::WebM => (
+            gst::Caps::builder("video/webm").build(),
+            gst::Caps::builder("video/x-vp9").build(),
+            gst::Caps::builder("audio/x-opus").build(),
+        ),
+    };
+    let video = gst_pbutils::EncodingVideoProfile::builder(&video).build();
+    let audio = gst_pbutils::EncodingAudioProfile::builder(&audio).build();
+    gst_pbutils::EncodingContainerProfile::builder(&container)
+        .add_profile(video)
+        .add_profile(audio)
+        .build()
+}
+
 /// A clip's transform + audio level for the inspector. `scale` is 0..1 relative
 /// to the largest size that fits the canvas WITHOUT distorting the source, so a
 /// non-16:9 clip keeps its aspect ratio.
@@ -211,12 +276,15 @@ pub struct Project {
     clips: HashMap<String, ges::Clip>,
     /// Set by edits, cleared by `refresh_preview` — coalesces repaints.
     dirty: std::cell::Cell<bool>,
+    /// The preview video sink; kept so we can restore preview mode after a render.
+    appsink: AppSink,
 }
 
 impl Project {
     /// Build an empty project whose preview pushes RGBA frames to `on_frame`
     /// (called from a GStreamer thread — the GUI must hop to the UI thread).
     pub fn new(on_frame: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
+        ensure_encoder_ranks();
         gst::init()?;
         ges::init()?;
 
@@ -274,6 +342,7 @@ impl Project {
             pipeline,
             clips: HashMap::new(),
             dirty: std::cell::Cell::new(false),
+            appsink,
         })
     }
 
@@ -620,6 +689,62 @@ impl Project {
         let d = self.timeline.duration();
         (d.nseconds() > 0).then(|| Duration::from_nanos(d.nseconds()))
     }
+
+    /// Start rendering the whole timeline to `path`. Switches the pipeline into
+    /// render mode, so the live preview is unavailable until `end_render`.
+    pub fn begin_render(&self, path: &Path, fmt: ExportFormat) -> Result<()> {
+        self.pipeline.set_state(gst::State::Null)?;
+        // Drop the custom preview sink so render mode can route to encodebin.
+        self.pipeline
+            .preview_set_video_sink(None::<&gst::Element>);
+        let uri = gst::glib::filename_to_uri(path, None)?;
+        let profile = encoding_profile(fmt);
+        self.pipeline.set_render_settings(uri.as_str(), &profile)?;
+        self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
+        self.pipeline.set_state(gst::State::Playing)?;
+        Ok(())
+    }
+
+    /// Poll render progress — drive this from a UI timer. Consumes EOS/ERROR bus
+    /// messages, so once it returns Done/Failed the render is finished.
+    pub fn render_status(&self) -> RenderStatus {
+        if let Some(bus) = self.pipeline.bus() {
+            while let Some(msg) =
+                bus.pop_filtered(&[gst::MessageType::Eos, gst::MessageType::Error])
+            {
+                match msg.view() {
+                    gst::MessageView::Eos(_) => return RenderStatus::Done,
+                    gst::MessageView::Error(err) => {
+                        return RenderStatus::Failed(format!(
+                            "{} [{}] ({})",
+                            err.error(),
+                            err.src().map(|s| s.name().to_string()).unwrap_or_default(),
+                            err.debug().unwrap_or_default()
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let frac = match (self.position(), self.duration()) {
+            (Some(p), Some(d)) if d.as_secs_f32() > 0.0 => {
+                (p.as_secs_f32() / d.as_secs_f32()).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        RenderStatus::Rendering(frac)
+    }
+
+    /// Stop rendering and restore the live preview (re-attaching the appsink).
+    pub fn end_render(&self) -> Result<()> {
+        self.pipeline.set_state(gst::State::Null)?;
+        self.pipeline
+            .preview_set_video_sink(Some(self.appsink.upcast_ref::<gst::Element>()));
+        self.pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
+        self.pipeline.set_state(gst::State::Paused)?;
+        self.dirty.set(true);
+        Ok(())
+    }
 }
 
 impl Drop for Project {
@@ -712,6 +837,44 @@ mod tests {
         }
     }
 
+    /// Renders a one-clip timeline to an MP4 and checks the file is written and
+    /// non-trivial. Self-skips without `GST_TEST_FILE`.
+    #[test]
+    fn renders_to_mp4() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping renders_to_mp4: set GST_TEST_FILE");
+            return;
+        };
+        let src = std::path::PathBuf::from(path);
+        let fmt = if std::env::var_os("RENDER_WEBM").is_some() {
+            ExportFormat::WebM
+        } else {
+            ExportFormat::Mp4
+        };
+        let ext = if fmt == ExportFormat::WebM { "webm" } else { "mp4" };
+        let out = std::env::temp_dir().join(format!("kuvatin_render_test.{ext}"));
+        let _ = std::fs::remove_file(&out);
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&src, 1, None).expect("clip");
+        project.begin_render(&out, fmt).expect("begin_render");
+        let mut done = false;
+        for _ in 0..300 {
+            match project.render_status() {
+                RenderStatus::Done => {
+                    done = true;
+                    break;
+                }
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        assert!(done, "render did not finish in time");
+        project.end_render().expect("end_render");
+        let len = std::fs::metadata(&out).expect("output file").len();
+        assert!(len > 1000, "output file too small: {len} bytes");
+        let _ = std::fs::remove_file(&out);
+    }
+
     /// Grabs a thumbnail frame off the UI thread and checks it's a sane RGBA image.
     #[test]
     fn grabs_a_thumbnail() {
@@ -738,6 +901,7 @@ mod tests {
             return;
         };
         let path = std::path::PathBuf::from(path);
+        ensure_encoder_ranks();
         gst::init().unwrap();
         ges::init().unwrap();
         let p2 = path.clone();

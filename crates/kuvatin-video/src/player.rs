@@ -31,6 +31,7 @@ impl Player {
     /// for each decoded RGBA frame — the GUI must hop to the UI thread (e.g.
     /// `slint::invoke_from_event_loop`) before touching the UI.
     pub fn new(on_frame: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
+        crate::project::ensure_encoder_ranks();
         gst::init()?;
 
         let playbin = gst::ElementFactory::make("playbin").build()?;

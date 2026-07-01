@@ -473,6 +473,11 @@ export component AppWindow inherits Window {
     in property <bool> importing: false;
     in property <int> import-done: 0;
     in property <int> import-total: 0;
+    // Export/render progress.
+    in property <bool> exporting: false;
+    in property <float> export-progress: 0.0;   // 0..1
+    in property <string> export-status: "";
+    callback video-export();
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
@@ -1369,10 +1374,17 @@ export component AppWindow inherits Window {
                     Rectangle {
                         height: 26px; background: #13161c;
                         HorizontalLayout {
-                            padding-left: 11px; padding-right: 11px; spacing: 8px;
+                            padding-left: 11px; padding-right: 8px; spacing: 8px;
                             Text { text: "TIMELINE"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; vertical-alignment: center; }
                             Rectangle { horizontal-stretch: 1; }
                             Text { text: "drag clips to arrange"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
+                            exp-btn := Rectangle {
+                                width: 74px; y: (parent.height - self.height) / 2; height: 19px;
+                                border-radius: 5px;
+                                background: exp-ta.has-hover ? #2dd4bf : #22c9b0;
+                                Text { text: "Export"; color: #08110f; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                exp-ta := TouchArea { clicked => { root.video-export(); } }
+                            }
                         }
                     }
 
@@ -1613,6 +1625,41 @@ export component AppWindow inherits Window {
                     text: root.import-done + " / " + root.import-total;
                     color: #9aa3b2; font-size: 11px;
                     horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Export/render progress modal.
+    if root.exporting : Rectangle {
+        background: #000000b0;
+        TouchArea {}
+        Rectangle {
+            width: 360px; height: 132px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1b1f27;
+            border-radius: 12px;
+            border-width: 1px; border-color: #2c313b;
+            VerticalLayout {
+                padding: 22px; spacing: 16px;
+                Text {
+                    text: "Exporting video…";
+                    color: #f2f4f8; font-size: 14px; font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Rectangle {
+                    height: 8px; border-radius: 4px; background: #2c313b;
+                    Rectangle {
+                        x: 0; height: parent.height; border-radius: 4px;
+                        width: parent.width * Math.clamp(root.export-progress, 0, 1);
+                        background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
+                    }
+                }
+                Text {
+                    text: root.export-status;
+                    color: #9aa3b2; font-size: 11px;
+                    horizontal-alignment: center; overflow: elide;
                 }
             }
         }
