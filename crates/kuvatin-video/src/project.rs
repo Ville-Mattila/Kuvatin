@@ -337,6 +337,40 @@ impl Project {
         Some(clip_geom(&clip))
     }
 
+    /// Number of tracks (GES layers, 0 = top) in the timeline.
+    pub fn track_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Move a clip to `track`, creating the layer if `track` is one past the last
+    /// (a new bottom track). Returns the resulting track index.
+    pub fn move_clip_to_track(&mut self, id: &ClipId, track: usize) -> Option<usize> {
+        let clip = self.clips.get(&id.0)?.clone();
+        let target = self.layer(track);
+        clip.move_to_layer(&target).ok()?;
+        self.timeline.commit();
+        self.dirty.set(true);
+        Some(track)
+    }
+
+    /// The clip's current track index (its layer's priority, 0 = top).
+    pub fn clip_track(&self, id: &ClipId) -> Option<usize> {
+        self.clips.get(&id.0)?.layer().map(|l| l.priority() as usize)
+    }
+
+    /// Reorder tracks: move the track at `from` to position `to` (0 = top).
+    pub fn move_track(&mut self, from: usize, to: usize) {
+        if from >= self.layers.len() || to >= self.layers.len() || from == to {
+            return;
+        }
+        let layer = self.layers[from].clone();
+        let _ = self.timeline.move_layer(&layer, to as u32);
+        // Resync our layer vec to the new priority order.
+        self.layers = self.timeline.layers();
+        self.timeline.commit();
+        self.dirty.set(true);
+    }
+
     /// Read a clip's current layout (position, aspect-preserving scale, opacity,
     /// volume) from its GES child properties.
     pub fn clip_layout(&self, id: &ClipId) -> Option<Layout> {
@@ -585,6 +619,31 @@ mod tests {
             );
             project.refresh_preview();
         }
+    }
+
+    /// Runtime-checks the track structural ops: move a clip between tracks, onto
+    /// a new track, and reorder tracks. Must not hang or panic. Needs GST_TEST_FILE.
+    #[test]
+    fn moves_clips_and_tracks() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping moves_clips_and_tracks: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip(&path, 0, None).expect("a"); // track 0
+        let b = project.append_clip(&path, 1, None).expect("b"); // track 1
+        project.play().expect("play");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(project.clip_track(&a.id), Some(0));
+        assert_eq!(project.clip_track(&b.id), Some(1));
+        // Move a onto a new bottom track (index 2).
+        assert_eq!(project.move_clip_to_track(&a.id, 2), Some(2));
+        assert_eq!(project.track_count(), 3);
+        assert_eq!(project.clip_track(&a.id), Some(2));
+        // Reorder: move track 2 to the top (0); a follows its layer.
+        project.move_track(2, 0);
+        assert_eq!(project.clip_track(&a.id), Some(0));
     }
 
     /// The faithful repro: a video base + an IMAGE overlay, then edit the image's

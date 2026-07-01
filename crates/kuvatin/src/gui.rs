@@ -163,12 +163,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     ui.set_video_clips(ModelRc::from(video_assets.clone()));
     let video_tl = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
     ui.set_timeline_clips(ModelRc::from(video_tl.clone()));
-    // Rows are drawn top-to-bottom, highest GES layer first, so the overlay
-    // (layer 1) sits above the video (layer 0) — see the inverted clip `y`.
-    ui.set_timeline_track_labels(ModelRc::from(Rc::new(VecModel::<SharedString>::from(vec![
-        SharedString::from("Overlay"),
-        SharedString::from("Video"),
-    ]))));
+    // Timeline tracks (GES layers, top = index 0 = composited on top). Kept
+    // mutable so dragging a clip onto a new track can grow the list.
+    let video_tracks = Rc::new(VecModel::<SharedString>::from(vec![
+        SharedString::from("Track 1"),
+        SharedString::from("Track 2"),
+    ]));
+    ui.set_timeline_track_labels(ModelRc::from(video_tracks.clone()));
 
     // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
     // and drain dropped paths into the right pipeline (images → file list,
@@ -691,31 +692,77 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
-        // Slide a clip along its track: apply to GES, mirror the result into the model.
+        // Drop a clip: slide it (delta seconds) and/or move it to another/new
+        // track (delta rows). Both are applied to GES and mirrored to the model.
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let tl_clips = tl_clips.clone();
-            ui.on_timeline_clip_moved(move |i, delta| {
+            let tracks = video_tracks.clone();
+            ui.on_timeline_clip_dropped(move |i, delta_secs, delta_rows| {
                 let Some(mut row) = tl_clips.row_data(i as usize) else {
                     return;
                 };
-                let geom = project_slot
-                    .borrow_mut()
-                    .as_mut()
-                    .and_then(|p| p.slide_clip(&kuvatin_video::ClipId(row.id.to_string()), delta as f64));
-                let Some(geom) = geom else {
+                let cid = kuvatin_video::ClipId(row.id.to_string());
+                let mut slot = project_slot.borrow_mut();
+                let Some(p) = slot.as_mut() else {
                     return;
                 };
-                row.start = geom.start.as_secs_f32();
-                row.inpoint = geom.inpoint.as_secs_f32();
-                row.duration = geom.duration.as_secs_f32();
+                // Horizontal: slide along the track.
+                if let Some(geom) = p.slide_clip(&cid, delta_secs as f64) {
+                    row.start = geom.start.as_secs_f32();
+                    row.inpoint = geom.inpoint.as_secs_f32();
+                    row.duration = geom.duration.as_secs_f32();
+                }
+                // Vertical: move to another track (or a new bottom track). Clamp
+                // to [0, count]; count means "one past the last" = a new track.
+                if delta_rows != 0 {
+                    let count = p.track_count() as i32;
+                    let target = (row.track + delta_rows).clamp(0, count);
+                    if target != row.track {
+                        if let Some(t) = p.move_clip_to_track(&cid, target as usize) {
+                            row.track = t as i32;
+                        }
+                    }
+                    // Grow the gutter labels to match any newly created track.
+                    let new_count = p.track_count();
+                    while tracks.row_count() < new_count {
+                        let n = tracks.row_count() + 1;
+                        tracks.push(SharedString::from(format!("Track {n}")));
+                    }
+                }
+                let dur = p.duration();
+                drop(slot);
                 tl_clips.set_row_data(i as usize, row);
-                if let (Some(ui), Some(d)) = (
-                    ui_weak.upgrade(),
-                    project_slot.borrow().as_ref().and_then(|p| p.duration()),
-                ) {
+                if let (Some(ui), Some(d)) = (ui_weak.upgrade(), dur) {
                     ui.set_timeline_duration(d.as_secs_f32());
+                }
+            });
+        }
+
+        // Reorder tracks by dragging a header: move the GES layer, then resync
+        // every clip's track from GES (a reorder shifts several layers' indices).
+        {
+            let project_slot = project_slot.clone();
+            let tl_clips = tl_clips.clone();
+            ui.on_track_reordered(move |from, to| {
+                if from == to {
+                    return;
+                }
+                let mut slot = project_slot.borrow_mut();
+                let Some(p) = slot.as_mut() else {
+                    return;
+                };
+                p.move_track(from as usize, to as usize);
+                for idx in 0..tl_clips.row_count() {
+                    if let Some(mut row) = tl_clips.row_data(idx) {
+                        if let Some(t) = p.clip_track(&kuvatin_video::ClipId(row.id.to_string())) {
+                            if row.track != t as i32 {
+                                row.track = t as i32;
+                                tl_clips.set_row_data(idx, row);
+                            }
+                        }
+                    }
                 }
             });
         }

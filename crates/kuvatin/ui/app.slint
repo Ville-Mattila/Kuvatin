@@ -457,8 +457,9 @@ export component AppWindow inherits Window {
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
-    callback timeline-clip-moved(int, float); // clip index, delta seconds (slide the body)
+    callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
+    callback track-reordered(int, int);              // drag a track header: from row → to row
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -1266,12 +1267,28 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             width: 94px;
-                            for lbl[t] in root.timeline-track-labels : Rectangle {
-                                height: 30px; background: #13161c; border-width: 1px; border-color: #181c23;
+                            // Drag a header up/down to reorder tracks.
+                            for lbl[t] in root.timeline-track-labels : hdr := Rectangle {
+                                height: 30px;
+                                background: hta.pressed ? #20242c : #13161c;
+                                border-width: 1px; border-color: #181c23;
+                                property <length> ddy: 0px;
                                 HorizontalLayout {
                                     padding-left: 9px; spacing: 6px;
-                                    Text { text: "◉"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
+                                    Text { text: "≡"; color: hta.has-hover ? #8b95a6 : #5e6675; font-size: 11px; vertical-alignment: center; }
                                     Text { text: lbl; color: #8b95a6; font-size: 9px; vertical-alignment: center; overflow: elide; }
+                                }
+                                hta := TouchArea {
+                                    mouse-cursor: ns-resize;
+                                    moved => { hdr.ddy = self.mouse-y - self.pressed-y; }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.up) {
+                                            if (Math.abs(hdr.ddy / 1px) > 15) {
+                                                root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / 30px), 0, root.timeline-track-labels.length - 1));
+                                            }
+                                            hdr.ddy = 0px;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1298,11 +1315,13 @@ export component AppWindow inherits Window {
                                 height: 22px;
                                 background: transparent;
                                 property <length> ddx: 0px;
+                                property <length> ddy: 0px;
                                 property <int> dmode: 0;
 
                                 // live visual (previews the drag; not a drag frame)
                                 vis := Rectangle {
                                     x: (blk.dmode == 1 || blk.dmode == 2) ? blk.ddx : 0px;
+                                    y: blk.dmode == 1 ? blk.ddy : 0px;
                                     width: max(10px, parent.width
                                         + (blk.dmode == 2 ? -blk.ddx : 0px)
                                         + (blk.dmode == 3 ? blk.ddx : 0px));
@@ -1319,16 +1338,21 @@ export component AppWindow inherits Window {
                                     Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
                                 }
 
-                                // body: slide + select (stable frame = blk)
+                                // body: slide (horizontal) + move to another track
+                                // (vertical) + select. Stable frame = blk.
                                 TouchArea {
                                     mouse-cursor: move;
-                                    moved => { blk.dmode = 1; blk.ddx = self.mouse-x - self.pressed-x; }
+                                    moved => {
+                                        blk.dmode = 1;
+                                        blk.ddx = self.mouse-x - self.pressed-x;
+                                        blk.ddy = self.mouse-y - self.pressed-y;
+                                    }
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
-                                            if (blk.dmode == 1 && Math.abs(blk.ddx / 1px) > 2) {
-                                                root.timeline-clip-moved(i, (blk.ddx / 1px) / root.timeline-pps);
+                                            if (blk.dmode == 1 && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
+                                                root.timeline-clip-dropped(i, (blk.ddx / 1px) / root.timeline-pps, Math.round(blk.ddy / 30px));
                                             }
-                                            blk.dmode = 0; blk.ddx = 0px;
+                                            blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
                                         }
                                     }
                                     clicked => { root.timeline-select(i); }
