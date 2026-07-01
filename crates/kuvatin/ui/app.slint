@@ -1358,7 +1358,8 @@ export component AppWindow inherits Window {
 
             // ===== Timeline band =====
             Rectangle {
-                height: 176px;
+                // Sized to the tracks + one "new track" row (no dead space below).
+                height: Math.max(130px, root.timeline-track-labels.length * 30px + 68px);
                 background: #101319;
                 border-width: 1px; border-color: #2c313b;
                 VerticalLayout {
@@ -1556,22 +1557,21 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // "new track" drop indicator — TOPMOST (nothing can hide
-                            // it) and pinned near the bottom of the visible lane so
-                            // it's always on screen while a clip is being dragged.
-                            if root.clip-dragging : Rectangle {
+                            // Persistent "new track" row, just below the last track.
+                            // Subtle when idle; teal while dragging a clip; bright when
+                            // the drag targets it. Topmost so nothing can hide it.
+                            Rectangle {
                                 property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                // Just below the last track, but never off the lane.
-                                y: Math.min(root.timeline-track-labels.length * 30px + 4px, parent.height - 34px);
+                                y: root.timeline-track-labels.length * 30px + 3px;
                                 x: 4px; width: parent.width - 8px; height: 24px;
                                 border-radius: 6px;
-                                background: active ? #2dd4bfe6 : #14302bf2;
-                                border-width: active ? 2px : 1px;
-                                border-color: active ? #ffffff : #2dd4bf;
+                                background: root.clip-dragging ? (active ? #2dd4bfe6 : #14302bf2) : #ffffff05;
+                                border-width: root.clip-dragging && active ? 2px : 1px;
+                                border-color: root.clip-dragging ? (active ? #ffffff : #2dd4bf) : #ffffff14;
                                 Text {
-                                    text: "+  Drop here for a new track";
-                                    color: active ? #08110f : #7ee6d8;
-                                    font-size: 11px; font-weight: 700;
+                                    text: root.clip-dragging ? "+  Drop here for a new track" : "+  New track";
+                                    color: root.clip-dragging ? (active ? #08110f : #7ee6d8) : #566070;
+                                    font-size: 10px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
