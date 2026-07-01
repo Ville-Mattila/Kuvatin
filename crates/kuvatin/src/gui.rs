@@ -66,8 +66,9 @@ fn add_video_media(
         .unwrap_or_default();
     let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif");
     let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
-    // Videos land on the base track (0); images become overlays on track 1.
-    let track = if is_img { 1 } else { 0 };
+    // GES composites lower layer indices ON TOP, so images (overlays) go on
+    // layer 0 and videos on layer 1 (the base, underneath).
+    let track = if is_img { 0 } else { 1 };
     match project.append_clip(path, track, img_dur) {
         Ok(info) => {
             let name: SharedString = path
@@ -576,6 +577,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let tl_clips = video_tl.clone();
         // Index of the selected timeline clip (for the inspector), or -1.
         let sel_idx = Rc::new(std::cell::Cell::new(-1i32));
+        // Latest inspector transform awaiting a coalesced apply on the UI timer.
+        // Rapid slider drags only stash a value here; no GES work per event.
+        let pending_xform: Rc<RefCell<Option<(String, kuvatin_video::Transform)>>> =
+            Rc::new(RefCell::new(None));
 
         // Open media via the file dialog. Drag-and-drop takes the same path
         // through add_video_media (wired into the drop drain above).
@@ -659,12 +664,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
-        // Inspector slider moved: apply position/scale/opacity/volume to the clip.
+        // Inspector slider moved: stash the transform; the UI timer applies it
+        // (coalesced) so a fast drag never touches GES on the event itself.
         {
             let ui_weak = ui_weak.clone();
             let tl_clips = tl_clips.clone();
-            let project_slot = project_slot.clone();
             let sel_idx = sel_idx.clone();
+            let pending_xform = pending_xform.clone();
             ui.on_inspector_changed(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -685,9 +691,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     alpha: (ui.get_insp_alpha() / 100.0) as f64,
                     volume: (ui.get_insp_volume() / 100.0) as f64,
                 };
-                if let Some(p) = project_slot.borrow_mut().as_mut() {
-                    p.set_clip_transform(&kuvatin_video::ClipId(row.id.to_string()), t);
-                }
+                *pending_xform.borrow_mut() = Some((row.id.to_string(), t));
             });
         }
 
@@ -794,22 +798,29 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
-        // Advance the playhead + scrubber + time while playing.
+        // Advance the playhead + scrubber + time, and apply coalesced edits.
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
+            let pending_xform = pending_xform.clone();
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
-                std::time::Duration::from_millis(200),
+                std::time::Duration::from_millis(100),
                 move || {
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };
-                    let slot = project_slot.borrow();
-                    let Some(project) = slot.as_ref() else {
+                    let mut slot = project_slot.borrow_mut();
+                    let Some(project) = slot.as_mut() else {
                         return;
                     };
+                    // Apply the latest inspector transform (if any) then repaint,
+                    // both coalesced to one commit + one seek per tick.
+                    if let Some((id, t)) = pending_xform.borrow_mut().take() {
+                        project.set_clip_transform(&kuvatin_video::ClipId(id), t);
+                    }
+                    project.refresh_preview();
                     let pos = project.position().unwrap_or_default();
                     let dur = project.duration().unwrap_or_default();
                     ui.set_playhead(pos.as_secs_f32());

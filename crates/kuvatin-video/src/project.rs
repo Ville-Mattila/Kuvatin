@@ -70,6 +70,8 @@ pub struct Project {
     pipeline: ges::Pipeline,
     /// Clips by GES name, so the GUI can edit them by id (slide/trim/transform).
     clips: HashMap<String, ges::Clip>,
+    /// Set by edits, cleared by `refresh_preview` — coalesces repaints.
+    dirty: std::cell::Cell<bool>,
 }
 
 impl Project {
@@ -132,6 +134,7 @@ impl Project {
             layers: vec![layer],
             pipeline,
             clips: HashMap::new(),
+            dirty: std::cell::Cell::new(false),
         })
     }
 
@@ -213,7 +216,7 @@ impl Project {
         let new_start = (start + delta).max(0) as u64;
         clip.set_start(gst::ClockTime::from_nseconds(new_start));
         self.timeline.commit();
-        self.refresh();
+        self.dirty.set(true);
         Some(clip_geom(&clip))
     }
 
@@ -273,7 +276,7 @@ impl Project {
             clip.set_duration(gst::ClockTime::from_nseconds(new_dur as u64));
         }
         self.timeline.commit();
-        self.refresh();
+        self.dirty.set(true);
         Some(clip_geom(&clip))
     }
 
@@ -313,7 +316,7 @@ impl Project {
         let _ = clip.set_child_property("alpha", &t.alpha.to_value());
         let _ = clip.set_child_property("volume", &t.volume.to_value());
         self.timeline.commit();
-        self.refresh();
+        self.dirty.set(true);
     }
 
     /// End time (start + duration) of the last clip on `track`, or zero.
@@ -348,10 +351,15 @@ impl Project {
         Ok(())
     }
 
-    /// Force the preview to re-render the current frame after an edit. While
-    /// actively playing, frames already flow so this is a no-op; when paused or
-    /// stopped at the end, a flushing seek to the current position repaints it.
-    fn refresh(&self) {
+    /// Repaint the preview if an edit marked the timeline dirty since the last
+    /// call. MUST be driven from a UI timer, never from the edit path: a slider
+    /// drag fires dozens of edits/second, and one flush seek per edit floods the
+    /// pipeline and freezes the app. Coalescing to the timer caps it to one seek
+    /// per tick. No-op while actively playing (frames already flow).
+    pub fn refresh_preview(&self) {
+        if !self.dirty.replace(false) {
+            return;
+        }
         let playing = self.pipeline.current_state() == gst::State::Playing;
         let at_end = matches!(
             (self.position(), self.duration()),
@@ -437,5 +445,73 @@ mod tests {
         // prerolling. With commit_sync() this deadlocked the calling thread.
         let info2 = project.append_clip(&path, 0, None).expect("append2");
         assert!(info2.start > Duration::ZERO, "second clip should start after the first");
+    }
+
+    /// Reproduces the "freeze when editing the overlay scale": append a clip,
+    /// play, then apply transforms repeatedly (as a slider drag would). If an
+    /// edit blocks, this hangs. Self-skips without `GST_TEST_FILE`.
+    #[test]
+    fn edit_transform_while_playing() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping edit_transform_while_playing: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let info = project.append_clip(&path, 0, None).expect("append");
+        project.play().expect("play");
+        std::thread::sleep(Duration::from_millis(300));
+        for i in 0..8 {
+            let scale = 0.5 + (i as f64) * 0.05;
+            project.set_clip_transform(
+                &info.id,
+                Transform {
+                    posx: 0,
+                    posy: 0,
+                    width: (scale * CANVAS_W as f64) as i32,
+                    height: (scale * CANVAS_H as f64) as i32,
+                    alpha: 1.0,
+                    volume: 1.0,
+                },
+            );
+            project.refresh_preview();
+        }
+    }
+
+    /// The faithful repro: a video base + an IMAGE overlay, then edit the image's
+    /// transform (scale) repeatedly. Needs `GST_TEST_FILE` (video) + `GST_TEST_IMAGE`.
+    #[test]
+    fn edit_image_transform() {
+        let (Some(vid), Some(img)) = (
+            std::env::var_os("GST_TEST_FILE"),
+            std::env::var_os("GST_TEST_IMAGE"),
+        ) else {
+            eprintln!("skipping edit_image_transform: set GST_TEST_FILE + GST_TEST_IMAGE");
+            return;
+        };
+        let vid = std::path::PathBuf::from(vid);
+        let img = std::path::PathBuf::from(img);
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&vid, 1, None).expect("video");
+        let image = project
+            .append_clip(&img, 0, Some(Duration::from_secs(5)))
+            .expect("image");
+        project.play().expect("play");
+        std::thread::sleep(Duration::from_millis(300));
+        for i in 0..8 {
+            let scale = 0.5 + (i as f64) * 0.05;
+            project.set_clip_transform(
+                &image.id,
+                Transform {
+                    posx: 0,
+                    posy: 0,
+                    width: (scale * CANVAS_W as f64) as i32,
+                    height: (scale * CANVAS_H as f64) as i32,
+                    alpha: 1.0,
+                    volume: 1.0,
+                },
+            );
+            project.refresh_preview();
+        }
     }
 }

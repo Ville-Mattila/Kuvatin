@@ -1290,8 +1290,8 @@ export component AppWindow inherits Window {
                             // live from the pointer delta. dmode: 0 idle,1 slide,2 ltrim,3 rtrim.
                             for clip[i] in root.timeline-clips : blk := Rectangle {
                                 x: (clip.start * root.timeline-pps) * 1px;
-                                // Invert track → row so higher GES layers sit on top.
-                                y: ((root.timeline-track-labels.length - 1) - clip.track) * 30px + 4px;
+                                // track 0 = GES layer 0 = top (both on-screen and composited).
+                                y: clip.track * 30px + 4px;
                                 width: (clip.duration * root.timeline-pps) * 1px;
                                 height: 22px;
                                 background: transparent;
