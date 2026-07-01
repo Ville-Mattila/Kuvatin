@@ -579,7 +579,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let sel_idx = Rc::new(std::cell::Cell::new(-1i32));
         // Latest inspector transform awaiting a coalesced apply on the UI timer.
         // Rapid slider drags only stash a value here; no GES work per event.
-        let pending_xform: Rc<RefCell<Option<(String, kuvatin_video::Transform)>>> =
+        let pending_xform: Rc<RefCell<Option<(String, kuvatin_video::Layout)>>> =
             Rc::new(RefCell::new(None));
 
         // Open media via the file dialog. Drag-and-drop takes the same path
@@ -643,23 +643,21 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
                 ui.set_inspector_name(name);
                 ui.set_insp_has_audio(!is_img);
-                // Reflect the clip's current transform into the sliders.
-                if let Some(t) = project_slot
-                    .borrow()
-                    .as_ref()
-                    .and_then(|p| p.clip_transform(&kuvatin_video::ClipId(sel_id.to_string())))
+                // Give a fresh clip an aspect-correct default, then reflect its
+                // current layout into the sliders.
                 {
-                    ui.set_insp_posx(t.posx as f32);
-                    ui.set_insp_posy(t.posy as f32);
-                    // width == 0 means "auto / full canvas".
-                    let scale = if t.width > 0 {
-                        (t.width as f32 / kuvatin_video::CANVAS_W as f32) * 100.0
-                    } else {
-                        100.0
-                    };
-                    ui.set_insp_scale(scale.clamp(10.0, 100.0));
-                    ui.set_insp_alpha((t.alpha as f32 * 100.0).clamp(0.0, 100.0));
-                    ui.set_insp_volume((t.volume as f32 * 100.0).clamp(0.0, 100.0));
+                    let mut slot = project_slot.borrow_mut();
+                    if let Some(p) = slot.as_mut() {
+                        let cid = kuvatin_video::ClipId(sel_id.to_string());
+                        p.ensure_laid_out(&cid);
+                        if let Some(l) = p.clip_layout(&cid) {
+                            ui.set_insp_posx(l.posx as f32);
+                            ui.set_insp_posy(l.posy as f32);
+                            ui.set_insp_scale(((l.scale * 100.0) as f32).clamp(10.0, 100.0));
+                            ui.set_insp_alpha((l.alpha as f32 * 100.0).clamp(0.0, 100.0));
+                            ui.set_insp_volume((l.volume as f32 * 100.0).clamp(0.0, 100.0));
+                        }
+                    }
                 }
             });
         }
@@ -682,16 +680,14 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 let Some(row) = tl_clips.row_data(i as usize) else {
                     return;
                 };
-                let scale = ui.get_insp_scale() / 100.0;
-                let t = kuvatin_video::Transform {
+                let l = kuvatin_video::Layout {
                     posx: ui.get_insp_posx() as i32,
                     posy: ui.get_insp_posy() as i32,
-                    width: (scale * kuvatin_video::CANVAS_W as f32) as i32,
-                    height: (scale * kuvatin_video::CANVAS_H as f32) as i32,
+                    scale: (ui.get_insp_scale() / 100.0) as f64,
                     alpha: (ui.get_insp_alpha() / 100.0) as f64,
                     volume: (ui.get_insp_volume() / 100.0) as f64,
                 };
-                *pending_xform.borrow_mut() = Some((row.id.to_string(), t));
+                *pending_xform.borrow_mut() = Some((row.id.to_string(), l));
             });
         }
 
@@ -817,8 +813,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     };
                     // Apply the latest inspector transform (if any) then repaint,
                     // both coalesced to one commit + one seek per tick.
-                    if let Some((id, t)) = pending_xform.borrow_mut().take() {
-                        project.set_clip_transform(&kuvatin_video::ClipId(id), t);
+                    if let Some((id, l)) = pending_xform.borrow_mut().take() {
+                        project.set_clip_layout(&kuvatin_video::ClipId(id), l);
                     }
                     project.refresh_preview();
                     let pos = project.position().unwrap_or_default();

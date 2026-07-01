@@ -37,6 +37,23 @@ pub struct ClipGeom {
     pub duration: Duration,
 }
 
+/// Push one RGBA video sample to the frame callback.
+fn emit_sample(
+    sample: &gst::Sample,
+    cb: &(dyn Fn(Frame) + Send + Sync),
+) -> std::result::Result<gst::FlowSuccess, gst::FlowError> {
+    let caps = sample.caps().ok_or(gst::FlowError::Error)?;
+    let info = gstreamer_video::VideoInfo::from_caps(caps).map_err(|_| gst::FlowError::Error)?;
+    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+    cb(Frame {
+        width: info.width(),
+        height: info.height(),
+        rgba: map.as_slice().to_vec(),
+    });
+    Ok(gst::FlowSuccess::Ok)
+}
+
 /// Read a GES clip's current timeline geometry.
 fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     ClipGeom {
@@ -51,15 +68,40 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
 pub const CANVAS_W: i32 = 1280;
 pub const CANVAS_H: i32 = 720;
 
-/// A clip's video transform + audio level, via GES child properties.
+/// A clip's transform + audio level for the inspector. `scale` is 0..1 relative
+/// to the largest size that fits the canvas WITHOUT distorting the source, so a
+/// non-16:9 clip keeps its aspect ratio.
 #[derive(Clone, Copy, Debug)]
-pub struct Transform {
+pub struct Layout {
     pub posx: i32,
     pub posy: i32,
-    pub width: i32,
-    pub height: i32,
+    pub scale: f64,
     pub alpha: f64,
     pub volume: f64,
+}
+
+/// Largest (width, height) a `nat_w`x`nat_h` source fits into the canvas without
+/// distortion (letter/pillar-boxed). Falls back to the full canvas if unknown.
+fn fit_size(nat_w: u32, nat_h: u32) -> (f64, f64) {
+    if nat_w == 0 || nat_h == 0 {
+        return (CANVAS_W as f64, CANVAS_H as f64);
+    }
+    let aspect = nat_w as f64 / nat_h as f64;
+    let canvas_aspect = CANVAS_W as f64 / CANVAS_H as f64;
+    if aspect > canvas_aspect {
+        (CANVAS_W as f64, CANVAS_W as f64 / aspect)
+    } else {
+        (CANVAS_H as f64 * aspect, CANVAS_H as f64)
+    }
+}
+
+/// The clip's source video dimensions, for aspect-correct scaling (None until
+/// the source has negotiated caps, or for audio-only clips).
+fn clip_natural_size(clip: &ges::Clip) -> Option<(u32, u32)> {
+    let el = clip.find_track_element(None::<&ges::Track>, ges::VideoSource::static_type())?;
+    let src = el.downcast::<ges::VideoSource>().ok()?;
+    let (w, h) = src.natural_size()?;
+    (w > 0 && h > 0).then_some((w as u32, h as u32))
 }
 
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
@@ -108,21 +150,21 @@ impl Project {
             .build();
 
         let cb: Arc<dyn Fn(Frame) + Send + Sync> = Arc::new(on_frame);
+        let cb_sample = cb.clone();
+        let cb_preroll = cb;
         appsink.set_callbacks(
             AppSinkCallbacks::builder()
+                // Playing: frames arrive as samples.
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let caps = sample.caps().ok_or(gst::FlowError::Error)?;
-                    let info = gstreamer_video::VideoInfo::from_caps(caps)
-                        .map_err(|_| gst::FlowError::Error)?;
-                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                    cb(Frame {
-                        width: info.width(),
-                        height: info.height(),
-                        rgba: map.as_slice().to_vec(),
-                    });
-                    Ok(gst::FlowSuccess::Ok)
+                    emit_sample(&sample, &*cb_sample)
+                })
+                // Paused / after a seek: the current frame arrives as a preroll
+                // buffer, so deliver it too — otherwise edits don't repaint while
+                // the timeline is paused.
+                .new_preroll(move |sink| {
+                    let sample = sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?;
+                    emit_sample(&sample, &*cb_preroll)
                 })
                 .build(),
         );
@@ -280,8 +322,9 @@ impl Project {
         Some(clip_geom(&clip))
     }
 
-    /// Read a clip's current transform (video child props + audio volume).
-    pub fn clip_transform(&self, id: &ClipId) -> Option<Transform> {
+    /// Read a clip's current layout (position, aspect-preserving scale, opacity,
+    /// volume) from its GES child properties.
+    pub fn clip_layout(&self, id: &ClipId) -> Option<Layout> {
         let clip = self.clips.get(&id.0)?;
         let geti = |n: &str, d: i32| {
             clip.child_property(n)
@@ -293,28 +336,72 @@ impl Project {
                 .and_then(|v| v.get::<f64>().ok())
                 .unwrap_or(d)
         };
-        Some(Transform {
+        let (fit_w, _) = match clip_natural_size(clip) {
+            Some((w, h)) => fit_size(w, h),
+            None => (CANVAS_W as f64, CANVAS_H as f64),
+        };
+        let width = geti("width", 0);
+        let scale = if width > 0 && fit_w > 0.0 {
+            (width as f64 / fit_w).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        Some(Layout {
             posx: geti("posx", 0),
             posy: geti("posy", 0),
-            width: geti("width", CANVAS_W),
-            height: geti("height", CANVAS_H),
+            scale,
             alpha: getf("alpha", 1.0),
             volume: getf("volume", 1.0),
         })
     }
 
-    /// Apply a transform to a clip, live. Missing child properties (e.g. volume
-    /// on a still image, which has no audio) are ignored.
-    pub fn set_clip_transform(&mut self, id: &ClipId, t: Transform) {
+    /// Apply a layout to a clip, live. `scale` maps to aspect-correct width/height
+    /// derived from the source size, so the clip is never distorted. Missing child
+    /// properties (e.g. volume on a still image) are ignored.
+    pub fn set_clip_layout(&mut self, id: &ClipId, l: Layout) {
         let Some(clip) = self.clips.get(&id.0) else {
             return;
         };
-        let _ = clip.set_child_property("posx", &t.posx.to_value());
-        let _ = clip.set_child_property("posy", &t.posy.to_value());
-        let _ = clip.set_child_property("width", &t.width.to_value());
-        let _ = clip.set_child_property("height", &t.height.to_value());
-        let _ = clip.set_child_property("alpha", &t.alpha.to_value());
-        let _ = clip.set_child_property("volume", &t.volume.to_value());
+        let (fit_w, fit_h) = match clip_natural_size(clip) {
+            Some((w, h)) => fit_size(w, h),
+            None => (CANVAS_W as f64, CANVAS_H as f64),
+        };
+        let width = (l.scale * fit_w).round().max(1.0) as i32;
+        let height = (l.scale * fit_h).round().max(1.0) as i32;
+        let _ = clip.set_child_property("posx", &l.posx.to_value());
+        let _ = clip.set_child_property("posy", &l.posy.to_value());
+        let _ = clip.set_child_property("width", &width.to_value());
+        let _ = clip.set_child_property("height", &height.to_value());
+        let _ = clip.set_child_property("alpha", &l.alpha.to_value());
+        let _ = clip.set_child_property("volume", &l.volume.to_value());
+        self.timeline.commit();
+        self.dirty.set(true);
+    }
+
+    /// The first time a clip is edited, replace GES's stretch-to-fill default with
+    /// an aspect-correct, centered layout. No-op once the clip has been laid out
+    /// (width child prop non-zero) or if the source size isn't known yet.
+    pub fn ensure_laid_out(&mut self, id: &ClipId) {
+        let Some(clip) = self.clips.get(&id.0) else {
+            return;
+        };
+        let cur_w = clip
+            .child_property("width")
+            .and_then(|v| v.get::<i32>().ok())
+            .unwrap_or(0);
+        if cur_w > 0 {
+            return;
+        }
+        let Some((nw, nh)) = clip_natural_size(clip) else {
+            return;
+        };
+        let (fw, fh) = fit_size(nw, nh);
+        let posx = ((CANVAS_W as f64 - fw) / 2.0).round() as i32;
+        let posy = ((CANVAS_H as f64 - fh) / 2.0).round() as i32;
+        let _ = clip.set_child_property("posx", &posx.to_value());
+        let _ = clip.set_child_property("posy", &posy.to_value());
+        let _ = clip.set_child_property("width", &(fw.round() as i32).to_value());
+        let _ = clip.set_child_property("height", &(fh.round() as i32).to_value());
         self.timeline.commit();
         self.dirty.set(true);
     }
@@ -463,13 +550,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         for i in 0..8 {
             let scale = 0.5 + (i as f64) * 0.05;
-            project.set_clip_transform(
+            project.set_clip_layout(
                 &info.id,
-                Transform {
+                Layout {
                     posx: 0,
                     posy: 0,
-                    width: (scale * CANVAS_W as f64) as i32,
-                    height: (scale * CANVAS_H as f64) as i32,
+                    scale,
                     alpha: 1.0,
                     volume: 1.0,
                 },
@@ -500,13 +586,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         for i in 0..8 {
             let scale = 0.5 + (i as f64) * 0.05;
-            project.set_clip_transform(
+            project.set_clip_layout(
                 &image.id,
-                Transform {
+                Layout {
                     posx: 0,
                     posy: 0,
-                    width: (scale * CANVAS_W as f64) as i32,
-                    height: (scale * CANVAS_H as f64) as i32,
+                    scale,
                     alpha: 1.0,
                     volume: 1.0,
                 },
