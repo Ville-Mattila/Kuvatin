@@ -37,6 +37,21 @@ pub struct ClipGeom {
     pub duration: Duration,
 }
 
+/// Recursively find the first element in `bin` created by the named factory.
+fn find_by_factory(bin: &gst::Bin, factory: &str) -> Option<gst::Element> {
+    for e in bin.iterate_elements().into_iter().flatten() {
+        if e.factory().map(|f| f.name().to_string()).as_deref() == Some(factory) {
+            return Some(e);
+        }
+        if let Some(b) = e.dynamic_cast_ref::<gst::Bin>() {
+            if let Some(found) = find_by_factory(b, factory) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Push one RGBA video sample to the frame callback.
 fn emit_sample(
     sample: &gst::Sample,
@@ -418,6 +433,14 @@ impl Project {
                     .unwrap_or(gst::ClockTime::ZERO)
             })
             .unwrap_or(gst::ClockTime::ZERO)
+    }
+
+    /// Master output volume (0..1) for the whole preview, set on the internal
+    /// playsink. This is the transport volume; per-clip volume is a child prop.
+    pub fn set_master_volume(&self, v: f64) {
+        if let Some(ps) = find_by_factory(self.pipeline.upcast_ref::<gst::Bin>(), "playsink") {
+            ps.set_property("volume", v.clamp(0.0, 1.0));
+        }
     }
 
     pub fn play(&self) -> Result<()> {

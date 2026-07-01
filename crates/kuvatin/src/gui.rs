@@ -784,12 +784,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
-        // Volume (wired to the GES project in a later task; updates the UI now).
+        // Transport volume: master output level for the whole preview.
         {
             let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
             ui.on_video_volume_changed(move |v| {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_video_volume(v);
+                }
+                if let Some(p) = project_slot.borrow().as_ref() {
+                    p.set_master_volume(v as f64);
                 }
             });
         }
