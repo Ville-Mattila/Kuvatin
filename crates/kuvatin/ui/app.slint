@@ -450,6 +450,7 @@ export component AppWindow inherits Window {
     in property <[TimelineClip]> timeline-clips;
     in property <[string]> timeline-track-labels;  // one per track, top row first
     in property <float> timeline-pps: 14.0;   // pixels per second (zoom)
+    in-out property <length> tl-scroll: 0px;  // horizontal scroll offset of the lane
     in property <float> playhead: 0.0;        // seconds
     in property <float> timeline-duration: 0.0; // seconds (for the ruler end)
     in property <string> inspector-name: "";  // selected clip name (or empty)
@@ -1384,12 +1385,16 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        Rectangle {
+                        lane := Rectangle {
                             horizontal-stretch: 1;
                             clip: true;
                             background: #0e1116;
+                            // Horizontal scroll: content width vs the visible lane.
+                            property <length> content-w: (root.timeline-duration * root.timeline-pps) * 1px + 40px;
+                            property <length> max-scroll: max(0px, self.content-w - self.width);
+                            property <length> scroll: Math.clamp(root.tl-scroll, 0px, self.max-scroll);
 
-                            // row background stripes
+                            // row background stripes (fixed; span the visible lane)
                             VerticalLayout {
                                 for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
                             }
@@ -1418,7 +1423,7 @@ export component AppWindow inherits Window {
                             // stable frame; `vis` is the visual block that moves/resizes
                             // live from the pointer delta. dmode: 0 idle,1 slide,2 ltrim,3 rtrim.
                             for clip[i] in root.timeline-clips : blk := Rectangle {
-                                x: (clip.start * root.timeline-pps) * 1px;
+                                x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                 // track 0 = GES layer 0 = top (both on-screen and composited).
                                 y: clip.track * 30px + 4px;
                                 width: (clip.duration * root.timeline-pps) * 1px;
@@ -1510,9 +1515,29 @@ export component AppWindow inherits Window {
 
                             // playhead
                             Rectangle {
-                                x: (root.playhead * root.timeline-pps) * 1px;
+                                x: (root.playhead * root.timeline-pps) * 1px - lane.scroll;
                                 width: 2px; height: parent.height;
                                 background: #ff5470;
+                            }
+
+                            // horizontal scrollbar (only when the timeline overflows)
+                            if lane.max-scroll > 0px : Rectangle {
+                                y: parent.height - 11px; x: 4px; width: parent.width - 8px; height: 7px;
+                                border-radius: 3px; background: #00000080;
+                                property <length> thumb-w: max(36px, self.width * self.width / lane.content-w);
+                                Rectangle {
+                                    x: (lane.scroll / lane.max-scroll) * (parent.width - parent.thumb-w);
+                                    width: parent.thumb-w; height: parent.height;
+                                    border-radius: 3px;
+                                    background: sbta.pressed ? #2dd4bf : (sbta.has-hover ? #ffffff66 : #ffffff40);
+                                }
+                                sbta := TouchArea {
+                                    function set(mx: length) {
+                                        root.tl-scroll = Math.clamp((mx - parent.thumb-w / 2) / (parent.width - parent.thumb-w) * lane.max-scroll, 0px, lane.max-scroll);
+                                    }
+                                    moved => { sbta.set(self.mouse-x); }
+                                    pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { sbta.set(self.mouse-x); } }
+                                }
                             }
                         }
                     }
