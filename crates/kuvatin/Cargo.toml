@@ -3,7 +3,7 @@ name = "kuvatin"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-authors = ["Ensemble <ville.mattila@ensemble.fi>"]
+authors = ["Ville Mattila <ville.mattila@ensemble.fi>"]
 description = "Kuvatin image tool with Windows Explorer context-menu integration"
 
 [[bin]]

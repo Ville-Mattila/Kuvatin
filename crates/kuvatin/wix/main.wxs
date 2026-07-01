@@ -62,7 +62,7 @@
         Id='*'
         Name='kuvatin'
         UpgradeCode='6CE48F37-33A2-4C50-99F4-F6982CCA934C'
-        Manufacturer='Ensemble'
+        Manufacturer='Ville Mattila'
         Language='1033'
         Codepage='1252'
         Version='$(var.Version)'>
@@ -70,7 +70,7 @@
         <Package Id='*'
             Keywords='Installer'
             Description='Kuvatin image tool with Windows Explorer context-menu integration'
-            Manufacturer='Ensemble'
+            Manufacturer='Ville Mattila'
             InstallerVersion='450'
             Languages='1033'
             Compressed='yes'
@@ -144,7 +144,7 @@
                         <RemoveFolder Id='RemoveApplicationProgramsFolder'
                                       On='uninstall'/>
                         <RegistryValue Root='HKCU'
-                                       Key='Software\Ensemble\Kuvatin'
+                                       Key='Software\Ville Mattila\Kuvatin'
                                        Name='installed'
                                        Type='integer'
                                        Value='1'

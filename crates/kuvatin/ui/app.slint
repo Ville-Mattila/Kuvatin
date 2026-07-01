@@ -1380,17 +1380,20 @@ export component AppWindow inherits Window {
                             }
 
                             // "new track" drop zone, shown while dragging a clip.
+                            // Teal-tinted so it's visible against the dark lane; sits
+                            // behind the clip blocks so the dragged clip stays on top.
                             if root.clip-dragging : Rectangle {
                                 property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                y: root.timeline-track-labels.length * 30px + 2px;
-                                x: 3px; width: parent.width - 6px; height: 26px;
+                                y: root.timeline-track-labels.length * 30px + 3px;
+                                x: 4px; width: parent.width - 8px; height: 22px;
                                 border-radius: 6px;
-                                background: active ? #2dd4bf22 : #ffffff08;
-                                border-width: 1px; border-color: active ? #2dd4bf : #3a414d;
+                                background: active ? #2dd4bf3a : #14302b;
+                                border-width: active ? 2px : 1px;
+                                border-color: active ? #2dd4bf : #2dd4bf99;
                                 Text {
-                                    text: "Drop here for a new track";
-                                    color: active ? #2dd4bf : #6b7585;
-                                    font-size: 10px; font-weight: 600;
+                                    text: "＋  Drop here for a new track";
+                                    color: active ? #ffffff : #5fdccb;
+                                    font-size: 10px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
