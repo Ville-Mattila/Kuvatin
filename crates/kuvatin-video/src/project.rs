@@ -37,6 +37,17 @@ pub struct ClipGeom {
     pub duration: Duration,
 }
 
+/// Pre-load (discover) a media file into the GES asset cache. Safe to call off
+/// the UI thread; a subsequent `add_clip`/`append_clip` then hits the warm cache
+/// and returns immediately instead of blocking the UI on discovery.
+pub fn warm_asset(path: &Path) -> Result<()> {
+    gst::init()?;
+    ges::init()?;
+    let uri = gst::glib::filename_to_uri(path, None)?;
+    let _ = ges::UriClipAsset::request_sync(&uri)?;
+    Ok(())
+}
+
 /// Recursively find the first element in `bin` created by the named factory.
 fn find_by_factory(bin: &gst::Bin, factory: &str) -> Option<gst::Element> {
     for e in bin.iterate_elements().into_iter().flatten() {
@@ -628,6 +639,27 @@ mod tests {
             );
             project.refresh_preview();
         }
+    }
+
+    /// Verifies asset discovery works on a worker thread (so imports can happen
+    /// off the UI thread) and warms the cache for a fast follow-up add.
+    #[test]
+    fn warms_asset_off_thread() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping warms_asset_off_thread: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        gst::init().unwrap();
+        ges::init().unwrap();
+        let p2 = path.clone();
+        let ok = std::thread::spawn(move || warm_asset(&p2).is_ok())
+            .join()
+            .unwrap();
+        assert!(ok, "warm_asset failed on a worker thread");
+        // After warming, adding the clip should succeed (cache hit, no block).
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&path, 0, None).expect("append after warm");
     }
 
     /// Runtime-checks the track structural ops: move a clip between tracks, onto

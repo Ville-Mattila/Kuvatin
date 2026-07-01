@@ -460,6 +460,10 @@ export component AppWindow inherits Window {
     // Timeline drag state (drives the "new track" drop indicator).
     in-out property <bool> clip-dragging: false;
     in-out property <int> clip-drag-target-row: 0;
+    // File import progress (a worker discovers files off the UI thread).
+    in property <bool> importing: false;
+    in property <int> import-done: 0;
+    in property <int> import-total: 0;
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
@@ -1497,6 +1501,42 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Import progress modal — overlays everything while files are being imported.
+    if root.importing : Rectangle {
+        background: #000000b0;
+        // Swallow clicks behind the modal.
+        TouchArea {}
+        Rectangle {
+            width: 320px; height: 128px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1b1f27;
+            border-radius: 12px;
+            border-width: 1px; border-color: #2c313b;
+            VerticalLayout {
+                padding: 22px; spacing: 16px;
+                Text {
+                    text: "Importing files…";
+                    color: #f2f4f8; font-size: 14px; font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Rectangle {
+                    height: 8px; border-radius: 4px; background: #2c313b;
+                    Rectangle {
+                        x: 0; height: parent.height; border-radius: 4px;
+                        width: root.import-total > 0 ? parent.width * root.import-done / root.import-total : 0px;
+                        background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
+                    }
+                }
+                Text {
+                    text: root.import-done + " / " + root.import-total;
+                    color: #9aa3b2; font-size: 11px;
+                    horizontal-alignment: center;
                 }
             }
         }

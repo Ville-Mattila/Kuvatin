@@ -5,4 +5,4 @@ pub mod player;
 pub use player::{Frame, Player};
 
 pub mod project;
-pub use project::{ClipGeom, ClipId, ClipInfo, Layout, Project, CANVAS_H, CANVAS_W};
+pub use project::{warm_asset, ClipGeom, ClipId, ClipInfo, Layout, Project, CANVAS_H, CANVAS_W};

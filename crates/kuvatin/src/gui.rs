@@ -171,6 +171,25 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     ]));
     ui.set_timeline_track_labels(ModelRc::from(video_tracks.clone()));
 
+    // File import: a worker thread discovers dropped/opened media OFF the UI
+    // thread (warming the GES asset cache); a UI timer then adds each cache-warm
+    // clip quickly. So importing many files shows a progress modal instead of
+    // freezing the app for the whole batch.
+    let (import_tx, import_rx) = std::sync::mpsc::channel::<PathBuf>();
+    let import_ready: Arc<Mutex<std::collections::VecDeque<PathBuf>>> =
+        Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let import_total = Rc::new(std::cell::Cell::new(0usize));
+    let import_done = Rc::new(std::cell::Cell::new(0usize));
+    {
+        let ready = import_ready.clone();
+        std::thread::spawn(move || {
+            for path in import_rx {
+                let _ = kuvatin_video::warm_asset(&path);
+                ready.lock().unwrap().push_back(path);
+            }
+        });
+    }
+
     // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
     // and drain dropped paths into the right pipeline (images → file list,
     // videos → timeline). The native HWND is only available after the window is
@@ -195,11 +214,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // Keep the timer alive for the lifetime of the window.
         std::mem::forget(setup_timer);
 
-        // Drain dropped paths on the UI thread. In Images mode they go to the
-        // file list; in Videos mode each becomes a clip on the timeline.
-        let video_project = video_project.clone();
-        let video_assets = video_assets.clone();
-        let video_tl = video_tl.clone();
+        // Drain dropped paths on the UI thread. Images go to the file list;
+        // videos are queued for the import worker (discovered off-thread, then
+        // added by the import timer) so a big drop doesn't freeze the app.
+        let import_tx = import_tx.clone();
+        let import_total = import_total.clone();
         let drain_timer = slint::Timer::default();
         drain_timer.start(
             slint::TimerMode::Repeated,
@@ -212,7 +231,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 let videos = ui_weak.upgrade().map(|ui| ui.get_app_mode() == 1).unwrap_or(false);
                 if videos {
                     for path in dropped {
-                        add_video_media(&path, &ui_weak, &video_project, &video_assets, &video_tl);
+                        let _ = import_tx.send(path);
+                        import_total.set(import_total.get() + 1);
+                    }
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_importing(true);
+                        ui.set_import_total(import_total.get() as i32);
                     }
                 } else {
                     add_paths(dropped, &files, &rows, &crops, &ui_weak);
@@ -583,15 +607,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let pending_xform: Rc<RefCell<Option<(String, kuvatin_video::Layout)>>> =
             Rc::new(RefCell::new(None));
 
-        // Open media via the file dialog. Drag-and-drop takes the same path
-        // through add_video_media (wired into the drop drain above).
+        // Open media via the file dialog → the same import queue as drag-and-drop.
         {
             let ui_weak = ui_weak.clone();
-            let project_slot = project_slot.clone();
-            let assets = assets.clone();
-            let tl_clips = tl_clips.clone();
+            let import_tx = import_tx.clone();
+            let import_total = import_total.clone();
             ui.on_video_open(move || {
-                let Some(path) = rfd::FileDialog::new()
+                let Some(paths) = rfd::FileDialog::new()
                     .add_filter(
                         "Media",
                         &[
@@ -599,12 +621,55 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             "webp", "bmp", "gif",
                         ],
                     )
-                    .pick_file()
+                    .pick_files()
                 else {
                     return;
                 };
-                add_video_media(&path, &ui_weak, &project_slot, &assets, &tl_clips);
+                for path in paths {
+                    let _ = import_tx.send(path);
+                    import_total.set(import_total.get() + 1);
+                }
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_importing(true);
+                    ui.set_import_total(import_total.get() as i32);
+                }
             });
+        }
+
+        // Import timer: pull discovered (cache-warm) files off the worker's ready
+        // queue and add them quickly, advancing the progress modal.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let assets = assets.clone();
+            let tl_clips = tl_clips.clone();
+            let ready = import_ready.clone();
+            let import_total = import_total.clone();
+            let import_done = import_done.clone();
+            let timer = slint::Timer::default();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(60),
+                move || {
+                    loop {
+                        let next = ready.lock().unwrap().pop_front();
+                        let Some(path) = next else {
+                            break;
+                        };
+                        add_video_media(&path, &ui_weak, &project_slot, &assets, &tl_clips);
+                        import_done.set(import_done.get() + 1);
+                    }
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_import_done(import_done.get() as i32);
+                        if import_total.get() > 0 && import_done.get() >= import_total.get() {
+                            ui.set_importing(false);
+                            import_total.set(0);
+                            import_done.set(0);
+                        }
+                    }
+                },
+            );
+            std::mem::forget(timer);
         }
 
         // Media-bin asset click: highlight it.
