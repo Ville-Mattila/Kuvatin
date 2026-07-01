@@ -454,6 +454,12 @@ export component AppWindow inherits Window {
     in-out property <float> insp-alpha: 100;   // opacity percent
     in-out property <float> insp-volume: 100;  // percent
     in property <bool> insp-has-audio: true;   // hide volume for stills
+    // Selected clip's aspect-fit size in canvas px (for the preview bounding box).
+    in property <float> sel-fit-w: 1280;
+    in property <float> sel-fit-h: 720;
+    // Timeline drag state (drives the "new track" drop indicator).
+    in-out property <bool> clip-dragging: false;
+    in-out property <int> clip-drag-target-row: 0;
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
@@ -1191,6 +1197,76 @@ export component AppWindow inherits Window {
                             color: #6b7585; font-size: 13px;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
+
+                        // Bounding box: move/resize the selected clip on the canvas.
+                        // The TouchArea fills the (fixed) viewer for stable drag
+                        // deltas; the visible box is derived from insp-* (reactive).
+                        if root.inspector-name != "" && root.video-frame.width > 0 : edit-layer := Rectangle {
+                            // canvas 1280x720 → viewer mapping under image-fit: contain
+                            property <bool> hlim: (self.width / self.height) > (1280.0 / 720.0);
+                            property <length> disp-w: hlim ? self.height * 1280 / 720 : self.width;
+                            property <length> off-x: (self.width - disp-w) / 2;
+                            property <length> off-y: (self.height - (hlim ? self.height : self.width * 720 / 1280)) / 2;
+                            property <length> ppc: disp-w / 1280;      // viewer px per canvas px
+                            property <float> rw: (root.insp-scale / 100) * root.sel-fit-w;   // canvas px
+                            property <float> rh: (root.insp-scale / 100) * root.sel-fit-h;
+                            property <length> bx: off-x + root.insp-posx * ppc;
+                            property <length> by: off-y + root.insp-posy * ppc;
+                            property <length> bw: rw * ppc;
+                            property <length> bh: rh * ppc;
+
+                            Rectangle {
+                                x: edit-layer.bx; y: edit-layer.by;
+                                width: edit-layer.bw; height: edit-layer.bh;
+                                background: #2dd4bf10;
+                                border-width: 1.5px; border-color: #2dd4bf;
+                                Rectangle { x: -4px; y: -4px; width: 9px; height: 9px; background: white; border-width: 1px; border-color: #2dd4bf; }
+                                Rectangle { x: parent.width - 5px; y: -4px; width: 9px; height: 9px; background: white; border-width: 1px; border-color: #2dd4bf; }
+                                Rectangle { x: -4px; y: parent.height - 5px; width: 9px; height: 9px; background: white; border-width: 1px; border-color: #2dd4bf; }
+                                Rectangle { x: parent.width - 5px; y: parent.height - 5px; width: 9px; height: 9px; background: white; border-width: 1px; border-color: #2dd4bf; }
+                            }
+
+                            eta := TouchArea {
+                                property <int> mode: 0;      // 0 none, 1 move, 2 resize
+                                property <float> cen-x: 0;   // canvas center (resize anchor)
+                                property <float> cen-y: 0;
+                                property <float> b-posx: 0;
+                                property <float> b-posy: 0;
+                                mouse-cursor: eta.mode == 2 ? MouseCursor.nwse-resize : MouseCursor.move;
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down) {
+                                        eta.b-posx = root.insp-posx;
+                                        eta.b-posy = root.insp-posy;
+                                        eta.cen-x = root.insp-posx + edit-layer.rw / 2;
+                                        eta.cen-y = root.insp-posy + edit-layer.rh / 2;
+                                        if (Math.max(Math.abs(self.pressed-x - edit-layer.bx), Math.abs(self.pressed-y - edit-layer.by)) < 16px
+                                            || Math.max(Math.abs(self.pressed-x - (edit-layer.bx + edit-layer.bw)), Math.abs(self.pressed-y - edit-layer.by)) < 16px
+                                            || Math.max(Math.abs(self.pressed-x - edit-layer.bx), Math.abs(self.pressed-y - (edit-layer.by + edit-layer.bh))) < 16px
+                                            || Math.max(Math.abs(self.pressed-x - (edit-layer.bx + edit-layer.bw)), Math.abs(self.pressed-y - (edit-layer.by + edit-layer.bh))) < 16px) {
+                                            eta.mode = 2;
+                                        } else if (self.pressed-x >= edit-layer.bx && self.pressed-x <= edit-layer.bx + edit-layer.bw
+                                            && self.pressed-y >= edit-layer.by && self.pressed-y <= edit-layer.by + edit-layer.bh) {
+                                            eta.mode = 1;
+                                        } else {
+                                            eta.mode = 0;
+                                        }
+                                    }
+                                    if (ev.kind == PointerEventKind.up) { eta.mode = 0; }
+                                }
+                                moved => {
+                                    if (eta.mode == 1) {
+                                        root.insp-posx = eta.b-posx + (self.mouse-x - self.pressed-x) / edit-layer.ppc;
+                                        root.insp-posy = eta.b-posy + (self.mouse-y - self.pressed-y) / edit-layer.ppc;
+                                        root.inspector-changed();
+                                    } else if (eta.mode == 2) {
+                                        root.insp-scale = Math.clamp(Math.abs((self.mouse-x - edit-layer.off-x) / edit-layer.ppc - eta.cen-x) * 2 / root.sel-fit-w * 100, 10, 100);
+                                        root.insp-posx = eta.cen-x - (root.insp-scale / 100) * root.sel-fit-w / 2;
+                                        root.insp-posy = eta.cen-y - (root.insp-scale / 100) * root.sel-fit-h / 2;
+                                        root.inspector-changed();
+                                    }
+                                }
+                            }
+                        }
                     }
                     HorizontalLayout {
                         height: 30px; spacing: 9px;
@@ -1303,6 +1379,22 @@ export component AppWindow inherits Window {
                                 for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
                             }
 
+                            // "new track" drop zone, shown while dragging a clip.
+                            if root.clip-dragging : Rectangle {
+                                property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
+                                y: root.timeline-track-labels.length * 30px + 2px;
+                                x: 3px; width: parent.width - 6px; height: 26px;
+                                border-radius: 6px;
+                                background: active ? #2dd4bf22 : #ffffff08;
+                                border-width: 1px; border-color: active ? #2dd4bf : #3a414d;
+                                Text {
+                                    text: "Drop here for a new track";
+                                    color: active ? #2dd4bf : #6b7585;
+                                    font-size: 10px; font-weight: 600;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
                             // clip blocks. The wrapper `blk` keeps the clip's MODEL
                             // geometry (fixed during a drag) so the hit-areas sit in a
                             // stable frame; `vis` is the visual block that moves/resizes
@@ -1346,6 +1438,8 @@ export component AppWindow inherits Window {
                                         blk.dmode = 1;
                                         blk.ddx = self.mouse-x - self.pressed-x;
                                         blk.ddy = self.mouse-y - self.pressed-y;
+                                        root.clip-dragging = true;
+                                        root.clip-drag-target-row = clip.track + Math.round(blk.ddy / 30px);
                                     }
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
@@ -1353,6 +1447,7 @@ export component AppWindow inherits Window {
                                                 root.timeline-clip-dropped(i, (blk.ddx / 1px) / root.timeline-pps, Math.round(blk.ddy / 30px));
                                             }
                                             blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
+                                            root.clip-dragging = false;
                                         }
                                     }
                                     clicked => { root.timeline-select(i); }

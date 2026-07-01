@@ -658,6 +658,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             ui.set_insp_alpha((l.alpha as f32 * 100.0).clamp(0.0, 100.0));
                             ui.set_insp_volume((l.volume as f32 * 100.0).clamp(0.0, 100.0));
                         }
+                        // Fit size drives the preview bounding box dimensions.
+                        let (fw, fh) = p.clip_fit_size(&cid).unwrap_or((
+                            kuvatin_video::CANVAS_W as u32,
+                            kuvatin_video::CANVAS_H as u32,
+                        ));
+                        ui.set_sel_fit_w(fw as f32);
+                        ui.set_sel_fit_h(fh as f32);
                     }
                 }
             });

@@ -427,6 +427,15 @@ impl Project {
         self.dirty.set(true);
     }
 
+    /// The clip's aspect-fit size in canvas px (largest undistorted size), used to
+    /// size the preview bounding box. None for audio-only / not-yet-prerolled clips.
+    pub fn clip_fit_size(&self, id: &ClipId) -> Option<(u32, u32)> {
+        let clip = self.clips.get(&id.0)?;
+        let (nw, nh) = clip_natural_size(clip)?;
+        let (fw, fh) = fit_size(nw, nh);
+        Some((fw.round() as u32, fh.round() as u32))
+    }
+
     /// The first time a clip is edited, replace GES's stretch-to-fill default with
     /// an aspect-correct, centered layout. No-op once the clip has been laid out
     /// (width child prop non-zero) or if the source size isn't known yet.
