@@ -921,6 +921,27 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
+        // Scrub: drag/click the timeline lane to move the playhead + seek.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            ui.on_timeline_seek_time(move |secs| {
+                let slot = project_slot.borrow();
+                let Some(project) = slot.as_ref() else {
+                    return;
+                };
+                let dur = project.duration().map(|d| d.as_secs_f32()).unwrap_or(0.0);
+                let secs = if dur > 0.0 { secs.clamp(0.0, dur) } else { secs.max(0.0) };
+                let _ = project.seek(std::time::Duration::from_secs_f32(secs));
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_playhead(secs);
+                    if dur > 0.0 {
+                        ui.set_video_position((secs / dur).clamp(0.0, 1.0));
+                    }
+                }
+            });
+        }
+
         // Transport volume: master output level for the whole preview.
         {
             let ui_weak = ui_weak.clone();

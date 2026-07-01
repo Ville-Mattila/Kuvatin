@@ -1394,6 +1394,19 @@ export component AppWindow inherits Window {
                             property <length> max-scroll: max(0px, self.content-w - self.width);
                             property <length> scroll: Math.clamp(root.tl-scroll, 0px, self.max-scroll);
 
+                            // Scrub: click/drag empty timeline area to move the
+                            // playhead and seek. Behind the clips, so clip clicks
+                            // still select and clip drags still move.
+                            scrub-ta := TouchArea {
+                                function seek(mx: length) {
+                                    root.timeline-seek-time(Math.max(0, (mx + lane.scroll) / 1px / root.timeline-pps));
+                                }
+                                moved => { scrub-ta.seek(self.mouse-x); }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down) { scrub-ta.seek(self.mouse-x); }
+                                }
+                            }
+
                             // row background stripes (fixed; span the visible lane)
                             VerticalLayout {
                                 for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
