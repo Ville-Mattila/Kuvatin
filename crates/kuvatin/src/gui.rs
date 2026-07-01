@@ -75,9 +75,11 @@ fn add_video_media(
                 .into();
             assets.push(name.clone());
             tl_clips.push(TimelineClip {
+                id: info.id.0.clone().into(),
                 track: 0,
                 start: info.start.as_secs_f32(),
                 duration: info.duration.as_secs_f32(),
+                inpoint: 0.0,
                 name,
                 kind: if is_img { 1 } else { 0 },
                 selected: false,
@@ -621,6 +623,64 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     }
                 }
                 ui.set_inspector_name(name);
+            });
+        }
+
+        // Slide a clip along its track: apply to GES, mirror the result into the model.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = tl_clips.clone();
+            ui.on_timeline_clip_moved(move |i, delta| {
+                let Some(mut row) = tl_clips.row_data(i as usize) else {
+                    return;
+                };
+                let geom = project_slot
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(|p| p.slide_clip(&kuvatin_video::ClipId(row.id.to_string()), delta as f64));
+                let Some(geom) = geom else {
+                    return;
+                };
+                row.start = geom.start.as_secs_f32();
+                row.inpoint = geom.inpoint.as_secs_f32();
+                row.duration = geom.duration.as_secs_f32();
+                tl_clips.set_row_data(i as usize, row);
+                if let (Some(ui), Some(d)) = (
+                    ui_weak.upgrade(),
+                    project_slot.borrow().as_ref().and_then(|p| p.duration()),
+                ) {
+                    ui.set_timeline_duration(d.as_secs_f32());
+                }
+            });
+        }
+
+        // Trim a clip by dragging an edge (edge: -1 left, +1 right).
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = tl_clips.clone();
+            ui.on_timeline_clip_trimmed(move |i, edge, delta| {
+                let Some(mut row) = tl_clips.row_data(i as usize) else {
+                    return;
+                };
+                let geom = project_slot
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(|p| p.trim_clip(&kuvatin_video::ClipId(row.id.to_string()), edge, delta as f64));
+                let Some(geom) = geom else {
+                    return;
+                };
+                row.start = geom.start.as_secs_f32();
+                row.inpoint = geom.inpoint.as_secs_f32();
+                row.duration = geom.duration.as_secs_f32();
+                tl_clips.set_row_data(i as usize, row);
+                if let (Some(ui), Some(d)) = (
+                    ui_weak.upgrade(),
+                    project_slot.borrow().as_ref().and_then(|p| p.duration()),
+                ) {
+                    ui.set_timeline_duration(d.as_secs_f32());
+                }
             });
         }
 

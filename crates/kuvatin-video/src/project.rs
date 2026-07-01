@@ -2,6 +2,7 @@
 //! preview. The GUI's timeline UI drives this; GES handles compositing,
 //! transforms, trims, and seeking (and, later, render-to-file for export).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,12 +29,31 @@ pub struct ClipInfo {
     pub duration: Duration,
 }
 
+/// A clip's current timeline geometry (returned after a slide/trim clamps it).
+#[derive(Clone, Copy, Debug)]
+pub struct ClipGeom {
+    pub start: Duration,
+    pub inpoint: Duration,
+    pub duration: Duration,
+}
+
+/// Read a GES clip's current timeline geometry.
+fn clip_geom(clip: &ges::Clip) -> ClipGeom {
+    ClipGeom {
+        start: Duration::from_nanos(clip.start().nseconds()),
+        inpoint: Duration::from_nanos(clip.inpoint().nseconds()),
+        duration: Duration::from_nanos(clip.duration().nseconds()),
+    }
+}
+
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
 /// visual tracks, index 0 = bottom (top layers composite over lower ones).
 pub struct Project {
     timeline: ges::Timeline,
     layers: Vec<ges::Layer>,
     pipeline: ges::Pipeline,
+    /// Clips by GES name, so the GUI can edit them by id (slide/trim/transform).
+    clips: HashMap<String, ges::Clip>,
 }
 
 impl Project {
@@ -84,6 +104,7 @@ impl Project {
             timeline,
             layers: vec![layer],
             pipeline,
+            clips: HashMap::new(),
         })
     }
 
@@ -114,7 +135,9 @@ impl Project {
         // Async commit (see append_clip): commit_sync() can deadlock during an
         // async pipeline state-change, so never block on the commit here.
         self.timeline.commit();
-        Ok(ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()))
+        let name = clip.name().map(|s| s.to_string()).unwrap_or_default();
+        self.clips.insert(name.clone(), clip.clone().upcast());
+        Ok(ClipId(name))
     }
 
     /// Append `path` to the end of track `track`, using its natural duration
@@ -144,12 +167,85 @@ impl Project {
         // pipeline is mid async state-change (e.g. a second clip added right
         // after play()), because the commit ack can't arrive until preroll ends.
         self.timeline.commit();
+        let name = clip.name().map(|s| s.to_string()).unwrap_or_default();
+        self.clips.insert(name.clone(), clip.clone());
         Ok(ClipInfo {
-            id: ClipId(clip.name().map(|s| s.to_string()).unwrap_or_default()),
+            id: ClipId(name),
             track,
             start: Duration::from_nanos(start_ct.nseconds()),
             duration: Duration::from_nanos(dur_ct.nseconds()),
         })
+    }
+
+    /// Slide a clip along its track by `delta_secs` (may be negative); start is
+    /// clamped to >= 0. Returns the resulting geometry, or None for an unknown id.
+    pub fn slide_clip(&mut self, id: &ClipId, delta_secs: f64) -> Option<ClipGeom> {
+        let clip = self.clips.get(&id.0)?.clone();
+        let start = clip.start().nseconds() as i128;
+        let delta = (delta_secs * 1e9) as i128;
+        let new_start = (start + delta).max(0) as u64;
+        clip.set_start(gst::ClockTime::from_nseconds(new_start));
+        self.timeline.commit();
+        Some(clip_geom(&clip))
+    }
+
+    /// Trim a clip by dragging an edge. `edge < 0` = left edge (keeps the right
+    /// end fixed by moving start+inpoint and shrinking duration); `edge > 0` =
+    /// right edge (adjusts duration only). Clamped to the source bounds and a
+    /// 0.2 s minimum. Returns the resulting geometry.
+    pub fn trim_clip(&mut self, id: &ClipId, edge: i32, delta_secs: f64) -> Option<ClipGeom> {
+        let clip = self.clips.get(&id.0)?.clone();
+        let start = clip.start().nseconds() as i128;
+        let inpoint = clip.inpoint().nseconds() as i128;
+        let dur = clip.duration().nseconds() as i128;
+        // max-duration is GST_CLOCK_TIME_NONE (→ None) for stills; a finite length
+        // for real media, which caps how far the right edge can extend.
+        let max_ns = clip
+            .property::<Option<gst::ClockTime>>("max-duration")
+            .map(|m| m.nseconds() as i128);
+        let min_dur = 200_000_000i128; // 0.2 s
+        let delta = (delta_secs * 1e9) as i128;
+
+        if edge < 0 {
+            // Left edge: end (start + duration) stays fixed; inpoint moves with start.
+            let mut d = delta;
+            if inpoint + d < 0 {
+                d = -inpoint;
+            }
+            if start + d < 0 {
+                d = -start;
+            }
+            if dur - d < min_dur {
+                d = dur - min_dur;
+            }
+            let new_start = gst::ClockTime::from_nseconds((start + d) as u64);
+            let new_inp = gst::ClockTime::from_nseconds((inpoint + d) as u64);
+            let new_dur = gst::ClockTime::from_nseconds((dur - d) as u64);
+            // Apply the shrinking property first so inpoint + duration never
+            // transiently exceeds max-duration (which GES would clamp).
+            if d >= 0 {
+                clip.set_duration(new_dur);
+                clip.set_inpoint(new_inp);
+            } else {
+                clip.set_inpoint(new_inp);
+                clip.set_duration(new_dur);
+            }
+            clip.set_start(new_start);
+        } else {
+            // Right edge: only the duration changes.
+            let mut new_dur = dur + delta;
+            if new_dur < min_dur {
+                new_dur = min_dur;
+            }
+            if let Some(m) = max_ns {
+                if inpoint + new_dur > m {
+                    new_dur = m - inpoint;
+                }
+            }
+            clip.set_duration(gst::ClockTime::from_nseconds(new_dur as u64));
+        }
+        self.timeline.commit();
+        Some(clip_geom(&clip))
     }
 
     /// End time (start + duration) of the last clip on `track`, or zero.

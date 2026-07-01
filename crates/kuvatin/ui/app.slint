@@ -11,9 +11,11 @@ export struct FileRow {
 // A clip placed on the video timeline. Positions are in seconds; the UI maps
 // them to pixels via the pixels-per-second zoom.
 export struct TimelineClip {
+    id: string,        // GES clip name (identifies the clip for edits)
     track: int,        // 0 = bottom layer
     start: float,      // seconds from the timeline origin
     duration: float,   // seconds
+    inpoint: float,    // seconds into the source (trim offset)
     name: string,
     kind: int,         // 0 = video, 1 = image
     selected: bool,
@@ -393,6 +395,8 @@ export component AppWindow inherits Window {
     in property <string> inspector-name: "";  // selected clip name (or empty)
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
+    callback timeline-clip-moved(int, float); // clip index, delta seconds (slide the body)
+    callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -1195,23 +1199,84 @@ export component AppWindow inherits Window {
                                 for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
                             }
 
-                            // clip blocks (absolute: x from start, y from track)
-                            for clip[i] in root.timeline-clips : Rectangle {
+                            // clip blocks. The wrapper `blk` keeps the clip's MODEL
+                            // geometry (fixed during a drag) so the hit-areas sit in a
+                            // stable frame; `vis` is the visual block that moves/resizes
+                            // live from the pointer delta. dmode: 0 idle,1 slide,2 ltrim,3 rtrim.
+                            for clip[i] in root.timeline-clips : blk := Rectangle {
                                 x: (clip.start * root.timeline-pps) * 1px;
                                 y: clip.track * 30px + 4px;
                                 width: (clip.duration * root.timeline-pps) * 1px;
                                 height: 22px;
-                                border-radius: 6px;
-                                clip: true;
-                                background: clip.kind == 0
-                                    ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
-                                    : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
-                                border-width: clip.selected ? 2px : 1px;
-                                border-color: clip.selected ? #2dd4bf : #00000055;
-                                Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 7px; y: (parent.height - self.height) / 2; }
-                                Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
-                                Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
-                                TouchArea { clicked => { root.timeline-select(i); } }
+                                background: transparent;
+                                property <length> ddx: 0px;
+                                property <int> dmode: 0;
+
+                                // live visual (previews the drag; not a drag frame)
+                                vis := Rectangle {
+                                    x: (blk.dmode == 1 || blk.dmode == 2) ? blk.ddx : 0px;
+                                    width: max(10px, parent.width
+                                        + (blk.dmode == 2 ? -blk.ddx : 0px)
+                                        + (blk.dmode == 3 ? blk.ddx : 0px));
+                                    height: parent.height;
+                                    border-radius: 6px;
+                                    clip: true;
+                                    background: clip.kind == 0
+                                        ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
+                                        : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
+                                    border-width: clip.selected ? 2px : 1px;
+                                    border-color: clip.selected ? #2dd4bf : #00000055;
+                                    Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
+                                    Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
+                                    Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                }
+
+                                // body: slide + select (stable frame = blk)
+                                TouchArea {
+                                    mouse-cursor: move;
+                                    moved => { blk.dmode = 1; blk.ddx = self.mouse-x - self.pressed-x; }
+                                    pointer-event(ev) => {
+                                        if (ev.kind == PointerEventKind.up) {
+                                            if (blk.dmode == 1 && Math.abs(blk.ddx / 1px) > 2) {
+                                                root.timeline-clip-moved(i, (blk.ddx / 1px) / root.timeline-pps);
+                                            }
+                                            blk.dmode = 0; blk.ddx = 0px;
+                                        }
+                                    }
+                                    clicked => { root.timeline-select(i); }
+                                }
+                                // left-edge trim (on top of the body)
+                                Rectangle {
+                                    x: 0; width: 8px; height: parent.height; background: transparent;
+                                    TouchArea {
+                                        mouse-cursor: ew-resize;
+                                        moved => { blk.dmode = 2; blk.ddx = self.mouse-x - self.pressed-x; }
+                                        pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.up) {
+                                                if (blk.dmode == 2 && Math.abs(blk.ddx / 1px) > 2) {
+                                                    root.timeline-clip-trimmed(i, -1, (blk.ddx / 1px) / root.timeline-pps);
+                                                }
+                                                blk.dmode = 0; blk.ddx = 0px;
+                                            }
+                                        }
+                                    }
+                                }
+                                // right-edge trim
+                                Rectangle {
+                                    x: parent.width - 8px; width: 8px; height: parent.height; background: transparent;
+                                    TouchArea {
+                                        mouse-cursor: ew-resize;
+                                        moved => { blk.dmode = 3; blk.ddx = self.mouse-x - self.pressed-x; }
+                                        pointer-event(ev) => {
+                                            if (ev.kind == PointerEventKind.up) {
+                                                if (blk.dmode == 3 && Math.abs(blk.ddx / 1px) > 2) {
+                                                    root.timeline-clip-trimmed(i, 1, (blk.ddx / 1px) / root.timeline-pps);
+                                                }
+                                                blk.dmode = 0; blk.ddx = 0px;
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // playhead
