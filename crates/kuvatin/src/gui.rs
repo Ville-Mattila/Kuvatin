@@ -66,7 +66,9 @@ fn add_video_media(
         .unwrap_or_default();
     let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif");
     let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
-    match project.append_clip(path, 0, img_dur) {
+    // Videos land on the base track (0); images become overlays on track 1.
+    let track = if is_img { 1 } else { 0 };
+    match project.append_clip(path, track, img_dur) {
         Ok(info) => {
             let name: SharedString = path
                 .file_name()
@@ -76,7 +78,7 @@ fn add_video_media(
             assets.push(name.clone());
             tl_clips.push(TimelineClip {
                 id: info.id.0.clone().into(),
-                track: 0,
+                track: info.track as i32,
                 start: info.start.as_secs_f32(),
                 duration: info.duration.as_secs_f32(),
                 inpoint: 0.0,
@@ -161,7 +163,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let video_tl = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
     ui.set_timeline_clips(ModelRc::from(video_tl.clone()));
     ui.set_timeline_track_labels(ModelRc::from(Rc::new(VecModel::<SharedString>::from(vec![
-        SharedString::from("Track 1"),
+        SharedString::from("Video"),
+        SharedString::from("Overlay"),
     ]))));
 
     // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
@@ -569,6 +572,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let project_slot = video_project.clone();
         let assets = video_assets.clone();
         let tl_clips = video_tl.clone();
+        // Index of the selected timeline clip (for the inspector), or -1.
+        let sel_idx = Rc::new(std::cell::Cell::new(-1i32));
 
         // Open media via the file dialog. Drag-and-drop takes the same path
         // through add_video_media (wired into the drop drain above).
@@ -604,25 +609,83 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
-        // Timeline clip click: select it (highlight + inspector).
+        // Timeline clip click: select it (highlight) + populate the inspector.
         {
             let ui_weak = ui_weak.clone();
             let tl_clips = tl_clips.clone();
+            let project_slot = project_slot.clone();
+            let sel_idx = sel_idx.clone();
             ui.on_timeline_select(move |i| {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
+                sel_idx.set(i);
                 let mut name = SharedString::new();
+                let mut sel_id = SharedString::new();
+                let mut is_img = false;
                 for idx in 0..tl_clips.row_count() {
                     if let Some(mut c) = tl_clips.row_data(idx) {
                         c.selected = idx as i32 == i;
                         if c.selected {
                             name = c.name.clone();
+                            sel_id = c.id.clone();
+                            is_img = c.kind == 1;
                         }
                         tl_clips.set_row_data(idx, c);
                     }
                 }
                 ui.set_inspector_name(name);
+                ui.set_insp_has_audio(!is_img);
+                // Reflect the clip's current transform into the sliders.
+                if let Some(t) = project_slot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.clip_transform(&kuvatin_video::ClipId(sel_id.to_string())))
+                {
+                    ui.set_insp_posx(t.posx as f32);
+                    ui.set_insp_posy(t.posy as f32);
+                    // width == 0 means "auto / full canvas".
+                    let scale = if t.width > 0 {
+                        (t.width as f32 / kuvatin_video::CANVAS_W as f32) * 100.0
+                    } else {
+                        100.0
+                    };
+                    ui.set_insp_scale(scale.clamp(10.0, 100.0));
+                    ui.set_insp_alpha((t.alpha as f32 * 100.0).clamp(0.0, 100.0));
+                    ui.set_insp_volume((t.volume as f32 * 100.0).clamp(0.0, 100.0));
+                }
+            });
+        }
+
+        // Inspector slider moved: apply position/scale/opacity/volume to the clip.
+        {
+            let ui_weak = ui_weak.clone();
+            let tl_clips = tl_clips.clone();
+            let project_slot = project_slot.clone();
+            let sel_idx = sel_idx.clone();
+            ui.on_inspector_changed(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let i = sel_idx.get();
+                if i < 0 {
+                    return;
+                }
+                let Some(row) = tl_clips.row_data(i as usize) else {
+                    return;
+                };
+                let scale = ui.get_insp_scale() / 100.0;
+                let t = kuvatin_video::Transform {
+                    posx: ui.get_insp_posx() as i32,
+                    posy: ui.get_insp_posy() as i32,
+                    width: (scale * kuvatin_video::CANVAS_W as f32) as i32,
+                    height: (scale * kuvatin_video::CANVAS_H as f32) as i32,
+                    alpha: (ui.get_insp_alpha() / 100.0) as f64,
+                    volume: (ui.get_insp_volume() / 100.0) as f64,
+                };
+                if let Some(p) = project_slot.borrow_mut().as_mut() {
+                    p.set_clip_transform(&kuvatin_video::ClipId(row.id.to_string()), t);
+                }
             });
         }
 

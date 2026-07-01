@@ -345,6 +345,57 @@ component Scrubber inherits Rectangle {
     }
 }
 
+// Labelled slider for the inspector: value ranges over [min, max] and the
+// current value is shown on the right. `changed` fires live during a drag.
+component InspSlider inherits Rectangle {
+    in property <string> label;
+    in property <float> min: 0;
+    in property <float> max: 100;
+    in property <string> suffix: "";
+    in-out property <float> value: 0;
+    callback changed();
+    height: 38px;
+    property <float> frac: (root.max - root.min) > 0
+        ? Math.clamp((root.value - root.min) / (root.max - root.min), 0, 1) : 0;
+    VerticalLayout {
+        spacing: 5px;
+        HorizontalLayout {
+            Text { text: root.label; color: #8b95a6; font-size: 9.5px; font-weight: 600; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: Math.round(root.value) + root.suffix; color: #cfd6e2; font-size: 9.5px; font-weight: 600; }
+        }
+        Rectangle {
+            height: 12px;
+            track := Rectangle {
+                y: parent.height / 2 - 3px;
+                height: 6px;
+                border-radius: 3px;
+                background: #2c313b;
+                Rectangle {
+                    x: 0; width: parent.width * root.frac; height: parent.height;
+                    border-radius: 3px;
+                    background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
+                }
+            }
+            knob := Rectangle {
+                width: 12px; height: 12px; border-radius: 6px;
+                background: kta.has-hover || kta.pressed ? #e6fffb : white;
+                border-width: 2px; border-color: #2dd4bf;
+                y: parent.height / 2 - 6px;
+                x: (parent.width - 12px) * root.frac;
+            }
+            kta := TouchArea {
+                function emit(mx: length) {
+                    root.value = root.min + Math.clamp(mx / self.width, 0, 1) * (root.max - root.min);
+                    root.changed();
+                }
+                moved => { kta.emit(kta.mouse-x); }
+                clicked => { kta.emit(kta.mouse-x); }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
     icon: @image-url("../assets/kuvatin-icon.png");
@@ -393,6 +444,14 @@ export component AppWindow inherits Window {
     in property <float> playhead: 0.0;        // seconds
     in property <float> timeline-duration: 0.0; // seconds (for the ruler end)
     in property <string> inspector-name: "";  // selected clip name (or empty)
+    // Selected clip transform for the inspector (set from Rust on select).
+    in-out property <float> insp-posx: 0;      // px within the canvas
+    in-out property <float> insp-posy: 0;      // px
+    in-out property <float> insp-scale: 100;   // percent of the canvas size
+    in-out property <float> insp-alpha: 100;   // opacity percent
+    in-out property <float> insp-volume: 100;  // percent
+    in property <bool> insp-has-audio: true;   // hide volume for stills
+    callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-moved(int, float); // clip index, delta seconds (slide the body)
@@ -1136,7 +1195,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Inspector (full editing wired in a later task)
+                // Inspector: edit the selected clip's transform, opacity & volume.
                 Card {
                     width: 238px;
                     clip: true;
@@ -1145,10 +1204,21 @@ export component AppWindow inherits Window {
                         spacing: 9px;
                         Text { text: root.inspector-name == "" ? "INSPECTOR" : "LAYER"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; }
                         if root.inspector-name == "" : Text {
-                            text: "Select a clip to edit its\ntransform, audio & trim";
+                            text: "Select a clip to edit its\ntransform, opacity & volume";
                             color: #6b7585; font-size: 11px; vertical-alignment: center; horizontal-alignment: center;
                         }
-                        if root.inspector-name != "" : Text { text: root.inspector-name; color: #f2f4f8; font-size: 13px; font-weight: 600; }
+                        if root.inspector-name != "" : Text {
+                            text: root.inspector-name; color: #f2f4f8; font-size: 13px; font-weight: 600;
+                            overflow: elide;
+                        }
+                        if root.inspector-name != "" : VerticalLayout {
+                            spacing: 6px;
+                            InspSlider { label: "Position X"; min: -1280; max: 1280; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
+                            InspSlider { label: "Position Y"; min: -720; max: 720; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
+                            InspSlider { label: "Scale"; min: 10; max: 100; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
+                            InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
+                            if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
+                        }
                         Rectangle { vertical-stretch: 1; }
                     }
                 }

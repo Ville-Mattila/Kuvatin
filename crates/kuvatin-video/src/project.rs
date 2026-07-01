@@ -46,6 +46,22 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     }
 }
 
+/// Fixed composited canvas size. Pinning it gives the inspector's position/scale
+/// controls a known frame to work against.
+pub const CANVAS_W: i32 = 1280;
+pub const CANVAS_H: i32 = 720;
+
+/// A clip's video transform + audio level, via GES child properties.
+#[derive(Clone, Copy, Debug)]
+pub struct Transform {
+    pub posx: i32,
+    pub posy: i32,
+    pub width: i32,
+    pub height: i32,
+    pub alpha: f64,
+    pub volume: f64,
+}
+
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
 /// visual tracks, index 0 = bottom (top layers composite over lower ones).
 pub struct Project {
@@ -67,6 +83,17 @@ impl Project {
         let layer = timeline.append_layer();
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
+
+        // Pin the composited video size so transforms have a fixed canvas.
+        let restriction = gst::Caps::builder("video/x-raw")
+            .field("width", CANVAS_W)
+            .field("height", CANVAS_H)
+            .build();
+        for track in timeline.tracks() {
+            if track.track_type() == ges::TrackType::VIDEO {
+                track.set_restriction_caps(&restriction);
+            }
+        }
 
         let appsink = AppSink::builder()
             .caps(
@@ -246,6 +273,44 @@ impl Project {
         }
         self.timeline.commit();
         Some(clip_geom(&clip))
+    }
+
+    /// Read a clip's current transform (video child props + audio volume).
+    pub fn clip_transform(&self, id: &ClipId) -> Option<Transform> {
+        let clip = self.clips.get(&id.0)?;
+        let geti = |n: &str, d: i32| {
+            clip.child_property(n)
+                .and_then(|v| v.get::<i32>().ok())
+                .unwrap_or(d)
+        };
+        let getf = |n: &str, d: f64| {
+            clip.child_property(n)
+                .and_then(|v| v.get::<f64>().ok())
+                .unwrap_or(d)
+        };
+        Some(Transform {
+            posx: geti("posx", 0),
+            posy: geti("posy", 0),
+            width: geti("width", CANVAS_W),
+            height: geti("height", CANVAS_H),
+            alpha: getf("alpha", 1.0),
+            volume: getf("volume", 1.0),
+        })
+    }
+
+    /// Apply a transform to a clip, live. Missing child properties (e.g. volume
+    /// on a still image, which has no audio) are ignored.
+    pub fn set_clip_transform(&mut self, id: &ClipId, t: Transform) {
+        let Some(clip) = self.clips.get(&id.0) else {
+            return;
+        };
+        let _ = clip.set_child_property("posx", &t.posx.to_value());
+        let _ = clip.set_child_property("posy", &t.posy.to_value());
+        let _ = clip.set_child_property("width", &t.width.to_value());
+        let _ = clip.set_child_property("height", &t.height.to_value());
+        let _ = clip.set_child_property("alpha", &t.alpha.to_value());
+        let _ = clip.set_child_property("volume", &t.volume.to_value());
+        self.timeline.commit();
     }
 
     /// End time (start + duration) of the last clip on `track`, or zero.
