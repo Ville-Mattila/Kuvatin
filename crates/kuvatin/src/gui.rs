@@ -15,9 +15,6 @@ use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
-/// Create a video Player for `path`, start playback, and store it in `slot`
-/// (dropping any previous player). Decoded RGBA frames are pushed to the UI's
-/// `video-frame` from the GStreamer thread via `invoke_from_event_loop`.
 /// Create a GES editing project whose composited preview frames are pushed to
 /// the UI's `video-frame` (from a GStreamer thread, hopped to the UI thread).
 fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Project> {
@@ -1109,6 +1106,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     codec,
                     width: ui.get_export_w(),
                     height: ui.get_export_h(),
+                    fps: ui.get_export_fps().clamp(1, 240) as u32,
                     bitrate_kbps: ui.get_export_bitrate().max(0) as u32,
                 };
                 let Some(path) = rfd::FileDialog::new()

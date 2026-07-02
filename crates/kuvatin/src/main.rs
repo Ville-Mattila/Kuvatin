@@ -28,15 +28,11 @@ fn configure_bundled_gstreamer() {
         // Don't also scan a differently-versioned system GStreamer.
         std::env::set_var("GST_PLUGIN_SYSTEM_PATH", "");
     }
-    // Export encoder ranks (must be set before any gst init): prefer hardware NVENC
-    // H.264, software x264 fallback, and derank the Media Foundation AAC encoder
-    // (mfaacenc) which otherwise breaks NVENC session init. See ensure_encoder_ranks().
-    if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
-        std::env::set_var(
-            "GST_PLUGIN_FEATURE_RANK",
-            "nvautogpuh264enc:512,x264enc:256,mfaacenc:0",
-        );
-    }
+    // Export encoder ranks (NVENC first, x264 fallback, mfaacenc disabled) are
+    // applied programmatically right after every gst::init() — see
+    // kuvatin-video's ensure_encoder_ranks(). The old GST_PLUGIN_FEATURE_RANK
+    // env-var approach silently deactivated whenever the user's environment
+    // already set that variable.
 }
 
 fn main() -> anyhow::Result<()> {

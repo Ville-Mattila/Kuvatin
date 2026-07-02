@@ -498,6 +498,7 @@ export component AppWindow inherits Window {
     in-out property <int> export-codec: 0;          // 0=H.264/MP4, 1=VP9/WebM, 2=VP8/WebM
     in-out property <int> export-w: 1280;
     in-out property <int> export-h: 720;
+    in-out property <int> export-fps: 30;            // output frames per second
     in-out property <int> export-bitrate: 8000;     // target video bitrate, kbps
     // Timeline drag state (drives the "new track" drop indicator).
     in-out property <bool> clip-dragging: false;
@@ -1758,7 +1759,7 @@ export component AppWindow inherits Window {
         background: #000000b0;
         TouchArea {}   // swallow clicks on the dim backdrop
         Rectangle {
-            width: 440px; height: 430px;
+            width: 440px; height: 496px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1b1f27; border-radius: 12px; border-width: 1px; border-color: #2c313b;
@@ -1786,6 +1787,17 @@ export component AppWindow inherits Window {
                     PillButton { text: "1080p"; active: root.export-w == 1920 && root.export-h == 1080; clicked => { root.export-w = 1920; root.export-h = 1080; } }
                     PillButton { text: "720p"; active: root.export-w == 1280 && root.export-h == 720; clicked => { root.export-w = 1280; root.export-h = 720; } }
                     PillButton { text: "480p"; active: root.export-w == 854 && root.export-h == 480; clicked => { root.export-w = 854; root.export-h = 480; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Text { text: "FRAME RATE"; color: #8b95a6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    NumberDropdown { label: ""; value: root.export-fps; minimum: 1; maximum: 240; edited(v) => { root.export-fps = v; } }
+                    PillButton { text: "24"; active: root.export-fps == 24; clicked => { root.export-fps = 24; } }
+                    PillButton { text: "25"; active: root.export-fps == 25; clicked => { root.export-fps = 25; } }
+                    PillButton { text: "30"; active: root.export-fps == 30; clicked => { root.export-fps = 30; } }
+                    PillButton { text: "60"; active: root.export-fps == 60; clicked => { root.export-fps = 60; } }
                     Rectangle { horizontal-stretch: 1; }
                 }
 
