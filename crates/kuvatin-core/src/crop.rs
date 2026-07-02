@@ -30,7 +30,12 @@ pub enum CropMode {
 }
 
 /// (x, y, width, height) of the crop within a `src_w` x `src_h` image.
+/// Zero-dimension inputs pass through untouched (nothing to crop; the old
+/// `clamp(1, 0)` panicked on them).
 pub fn compute_crop_rect(mode: CropMode, src_w: u32, src_h: u32) -> (u32, u32, u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return (0, 0, src_w, src_h);
+    }
     match mode {
         CropMode::None => (0, 0, src_w, src_h),
         CropMode::FixedSize { width, height, anchor } => {
@@ -40,13 +45,16 @@ pub fn compute_crop_rect(mode: CropMode, src_w: u32, src_h: u32) -> (u32, u32, u
         }
         CropMode::AspectRatio { w, h, anchor } => {
             let (w, h) = (w.max(1), h.max(1));
-            let by_width = (src_w, (src_w as u64 * h as u64 / w as u64) as u32);
+            // Saturate the u64->u32 casts: an absurd ratio (1:100000) on a wide
+            // image overflows u32 and used to wrap into a degenerate 1-px crop.
+            let sat = |v: u64| v.min(u32::MAX as u64) as u32;
+            let by_width = (src_w, sat(src_w as u64 * h as u64 / w as u64));
             let (cw, ch) = if by_width.1 <= src_h {
                 by_width
             } else {
-                ((src_h as u64 * w as u64 / h as u64) as u32, src_h)
+                (sat(src_h as u64 * w as u64 / h as u64), src_h)
             };
-            place(anchor, src_w, src_h, cw.max(1), ch.max(1))
+            place(anchor, src_w, src_h, cw.clamp(1, src_w), ch.clamp(1, src_h))
         }
         CropMode::Rect { x, y, width, height } => {
             let x = x.min(src_w.saturating_sub(1));

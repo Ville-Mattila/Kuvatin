@@ -1,7 +1,25 @@
 use crate::pipeline::{process_file, process_file_to, Job};
 use rayon::prelude::*;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Run one fallible file operation with panic isolation: a panicking codec or
+/// dependency becomes an `Err` like any other failure instead of unwinding the
+/// whole rayon batch (which discarded every result and froze GUI progress).
+fn isolate<F: FnOnce() -> Result<PathBuf, String>>(f: F) -> Result<PathBuf, String> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(format!("internal error: {msg}"))
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct FileResult {
@@ -45,7 +63,8 @@ where
     items
         .par_iter()
         .map(|(input, job)| {
-            let outcome = process_file(input, job, preset_name).map_err(|e| e.to_string());
+            let outcome =
+                isolate(|| process_file(input, job, preset_name).map_err(|e| e.to_string()));
             let result = FileResult { input: input.clone(), outcome };
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
             on_progress(Progress { done: n, total, last: result.clone() });
@@ -66,7 +85,8 @@ where
     items
         .par_iter()
         .map(|(input, job, output)| {
-            let outcome = process_file_to(input, job, output).map_err(|e| e.to_string());
+            let outcome =
+                isolate(|| process_file_to(input, job, output).map_err(|e| e.to_string()));
             let result = FileResult { input: input.clone(), outcome };
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
             on_progress(Progress { done: n, total, last: result.clone() });
@@ -102,6 +122,17 @@ mod tests {
         let bad_res = results.iter().find(|r| r.input == bad).unwrap();
         assert!(good_res.outcome.is_ok());
         assert!(bad_res.outcome.is_err());
+    }
+
+    /// A panicking worker becomes an Err result — it must not unwind the batch
+    /// (which used to discard every result and freeze GUI progress).
+    #[test]
+    fn panicking_worker_is_isolated() {
+        let outcome = isolate(|| panic!("boom in codec"));
+        let err = outcome.unwrap_err();
+        assert!(err.contains("boom in codec"), "got: {err}");
+        // And a normal closure passes through untouched.
+        assert_eq!(isolate(|| Ok(PathBuf::from("x"))).unwrap(), PathBuf::from("x"));
     }
 
     #[test]
