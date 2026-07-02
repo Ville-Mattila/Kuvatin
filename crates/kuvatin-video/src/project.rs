@@ -253,11 +253,23 @@ fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile 
         ),
     };
 
-    // Output resolution: encodebin inserts a videoscale to meet this restriction.
+    // Output resolution + a FULLY PINNED raw format. Pinning format & framerate (not
+    // just size) means encodebin converts every composition segment to one constant
+    // caps before the encoder. Without this, gap fillers and still-image overlays
+    // renegotiate caps mid-stream — software x264 tolerates that, hardware NVENC
+    // errors out ("Internal data stream error" → truncated file with no moov atom).
+    // The pixel format is per-codec: NV12 is NVENC's native layout; VP8/9 take I420.
     // Kept alive here so the builder's borrow outlives the profile build.
+    let pixfmt = match s.codec {
+        VideoCodec::H264 => "NV12",
+        VideoCodec::Vp9 | VideoCodec::Vp8 => "I420",
+    };
     let restriction = gst::Caps::builder("video/x-raw")
+        .field("format", pixfmt)
         .field("width", s.width.max(2))
         .field("height", s.height.max(2))
+        .field("framerate", gst::Fraction::new(30, 1))
+        .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .build();
     let mut vb = gst_pbutils::EncodingVideoProfile::builder(&video_caps).restriction(&restriction);
     // Target bitrate. Property name and unit differ by encoder: x264enc/NVENC use
@@ -1027,6 +1039,69 @@ mod tests {
         let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
         eprintln!("output bytes after preview-EOS render: {len} (done={done})");
         assert!(len > 1000, "0-byte/tiny export reproduced: {len} bytes");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Regression for the 111KB/no-moov export: a REALISTIC timeline — leading gap
+    /// + a still-image overlay track — must render to H.264 MP4. Gap/overlay
+    /// boundaries renegotiate caps mid-stream, which hardware NVENC chokes on unless
+    /// the profile pins one constant format. Self-skips without `GST_TEST_FILE`
+    /// (also needs `GST_TEST_IMAGE` for the overlay; skipped if unset).
+    #[test]
+    fn renders_gapped_overlay_timeline() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping renders_gapped_overlay_timeline: set GST_TEST_FILE");
+            return;
+        };
+        let Some(img) = std::env::var_os("GST_TEST_IMAGE") else {
+            eprintln!("skipping renders_gapped_overlay_timeline: set GST_TEST_IMAGE");
+            return;
+        };
+        let src = std::path::PathBuf::from(path);
+        let img = std::path::PathBuf::from(img);
+        let out = std::env::temp_dir().join("kuvatin_gapped_overlay.mp4");
+        let _ = std::fs::remove_file(&out);
+        let mut project = Project::new(|_f| {}).expect("project");
+        // Video on track 1 with a 2s leading gap; image overlay on track 0.
+        project
+            .add_clip(
+                &src,
+                1,
+                Duration::from_secs(2),
+                Duration::ZERO,
+                Duration::from_secs(2),
+            )
+            .expect("video clip");
+        project
+            .add_clip(&img, 0, Duration::ZERO, Duration::ZERO, Duration::from_secs(3))
+            .expect("image clip");
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 1280,
+                    height: 720,
+                    bitrate_kbps: 8000,
+                },
+            )
+            .expect("begin_render");
+        let mut done = false;
+        for _ in 0..600 {
+            match project.render_status() {
+                RenderStatus::Done => {
+                    done = true;
+                    break;
+                }
+                RenderStatus::Failed(e) => panic!("gapped/overlay render failed: {e}"),
+                RenderStatus::Rendering(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        assert!(done, "render did not finish in time");
+        project.end_render().expect("end_render");
+        let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        eprintln!("gapped/overlay render bytes: {len}");
+        assert!(len > 10_000, "render produced {len} bytes");
         let _ = std::fs::remove_file(&out);
     }
 
