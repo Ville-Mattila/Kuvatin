@@ -295,24 +295,29 @@ component NumberDropdown inherits Rectangle {
     in property <int> minimum: 0;
     in property <int> maximum: 100000;
     callback edited(int);           // fires with the new clamped value
-    property <bool> open: false;
     width: 66px; height: 24px; border-radius: 6px;
     background: #16181d; border-width: 1px; border-color: #343b46;
     HorizontalLayout {
         padding-left: 6px; padding-right: 6px;
         Text { text: root.label + " " + root.value; color: #e6e9ef; font-size: 10px; vertical-alignment: center; }
     }
-    ta := TouchArea { clicked => { root.open = !root.open; } }
-    if root.open : Rectangle {
-        y: parent.height + 3px; width: 92px; height: 30px;
-        background: #20242c; border-radius: 6px; border-width: 1px; border-color: #343b46;
-        LineEdit {
-            width: 84px; x: 4px; y: 3px;
-            text: root.value;
-            input-type: number;
-            accepted(t) => {
-                root.edited(Math.clamp(t.to-float(), root.minimum, root.maximum));
-                root.open = false;
+    ta := TouchArea { clicked => { popup.show(); } }
+    // A real PopupWindow renders in a top-level overlay, so the editor is never
+    // clipped or overdrawn by controls stacked below it in a dialog. It only
+    // dismisses on an *outside* click, so clicking into the field keeps it open.
+    popup := PopupWindow {
+        x: 0; y: root.height + 3px; width: 92px; height: 30px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: #20242c; border-radius: 6px; border-width: 1px; border-color: #343b46;
+            LineEdit {
+                width: 84px; x: 4px; y: 3px;
+                text: root.value;
+                input-type: number;
+                accepted(t) => {
+                    root.edited(Math.clamp(t.to-float(), root.minimum, root.maximum));
+                    popup.close();
+                }
             }
         }
     }
@@ -465,9 +470,7 @@ export component AppWindow inherits Window {
     in property <string> video-time: "0:00 / 0:00";
     in-out property <float> video-volume: 1.0;       // 0..1
     in property <[VideoAsset]> video-clips;
-    in-out property <int> video-selected: -1;
     callback video-open();
-    callback video-select(int);            // highlight a media-bin item
     callback video-add(int);               // add a media-bin item to the timeline
     callback video-playpause();
     callback video-seek(float);            // fraction 0..1
@@ -477,6 +480,10 @@ export component AppWindow inherits Window {
     // Timeline editor.
     in property <[TimelineClip]> timeline-clips;
     in property <[string]> timeline-track-labels;  // one per track, top row first
+    // Height of a single timeline track row. One source of truth: the band
+    // height, header rows, lane stripes, clip Y and every drag/reorder distance
+    // are all derived from this (change it here and the whole timeline follows).
+    property <length> track-h: 30px;
     in property <float> timeline-pps: 14.0;   // pixels per second (zoom)
     in-out property <length> tl-scroll: 0px;  // horizontal scroll offset of the lane
     in property <float> playhead: 0.0;        // seconds
@@ -572,7 +579,6 @@ export component AppWindow inherits Window {
     callback win-minimize();
     callback win-maximize();
     callback win-close();
-    callback win-drag();
 
     callback add-files();
     callback clear-files();
@@ -1485,7 +1491,7 @@ export component AppWindow inherits Window {
             Rectangle {
                 // Sized to the tracks + one "new track" drop row with breathing
                 // room below it (so a clip dragged onto the row stays fully visible).
-                height: Math.max(140px, root.timeline-track-labels.length * 30px + 82px);
+                height: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
                 background: #101319;
                 border-width: 1px; border-color: #2c313b;
                 VerticalLayout {
@@ -1523,7 +1529,7 @@ export component AppWindow inherits Window {
                             width: 94px;
                             // Drag a header up/down to reorder tracks.
                             for lbl[t] in root.timeline-track-labels : hdr := Rectangle {
-                                height: 30px;
+                                height: root.track-h;
                                 background: hta.pressed ? #20242c : #13161c;
                                 border-width: 1px; border-color: #181c23;
                                 property <length> ddy: 0px;
@@ -1538,7 +1544,7 @@ export component AppWindow inherits Window {
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
                                             if (Math.abs(hdr.ddy / 1px) > 15) {
-                                                root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / 30px), 0, root.timeline-track-labels.length - 1));
+                                                root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-track-labels.length - 1));
                                             }
                                             hdr.ddy = 0px;
                                         }
@@ -1574,7 +1580,7 @@ export component AppWindow inherits Window {
 
                             // row background stripes (fixed; span the visible lane)
                             VerticalLayout {
-                                for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
+                                for lbl[t] in root.timeline-track-labels : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
                             }
 
                             // clip blocks. The wrapper `blk` keeps the clip's MODEL
@@ -1584,7 +1590,7 @@ export component AppWindow inherits Window {
                             for clip[i] in root.timeline-clips : blk := Rectangle {
                                 x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                 // track 0 = GES layer 0 = top (both on-screen and composited).
-                                y: clip.track * 30px + 4px;
+                                y: clip.track * root.track-h + 4px;
                                 width: (clip.duration * root.timeline-pps) * 1px;
                                 height: 22px;
                                 background: transparent;
@@ -1605,7 +1611,7 @@ export component AppWindow inherits Window {
                                     // (possibly compressed) bottom and vanish. The drop TARGET below
                                     // still uses the raw delta, so dropping past the last track adds one.
                                     y: blk.dmode == 1
-                                        ? Math.clamp(Math.round(blk.ddy / 30px) * 30px, -blk.y, lane.height - blk.height - blk.y - 2px)
+                                        ? Math.clamp(Math.round(blk.ddy / root.track-h) * root.track-h, -blk.y, lane.height - blk.height - blk.y - 2px)
                                         : 0px;
                                     // "Mass" + magnetic settle: ease toward the (snapped) target with a
                                     // slight overshoot instead of tracking the cursor 1:1. Instant when
@@ -1649,14 +1655,14 @@ export component AppWindow inherits Window {
                                         blk.ddx = self.mouse-x - self.pressed-x;
                                         blk.ddy = self.mouse-y - self.pressed-y;
                                         root.clip-dragging = true;
-                                        root.clip-drag-target-row = clip.track + Math.round(blk.ddy / 30px);
+                                        root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
                                     }
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
                                             if (blk.dmode == 1 && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
                                                 // Commit the SNAPPED slide so the clip lands exactly
                                                 // where it magnetically settled, not at the raw cursor.
-                                                root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / 30px));
+                                                root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / root.track-h));
                                             }
                                             blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
                                             root.clip-dragging = false;
@@ -1741,7 +1747,7 @@ export component AppWindow inherits Window {
                             // zone. Sits above the scrollbar with room to spare.
                             Rectangle {
                                 property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                y: root.timeline-track-labels.length * 30px + 4px;
+                                y: root.timeline-track-labels.length * root.track-h + 4px;
                                 x: 4px; width: parent.width - 8px; height: 26px;
                                 border-radius: 7px;
                                 background: root.clip-dragging ? (active ? #2dd4bfcc : #16342ee0) : #ffffff08;
@@ -1768,7 +1774,7 @@ export component AppWindow inherits Window {
     // so the banner doesn't need to sit directly under the cursor.
     if root.clip-dragging : Rectangle {
         property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-        property <length> band-h: Math.max(140px, root.timeline-track-labels.length * 30px + 82px);
+        property <length> band-h: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
         width: 330px; height: 46px;
         x: (parent.width - self.width) / 2;
         // Float in the lower viewer, clear of the transport controls and timeline.

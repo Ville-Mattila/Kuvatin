@@ -390,10 +390,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             #[cfg(windows)]
             win_drop::close();
         });
-        ui.on_win_drag(|| {
-            #[cfg(windows)]
-            win_drop::drag();
-        });
     }
 
     {
@@ -913,16 +909,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 },
             );
             std::mem::forget(timer);
-        }
-
-        // Media-bin asset click: highlight it.
-        {
-            let ui_weak = ui_weak.clone();
-            ui.on_video_select(move |i| {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_video_selected(i);
-                }
-            });
         }
 
         // Media-bin item "add": append that file to the timeline as a new clip.
@@ -1812,11 +1798,10 @@ mod win_drop {
         DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
     };
     use windows::Win32::System::Ole::RevokeDragDrop;
-    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, SendMessageW, ShowWindow, HTBOTTOM,
+        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, ShowWindow, HTBOTTOM,
         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-        HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES, WM_NCLBUTTONDOWN,
+        HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES,
     };
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -1843,24 +1828,6 @@ mod win_drop {
         HWND_RAW
             .get()
             .map(|raw| HWND(*raw as *mut std::ffi::c_void))
-    }
-
-    /// Begin the native window move loop. Wired to the title-bar drag region:
-    /// release the implicit mouse capture, then tell Windows the user grabbed the
-    /// "caption" so it runs its own move loop (including edge snapping).
-    pub fn drag() {
-        if let Some(hwnd) = hwnd() {
-            // SAFETY: hwnd is valid and we run on the UI thread that owns it.
-            unsafe {
-                let _ = ReleaseCapture();
-                SendMessageW(
-                    hwnd,
-                    WM_NCLBUTTONDOWN,
-                    WPARAM(HTCAPTION as usize),
-                    LPARAM(0),
-                );
-            }
-        }
     }
 
     /// Minimize the window.
