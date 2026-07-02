@@ -63,6 +63,23 @@ The installer is written to `target/wix/kuvatin-<version>-x86_64.msi`
 (e.g. `kuvatin-1.5.0-x86_64.msi`), now ~106 MB because it carries the GStreamer
 runtime. It is under `target/`, which is gitignored and not committed.
 
+## Registration scope (per-machine MSI, per-user context menu)
+
+The MSI installs **per-machine** (`InstallScope='perMachine'`), but Explorer
+context-menu registration necessarily lives in **HKCU** (per user). The custom
+actions run `--register`/`--unregister` impersonated as the installing user, so
+out of the box only that user gets the menu. Two mitigations keep this sane:
+
+- **Self-healing at launch:** the GUI calls `shell::ensure_registered()` on
+  every startup — a single registry read that re-runs the full registration
+  when it is missing or points at a stale exe path. Any user who launches the
+  app once gets (and keeps) the context menu, including after upgrades that
+  move the install directory.
+- **Uninstall is best-effort:** `--unregister` on uninstall cleans the menu
+  for the uninstalling user only. Other users' HKCU entries die on their next
+  launch attempt (the exe is gone, Explorer ignores dead verbs) — accepted
+  limitation of the per-machine + per-user split.
+
 ## Regenerating main.wxs
 
 `main.wxs` was generated with `cargo wix init --force -p kuvatin` and then

@@ -120,6 +120,11 @@ fn add_to_timeline(
 }
 
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
+    // Self-heal the per-user Explorer context-menu registration: the MSI only
+    // registers for the installing user, so other accounts (or a moved exe)
+    // pick it up here on first launch. Best-effort, never blocks startup.
+    crate::shell::ensure_registered();
+
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
 

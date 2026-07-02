@@ -5,8 +5,8 @@ use std::env;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
 };
 
 const ROOT: &str = r"Software\Classes\SystemFileAssociations\image\shell\Kuvatin";
@@ -111,6 +111,57 @@ pub fn register() -> Result<()> {
 
     println!("Kuvatin context menu registered.");
     Ok(())
+}
+
+/// Self-healing registration for GUI startup: cheaply verify that the
+/// per-user context-menu registration exists *and* points at this exe, and
+/// re-run the full registration when it is missing or stale.
+///
+/// Context-menu registration lives in HKCU, but the MSI only runs
+/// `--register` as the installing user — other Windows users on the same
+/// machine (and anyone whose install path changed on upgrade) would otherwise
+/// have no / dead menu entries. Calling this once at GUI startup heals both
+/// cases (see `crates/kuvatin/wix/README.md`, "Registration scope").
+///
+/// Idempotent and best-effort by design: the fast path is a single registry
+/// read (the `Icon` value that `register()` writes holds the exe path, so it
+/// doubles as a "registered and current?" sentinel), and a failure to
+/// (re)register must never block app startup, so errors are swallowed.
+pub fn ensure_registered() {
+    let Ok(exe) = exe_path() else { return };
+    if registered_exe_path().as_deref() == Some(exe.as_str()) {
+        return; // already registered for this user and pointing at us
+    }
+    let _ = register();
+}
+
+/// Read back the `Icon` value under ROOT that `register()` writes (it is set
+/// to the absolute exe path). `None` when unregistered or unreadable.
+fn registered_exe_path() -> Option<String> {
+    let wpath = wide(ROOT);
+    let wname = wide("Icon");
+    // MAX_PATH-with-headroom; a long-path exe simply fails the read and takes
+    // the (idempotent) re-register path.
+    let mut buf = [0u16; 1024];
+    let mut cb = (buf.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wpath.as_ptr()),
+            PCWSTR(wname.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut cb),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let units = (cb as usize / 2).min(buf.len());
+    let value = &buf[..units];
+    let value = &value[..value.iter().position(|&u| u == 0).unwrap_or(value.len())];
+    Some(String::from_utf16_lossy(value))
 }
 
 pub fn unregister() -> Result<()> {
