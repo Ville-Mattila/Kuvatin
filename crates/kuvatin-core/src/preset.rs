@@ -13,6 +13,13 @@ pub struct Preset {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PresetStore {
+    /// On-disk schema version. `0` means a pre-versioning legacy file (the
+    /// field is absent); loading stamps it up to [`PresetStore::CURRENT_VERSION`]
+    /// via [`PresetStore::migrate`]. Declared first so it serializes ahead of
+    /// the `[[presets]]` array-of-tables (a trailing top-level scalar would be
+    /// invalid TOML).
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub presets: Vec<Preset>,
     /// Human-readable note from the last `load_or_init` when the file was
@@ -22,6 +29,11 @@ pub struct PresetStore {
 }
 
 impl PresetStore {
+    /// Current on-disk schema version. Bump this whenever the presets format
+    /// changes and add the corresponding step to [`PresetStore::migrate`], so
+    /// an older file is upgraded on load instead of silently mis-parsed.
+    pub const CURRENT_VERSION: u32 = 1;
+
     /// The presets shipped on first run.
     pub fn builtin() -> Self {
         // Default preset: lossy PNG compression (libimagequant + oxipng final
@@ -44,6 +56,7 @@ impl PresetStore {
             ..Job::default()
         };
         PresetStore {
+            version: Self::CURRENT_VERSION,
             presets: vec![
                 Preset { name: "Compress PNG".into(), job: compress_png },
                 Preset { name: "Convert to WebP".into(), job: webp },
@@ -52,6 +65,15 @@ impl PresetStore {
             ],
             last_load_warning: None,
         }
+    }
+
+    /// Bring an older on-disk store up to [`Self::CURRENT_VERSION`]. Each step is
+    /// additive and idempotent; today the format is otherwise unchanged so v0→v1
+    /// only adopts the version stamp, but this is where future field migrations
+    /// (renames, defaults, splits) go.
+    fn migrate(&mut self) {
+        // v0 (pre-versioning) → v1: no structural change.
+        self.version = Self::CURRENT_VERSION;
     }
 
     pub fn find(&self, name: &str) -> Option<&Preset> {
@@ -85,7 +107,17 @@ impl PresetStore {
             source: e,
         })?;
         match Self::parse_tolerant(&text) {
-            Ok((store, warning)) => Ok(PresetStore { last_load_warning: warning, ..store }),
+            Ok((mut store, warning)) => {
+                store.last_load_warning = warning;
+                // Upgrade an older file once, then persist so the migration
+                // doesn't re-run on every launch. Best-effort: a read-only
+                // config dir must not fail the load.
+                if store.version < Self::CURRENT_VERSION {
+                    store.migrate();
+                    let _ = store.save(path);
+                }
+                Ok(store)
+            }
             Err(err) => {
                 // Whole file unusable: preserve it for the user, fall back to builtins.
                 let backup = path.with_extension("toml.bad");
@@ -110,6 +142,11 @@ impl PresetStore {
         }
         // Tolerant path: parse as a generic document and recover per-preset.
         let doc: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+        let version = doc
+            .get("version")
+            .and_then(|v| v.as_integer())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
         let entries = doc
             .get("presets")
             .and_then(|v| v.as_array())
@@ -127,7 +164,7 @@ impl PresetStore {
         }
         let warning = (skipped > 0)
             .then(|| format!("{skipped} invalid preset(s) in presets.toml were skipped."));
-        Ok((PresetStore { presets, last_load_warning: None }, warning))
+        Ok((PresetStore { version, presets, last_load_warning: None }, warning))
     }
 
     /// Save atomically: write to a sibling temp file, then rename over the
@@ -226,6 +263,35 @@ mod tests {
         let back = PresetStore::load_or_init(&path).unwrap();
         assert_eq!(back.presets.len(), 2, "good entries kept, bad one dropped");
         assert!(back.last_load_warning.is_some());
+    }
+
+    /// A legacy file with no `version` key loads as v0, is migrated to the
+    /// current version, and the stamp is persisted back so it only happens once.
+    #[test]
+    fn legacy_file_is_migrated_and_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.toml");
+        // Produce a real file, then strip the version line to simulate a
+        // pre-versioning legacy file (keeps the preset/job serialization valid).
+        PresetStore::builtin().save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let legacy: String = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("version"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(!legacy.contains("version"), "legacy fixture has no version");
+        std::fs::write(&path, legacy).unwrap();
+
+        let store = PresetStore::load_or_init(&path).unwrap();
+        assert_eq!(store.version, PresetStore::CURRENT_VERSION);
+        assert_eq!(store.presets.len(), PresetStore::builtin().presets.len());
+        // The upgraded version stamp is now on disk (migration won't re-run).
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains(&format!("version = {}", PresetStore::CURRENT_VERSION)),
+            "migration should persist the version stamp: {on_disk}"
+        );
     }
 
     /// Saving goes through a temp file + rename; no .tmp residue is left.
