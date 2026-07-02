@@ -215,6 +215,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let crops = crops.clone();
         let ui_weak = ui.as_weak();
         ui.on_add_files(move || {
+            // Don't let the list change under a running batch: the progress
+            // callback addresses model rows by their snapshot index.
+            if ui_weak.upgrade().map(|u| u.get_running()).unwrap_or(false) {
+                return;
+            }
             if let Some(picked) = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
                 .pick_files()
@@ -341,7 +346,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         }
                     }
                 } else {
-                    add_paths(dropped, &files, &rows, &crops, &ui_weak);
+                    // Ignore image drops while a batch is running — adding rows
+                    // would desync the progress callback's snapshot indices.
+                    let running = ui_weak.upgrade().map(|u| u.get_running()).unwrap_or(false);
+                    if !running {
+                        add_paths(dropped, &files, &rows, &crops, &ui_weak);
+                    }
                 }
             },
         );
@@ -379,6 +389,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let ui_weak = ui.as_weak();
         ui.on_clear_files(move || {
             let Some(ui) = ui_weak.upgrade() else { return; };
+            if ui.get_running() {
+                return; // don't clear the list a running batch is iterating
+            }
             let mut guard = files.lock().unwrap();
             guard.clear();
             let mut crops_guard = crops.lock().unwrap();
@@ -576,6 +589,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 Some(u) => u,
                 None => return,
             };
+            if ui.get_running() {
+                return; // a batch is already running; ignore re-entrant Convert
+            }
             let preset_idx = ui.get_current_preset() as usize;
             let preset = match store.lock().unwrap().presets.get(preset_idx) {
                 Some(p) => p.clone(),

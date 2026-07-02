@@ -97,21 +97,26 @@ component Card inherits Rectangle {
 // Secondary (card-colored) button used for Add/Clear.
 component SecondaryButton inherits Rectangle {
     in property <string> text;
+    in property <bool> enabled: true;
     callback clicked();
     height: 34px;
     min-width: 96px;
     border-radius: 8px;
     border-width: 1px;
     border-color: #2c313b;
-    background: ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c);
+    background: !root.enabled
+        ? #191d24
+        : (ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c));
     Text {
         text: root.text;
-        color: #f2f4f8;
+        color: root.enabled ? #f2f4f8 : #5b6472;
         font-size: 13px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { root.clicked(); }
     }
 }
@@ -801,10 +806,12 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         SecondaryButton {
                             text: "Add files…";
+                            enabled: !root.running;
                             clicked => { root.add-files(); }
                         }
                         SecondaryButton {
                             text: "Clear";
+                            enabled: !root.running;
                             clicked => { root.clear-files(); }
                         }
                         Rectangle { horizontal-stretch: 1; }
