@@ -3,21 +3,21 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Kuvatin — batch image compressor for Windows</title>
-<meta name="description" content="Kuvatin is a compact native Windows app to compress, convert, resize, crop and batch images — right from the Explorer right-click menu. Built in Rust." />
+<title>Kuvatin — batch image tools & video editor for Windows</title>
+<meta name="description" content="Kuvatin is a compact native Windows app to compress, convert, resize, crop and batch images — and, new in 2.0, edit video on a layered timeline with hardware-accelerated export. Built in Rust." />
 <link rel="canonical" href="https://ville-mattila.github.io/Kuvatin/" />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://ville-mattila.github.io/Kuvatin/" />
 <meta property="og:site_name" content="Kuvatin" />
-<meta property="og:title" content="Kuvatin — batch image compressor for Windows" />
-<meta property="og:description" content="Compress, convert, resize, crop & batch — right from the Windows right-click menu. Built in Rust." />
+<meta property="og:title" content="Kuvatin — batch image tools & video editor for Windows" />
+<meta property="og:description" content="Compress, convert, resize & crop images — and cut video on a layered timeline with hardware export. Right from the Windows right-click menu. Built in Rust." />
 <meta property="og:image" content="https://ville-mattila.github.io/Kuvatin/assets/og-image.png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
-<meta property="og:image:alt" content="Kuvatin — shrink images without the busywork" />
+<meta property="og:image:alt" content="Kuvatin — shrink images and cut video without the busywork" />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="Kuvatin — batch image compressor for Windows" />
-<meta name="twitter:description" content="Compress, convert, resize, crop & batch — right from the Windows right-click menu. Built in Rust." />
+<meta name="twitter:title" content="Kuvatin — batch image tools & video editor for Windows" />
+<meta name="twitter:description" content="Compress, convert, resize & crop images — and cut video on a layered timeline with hardware export. Built in Rust." />
 <meta name="twitter:image" content="https://ville-mattila.github.io/Kuvatin/assets/og-image.png" />
 <link rel="icon" href="assets/kuvatin-icon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -187,6 +187,98 @@
   .install code .c{color:var(--teal)}
   .install code .m{color:#5d6675}
 
+  /* ============ VIDEO (new in 2.0) ============ */
+  .new-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--teal);
+    box-shadow:0 0 8px var(--teal);vertical-align:6px;margin-left:2px}
+  .video{padding:130px 0 40px;position:relative}
+  .video .features-title{background:linear-gradient(135deg,#fff 10%,#3f7df5 55%,var(--teal));-webkit-background-clip:text;background-clip:text}
+  .video .section-sub{color:var(--muted);font-size:17px;line-height:1.65;max-width:62ch;margin:22px auto 0;text-align:center}
+  .video .section-sub b{color:var(--ink)}
+  .badge-20{display:inline-flex;align-items:center;gap:8px;font-family:"Space Grotesk";font-size:12.5px;font-weight:700;
+    letter-spacing:.14em;color:#9cc0ff;background:#3f7df51a;border:1px solid #3f7df540;padding:7px 14px;border-radius:999px;margin-bottom:18px}
+
+  /* the CSS-built editor mockup */
+  .vm{max-width:980px;margin:56px auto 0;border-radius:18px;overflow:hidden;position:relative;
+    background:#101319;border:1px solid #2a323f;font-family:"Space Grotesk",sans-serif;
+    box-shadow:0 60px 130px -40px #000,0 0 0 1px #ffffff07,0 0 110px -30px #3f7df555}
+  .vm *{min-width:0}
+  .vm-title{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#0d1016;border-bottom:1px solid #1c222c}
+  .vm-title img{width:16px;height:16px}
+  .vm-title .t{font-size:12px;font-weight:600;color:var(--ink)}
+  .vm-title .seg{margin:0 auto;display:flex;background:#181d26;border:1px solid #262d39;border-radius:999px;padding:3px;font-size:10.5px;font-weight:600}
+  .vm-title .seg span{padding:4px 14px;border-radius:999px;color:var(--muted)}
+  .vm-title .seg .on{background:var(--teal);color:#04201d}
+  .vm-title .winb{display:flex;gap:12px;color:#5b6472;font-size:11px}
+  .vm-body{display:grid;grid-template-columns:.62fr 1.55fr .62fr;gap:8px;padding:8px}
+  .vm-panel{background:#161a22;border:1px solid #222a36;border-radius:10px;padding:10px}
+  .vm-h{font-size:8.5px;font-weight:700;letter-spacing:.14em;color:var(--muted);margin-bottom:8px}
+  .vm-media .row{display:flex;align-items:center;gap:7px;padding:5px;border-radius:7px}
+  .vm-media .row.sel{background:#242b37}
+  .vm-media .th{width:26px;height:17px;border-radius:4px;flex:none}
+  .vm-media .nm{height:5px;border-radius:3px;background:#3a4453;flex:1}
+  .vm-media .row:nth-child(2) .nm{width:80%}
+  .th.v1{background:linear-gradient(135deg,#3f7df5,#1f4fc0)}
+  .th.v2{background:linear-gradient(135deg,#7c5cff,#3b2f8f)}
+  .th.i1{background:linear-gradient(135deg,#1fd3b6,#0f9d84)}
+  .vm-view{position:relative;background:#000;border-radius:10px;border:1px solid #222a36;overflow:hidden;display:flex;flex-direction:column}
+  .vm-canvas{position:relative;flex:1;min-height:190px;overflow:hidden;
+    background:radial-gradient(120% 140% at 20% 10%,#20315b 0%,#101a33 42%,#070b14 100%)}
+  .vm-canvas::after{content:"";position:absolute;inset:0;
+    background:linear-gradient(115deg,transparent 42%,#ffffff0f 47%,transparent 53%);
+    animation:vmsheen 7s ease-in-out infinite}
+  @keyframes vmsheen{0%,55%{transform:translateX(-70%)}90%,100%{transform:translateX(80%)}}
+  .vm-overlay{position:absolute;right:12%;bottom:14%;width:30%;aspect-ratio:16/10;border-radius:6px;
+    background:linear-gradient(135deg,#1fd3b6cc,#0f9d84cc);border:1.5px solid var(--teal);
+    box-shadow:0 10px 40px -10px #000}
+  .vm-overlay .hnd{position:absolute;width:7px;height:7px;background:#fff;border-radius:2px}
+  .vm-overlay .hnd.tl{top:-4px;left:-4px}.vm-overlay .hnd.tr{top:-4px;right:-4px}
+  .vm-overlay .hnd.bl{bottom:-4px;left:-4px}.vm-overlay .hnd.br{bottom:-4px;right:-4px}
+  .vm-export{position:absolute;top:10px;right:10px;display:flex;align-items:center;gap:7px;
+    font-size:9.5px;font-weight:700;color:#04201d;background:linear-gradient(135deg,var(--teal),var(--teal-2));
+    padding:5px 11px;border-radius:999px;box-shadow:0 6px 24px -6px #00d4bfaa}
+  .vm-export .bolt{width:10px;height:10px}
+  .vm-transport{display:flex;align-items:center;gap:9px;padding:8px 12px;background:#12161d;border-top:1px solid #1c222c}
+  .vm-transport .pl{width:0;height:0;border-left:8px solid var(--ink);border-top:5px solid transparent;border-bottom:5px solid transparent}
+  .vm-transport .tm{font-size:9px;color:var(--muted)}
+  .vm-scrub{flex:1;height:4px;border-radius:2px;background:#262d39;position:relative}
+  .vm-scrub i{position:absolute;left:0;top:0;bottom:0;width:38%;border-radius:2px;background:var(--teal);animation:vmscrub 8s linear infinite}
+  @keyframes vmscrub{0%{width:6%}100%{width:94%}}
+  .vm-insp .sl{margin-bottom:9px}
+  .vm-insp .sl .lb{display:flex;justify-content:space-between;font-size:8px;color:var(--muted);margin-bottom:4px}
+  .vm-insp .sl .tr{height:4px;border-radius:2px;background:#262d39;position:relative}
+  .vm-insp .sl .tr i{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:#3f7df5}
+  .vm-insp .sl:nth-child(odd) .tr i{background:var(--teal)}
+  .vm-insp .sl .tr b{position:absolute;top:50%;width:9px;height:9px;border-radius:50%;background:#fff;transform:translate(-50%,-50%)}
+  .vm-tl{padding:8px;border-top:1px solid #1c222c;background:#0e1116;position:relative}
+  .vm-tl-head{display:flex;justify-content:space-between;align-items:center;padding:0 4px 7px}
+  .vm-tl-head .l{font-size:8.5px;font-weight:700;letter-spacing:.14em;color:var(--muted)}
+  .vm-tl-head .exp{font-size:9px;font-weight:700;color:#04201d;background:var(--teal);padding:3px 12px;border-radius:5px}
+  .vm-track{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .vm-track .tlab{flex:0 0 54px;font-size:8px;color:var(--muted);padding-left:4px}
+  .vm-lane{flex:1;height:24px;background:#12151b;border-radius:5px;position:relative;overflow:hidden}
+  .vm-clip{position:absolute;top:3px;bottom:3px;border-radius:4px;overflow:hidden}
+  .vm-clip::before{content:"";position:absolute;inset:0;
+    background:repeating-linear-gradient(90deg,#ffffff14 0 2px,transparent 2px 13px)}
+  .vm-clip.v{background:linear-gradient(135deg,#3f7df5,#1f4fc0)}
+  .vm-clip.v2{background:linear-gradient(135deg,#7c5cff,#4636ad)}
+  .vm-clip.i{background:linear-gradient(135deg,#1fd3b6,#0f9d84)}
+  .vm-clip.snap{box-shadow:0 0 0 1.5px var(--teal),0 0 14px #00d4bf88;animation:vmsnap 8s linear infinite}
+  @keyframes vmsnap{0%,40%{box-shadow:0 0 0 0 transparent}47%,58%{box-shadow:0 0 0 1.5px var(--teal),0 0 16px #00d4bfaa}66%,100%{box-shadow:0 0 0 0 transparent}}
+  .vm-ph{position:absolute;top:26px;bottom:8px;width:2px;background:#ff5470;z-index:2;left:8%;
+    box-shadow:0 0 10px #ff547088;animation:vmph 8s linear infinite}
+  .vm-ph::before{content:"";position:absolute;top:-5px;left:-4px;border-left:5px solid transparent;border-right:5px solid transparent;border-top:6px solid #ff5470}
+  @keyframes vmph{0%{left:7%}100%{left:96%}}
+
+  /* video mini-features */
+  .vfeats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;max-width:980px;margin:26px auto 0;padding:0}
+  .vfeat{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px}
+  .vfeat .vic{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;margin-bottom:11px;
+    background:#3f7df51a;border:1px solid #3f7df533;color:#8fb4ff}
+  .vfeat:nth-child(odd) .vic{background:#00d4bf16;border-color:#00d4bf30;color:var(--teal)}
+  .vfeat .vic svg{width:17px;height:17px}
+  .vfeat h3{font-size:15.5px;margin-bottom:6px}
+  .vfeat p{color:var(--muted);font-size:12.8px;line-height:1.55}
+
   footer{border-top:1px solid var(--line);padding:40px 28px;text-align:center;color:var(--muted);font-size:13.5px}
   footer a{color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-color:#3a4350}
   footer a:hover{text-decoration-color:var(--teal)}
@@ -201,6 +293,11 @@
     nav .links{display:none}
     .demo-grid,.rcard{grid-template-columns:1fr;gap:30px}
     .rcard{padding:32px}
+    .vm-body{grid-template-columns:1fr}
+    .vm-media,.vm-insp{display:none}
+    .vfeats{grid-template-columns:1fr;gap:12px}
+    .video{padding-top:90px}
+    .pill-x{display:none}
     /* intro stacks vertically; no horizontal pan */
     .intro{height:auto;overflow:visible}
     .intro-stage{flex-direction:column;width:100%;height:auto;transform:none!important}
@@ -216,7 +313,10 @@
     .feat.right .card .ic{margin-left:0}
     #below{transform:none!important}
   }
-  @media (prefers-reduced-motion:reduce){ .reveal,.fade{opacity:1;transform:none} }
+  @media (prefers-reduced-motion:reduce){
+    .reveal,.fade{opacity:1;transform:none}
+    .vm-ph,.vm-scrub i,.vm-canvas::after,.vm-clip.snap,.pill .dot{animation:none}
+  }
 </style>
 </head>
 <body>
@@ -228,7 +328,8 @@
 <nav id="nav">
   <a class="brand" href="#top"><img src="assets/kuvatin-icon.svg" alt="" /><span>Kuvatin</span></a>
   <div class="links">
-    <a href="#journey">How it works</a>
+    <a href="#journey">Images</a>
+    <a href="#video">Video <span class="new-dot" aria-hidden="true"></span></a>
     <a href="#demo">Compression</a>
     <a href="#download">Download</a>
     <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">GitHub</a>
@@ -243,10 +344,10 @@
 <section class="intro" id="top">
   <div class="intro-stage" id="introStage">
     <div class="intro-panel" id="introLogo">
-      <span class="pill"><span class="dot"></span> Free &amp; open source · Windows · Rust</span>
+      <span class="pill"><span class="dot"></span> New in 2.0 — video editing<span class="pill-x"> · Free &amp; open source · Windows</span></span>
       <h1 style="margin:0"><img class="hero-logo" src="assets/kuvatin-logo-anim.svg" alt="Kuvatin" /></h1>
-      <p class="hero-tag">Convert or/and shrink images <span class="accent">without</span> the busywork.</p>
-      <p class="sub">A tiny native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, format conversion, resizing and cropping — right from your Explorer right-click menu.</p>
+      <p class="hero-tag">Shrink images <span class="accent">and cut video</span> — without the busywork.</p>
+      <p class="sub">A compact native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, conversion, resizing, cropping — and now a <b style="color:var(--ink)">layered video timeline</b> with hardware-accelerated export. Right from your Explorer right-click menu.</p>
       <div class="cta">
         <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
@@ -258,7 +359,7 @@
         </a>
       </div>
       <div class="meta-row">
-        <span><b>6</b> formats</span><span><b>1-click</b> right-click presets</span><span><b>GPL-3.0</b> licensed</span><span><b>~8&nbsp;MB</b> installer</span>
+        <span><b>Images&nbsp;+&nbsp;video</b> in one app</span><span><b>6</b> image formats</span><span><b>1-click</b> right-click presets</span><span><b>GPL-3.0</b> licensed</span>
       </div>
     </div>
     <div class="intro-panel intro-shot" id="introShot">
@@ -273,7 +374,8 @@
 <!-- ================= FEATURE SERPENTINE ================= -->
 <section class="journey" id="journey">
   <div class="features-head reveal">
-    <h2 class="features-title">FEATURES</h2>
+    <div class="eyebrow">The image toolkit</div>
+    <h2 class="features-title">IMAGES</h2>
   </div>
 
   <div class="feat-list" id="featList">
@@ -331,6 +433,87 @@
 </section>
 
 <div id="below">
+<!-- ================= VIDEO (new in 2.0) ================= -->
+<section class="video" id="video">
+  <div class="features-head reveal">
+    <div class="badge-20">★ NEW IN 2.0</div>
+    <h2 class="features-title">VIDEO</h2>
+    <p class="section-sub">The same no-busywork idea, pointed at footage: drop clips on a <b>layered timeline</b>, arrange them with <b>magnetic snapping</b>, overlay stills, transform anything right in the preview — then export with <b>hardware acceleration</b>.</p>
+  </div>
+  <div class="wrap">
+    <!-- CSS-built mockup of the actual editor -->
+    <div class="vm tilt fade" role="img" aria-label="Mockup of the Kuvatin video editor: media bin, composited preview with a draggable overlay, inspector, and a multi-track timeline with a moving playhead">
+      <div class="vm-title">
+        <img src="assets/kuvatin-icon.svg" alt="" /><span class="t">Kuvatin</span>
+        <span class="seg"><span>Images</span><span class="on">Videos</span></span>
+        <span class="winb">—&ensp;□&ensp;✕</span>
+      </div>
+      <div class="vm-body">
+        <div class="vm-panel vm-media">
+          <div class="vm-h">MEDIA</div>
+          <div class="row sel"><span class="th v1"></span><span class="nm"></span></div>
+          <div class="row"><span class="th v2"></span><span class="nm"></span></div>
+          <div class="row"><span class="th i1"></span><span class="nm"></span></div>
+        </div>
+        <div class="vm-view">
+          <div class="vm-canvas">
+            <div class="vm-export"><svg class="bolt" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>NVENC · H.264</div>
+            <div class="vm-overlay"><span class="hnd tl"></span><span class="hnd tr"></span><span class="hnd bl"></span><span class="hnd br"></span></div>
+          </div>
+          <div class="vm-transport"><span class="pl"></span><span class="tm">0:08&thinsp;/&thinsp;0:24</span><span class="vm-scrub"><i></i></span></div>
+        </div>
+        <div class="vm-panel vm-insp">
+          <div class="vm-h">INSPECTOR</div>
+          <div class="sl"><div class="lb"><span>Position X</span><span>128 px</span></div><div class="tr"><i style="width:62%"></i><b style="left:62%"></b></div></div>
+          <div class="sl"><div class="lb"><span>Scale</span><span>74 %</span></div><div class="tr"><i style="width:74%"></i><b style="left:74%"></b></div></div>
+          <div class="sl"><div class="lb"><span>Opacity</span><span>100 %</span></div><div class="tr"><i style="width:100%"></i><b style="left:100%"></b></div></div>
+          <div class="sl"><div class="lb"><span>Volume</span><span>85 %</span></div><div class="tr"><i style="width:85%"></i><b style="left:85%"></b></div></div>
+        </div>
+      </div>
+      <div class="vm-tl">
+        <div class="vm-tl-head"><span class="l">TIMELINE</span><span class="exp">Export</span></div>
+        <div class="vm-ph"></div>
+        <div class="vm-track"><span class="tlab">Track 1</span><span class="vm-lane"><span class="vm-clip i" style="left:32%;width:24%"></span></span></div>
+        <div class="vm-track"><span class="tlab">Track 2</span><span class="vm-lane"><span class="vm-clip v" style="left:6%;width:34%"></span><span class="vm-clip v snap" style="left:40%;width:26%"></span></span></div>
+        <div class="vm-track"><span class="tlab">Track 3</span><span class="vm-lane"><span class="vm-clip v2" style="left:58%;width:30%"></span></span></div>
+      </div>
+    </div>
+
+    <div class="vfeats">
+      <div class="vfeat fade">
+        <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7h8M3 12h13M3 17h10"/><rect x="14" y="5" width="7" height="4" rx="1.5"/><rect x="16" y="15" width="5" height="4" rx="1.5"/></svg></span>
+        <h3>Layered timeline</h3>
+        <p>Drag files straight onto the timeline. Slide, edge-trim and stack clips across tracks — with magnetic snapping and an elastic, weighty feel.</p>
+      </div>
+      <div class="vfeat fade">
+        <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="14" rx="2"/><rect x="12" y="9" width="7" height="5" rx="1"/><path d="M8 21h8"/></svg></span>
+        <h3>Edit in the preview</h3>
+        <p>Grab a clip right on the canvas — move it, resize it from a corner. Position, scale, opacity and volume also live in the inspector.</p>
+      </div>
+      <div class="vfeat fade">
+        <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="M19 3v4M21 5h-4M19 14v7M15 21h8" opacity=".55"/></svg></span>
+        <h3>Any canvas</h3>
+        <p>16:9, vertical, square, 4K or fully custom — and the export resolution is independent, so edit at 1080p and ship a 720p cut.</p>
+      </div>
+      <div class="vfeat fade">
+        <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></span>
+        <h3>Hardware export</h3>
+        <p>H.264 MP4 encoded on your NVIDIA GPU (NVENC), with an automatic software fallback — plus VP9 and VP8 WebM.</p>
+      </div>
+      <div class="vfeat fade">
+        <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 18V6m5.5 12V6M15 18V6m5.5 12V6" opacity=".5"/><path d="M2 12h20"/><circle cx="15" cy="12" r="2.6" fill="currentColor" stroke="none"/></svg></span>
+        <h3>Bitrate &amp; resolution control</h3>
+        <p>Quality presets from quick-and-small to max fidelity — or type the exact kbps and pixel dimensions you want.</p>
+      </div>
+      <div class="vfeat fade">
+        <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
+        <h3>Everything bundled</h3>
+        <p>The GStreamer engine ships inside the installer. No codec packs, no runtimes to hunt down — install and edit.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ================= COMPRESSION DEMO ================= -->
 <section class="demo" id="demo">
   <div class="wrap">
@@ -382,7 +565,7 @@
     <div class="tilt fade">
       <div class="iconbig"><img src="assets/kuvatin-icon.svg" alt="Kuvatin icon" /></div>
       <h2>Get Kuvatin</h2>
-      <p>A single small <b style="color:var(--ink)">.msi</b> that adds a Start-menu shortcut, wires up the right-click menu, and upgrades any older version in place.</p>
+      <p>One self-contained <b style="color:var(--ink)">.msi</b> — images, the video editor and its bundled engine included. Adds a Start-menu shortcut, wires up the right-click menu, and upgrades any older version in place.</p>
       <div class="cta">
         <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
@@ -402,7 +585,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
 
 <footer>
   <img class="fbrand" src="assets/kuvatin-logo.svg" alt="Kuvatin" />
-  <p>Built in Rust with <a href="https://slint.dev" target="_blank" rel="noopener">Slint</a> · compression by <a href="https://pngquant.org/lib/" target="_blank" rel="noopener">libimagequant</a> &amp; <a href="https://github.com/shssoichiro/oxipng" target="_blank" rel="noopener">oxipng</a> · <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">source on GitHub</a> · GPL-3.0</p>
+  <p>Built in Rust with <a href="https://slint.dev" target="_blank" rel="noopener">Slint</a> · compression by <a href="https://pngquant.org/lib/" target="_blank" rel="noopener">libimagequant</a> &amp; <a href="https://github.com/shssoichiro/oxipng" target="_blank" rel="noopener">oxipng</a> · video by <a href="https://gstreamer.freedesktop.org/" target="_blank" rel="noopener">GStreamer</a> · <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">source on GitHub</a> · GPL-3.0</p>
   <p style="margin-top:10px;opacity:.6">Kuvatin — from Finnish <i>kuva</i>, “image.”</p>
 </footer>
 </div><!-- /#below -->
