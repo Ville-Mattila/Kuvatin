@@ -186,9 +186,22 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
     let crops: Arc<Mutex<CropMap>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap(), &crops.lock().unwrap())));
+    // Path-keyed thumbnail cache (see `ThumbCache`): lets row rebuilds restore
+    // thumbnails and keeps re-adds from re-decoding files already seen.
+    let thumbs: ThumbCache = Arc::new(Mutex::new(HashMap::new()));
+
+    let rows = Rc::new(VecModel::from(rows_from(
+        &files.lock().unwrap(),
+        &crops.lock().unwrap(),
+        &thumbs,
+    )));
     ui.set_files(ModelRc::from(rows.clone()));
-    spawn_thumbnails(ui.as_weak(), files.clone(), files.lock().unwrap().clone());
+    spawn_thumbnails(
+        ui.as_weak(),
+        files.clone(),
+        thumbs.clone(),
+        files.lock().unwrap().clone(),
+    );
     // The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
     let edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>> = Arc::new(Mutex::new(None));
 
@@ -213,6 +226,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let thumbs = thumbs.clone();
         let ui_weak = ui.as_weak();
         ui.on_add_files(move || {
             // Don't let the list change under a running batch: the progress
@@ -224,7 +238,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
                 .pick_files()
             {
-                add_paths(picked, &files, &rows, &crops, &ui_weak);
+                add_paths(picked, &files, &rows, &crops, &thumbs, &ui_weak);
             }
         });
     }
@@ -295,6 +309,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let thumbs = thumbs.clone();
         let ui_weak = ui.as_weak();
         let setup_weak = ui.as_weak();
         let setup_timer = slint::Timer::default();
@@ -350,7 +365,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     // would desync the progress callback's snapshot indices.
                     let running = ui_weak.upgrade().map(|u| u.get_running()).unwrap_or(false);
                     if !running {
-                        add_paths(dropped, &files, &rows, &crops, &ui_weak);
+                        add_paths(dropped, &files, &rows, &crops, &thumbs, &ui_weak);
                     }
                 }
             },
@@ -385,6 +400,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let thumbs = thumbs.clone();
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
         ui.on_clear_files(move || {
@@ -396,7 +412,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             guard.clear();
             let mut crops_guard = crops.lock().unwrap();
             crops_guard.clear();
-            refresh(&rows, &guard, &crops_guard);
+            thumbs.lock().unwrap().clear();
+            refresh(&rows, &guard, &crops_guard, &thumbs);
             drop(crops_guard);
             ui.set_selected_index(-1);
             ui.set_cropping(false);
@@ -488,44 +505,71 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     }
 
     // Selecting a file shows it large in the viewer (and prepares crop state).
+    // The decode runs off the UI thread so picking a big image can't freeze the
+    // app; a monotonic generation guards against a slow decode landing after the
+    // user has already moved on to a different file.
     {
         let files = files.clone();
         let crops = crops.clone();
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
+        let select_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         ui.on_select_file(move |index| {
             let Some(ui) = ui_weak.upgrade() else { return; };
             let path = match files.lock().unwrap().get(index as usize) {
                 Some(p) => p.clone(),
                 None => return,
             };
-            let Ok(img) = image::open(&path) else { return; };
-            let (ow, oh) = (img.width(), img.height());
-            if ow == 0 || oh == 0 { return; }
-
-            // Decode a display-sized preview; normalized crop coords stay size-independent.
-            let preview = img.thumbnail(1280, 1280).to_rgba8();
-            let (pw, ph) = (preview.width(), preview.height());
-            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(preview.as_raw(), pw, ph);
-            ui.set_viewer_image(Image::from_rgba8(buf));
+            // Highlight is instant; the preview arrives when the decode finishes.
             ui.set_selected_index(index);
+            let generation =
+                select_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-            // Seed crop state for this file (used when the viewer enters Crop mode later).
-            ui.set_crop_img_w(ow as i32);
-            ui.set_crop_img_h(oh as i32);
-            let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
-            ui.set_crop_box_w(bw);
-            ui.set_crop_box_h(bh);
-            if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
-                ui.set_crop_x(x as f32 / ow as f32);
-                ui.set_crop_y(y as f32 / oh as f32);
-                ui.set_crop_w(w as f32 / ow as f32);
-                ui.set_crop_h(h as f32 / oh as f32);
-            } else {
-                ui.set_crop_x(0.0); ui.set_crop_y(0.0);
-                ui.set_crop_w(1.0); ui.set_crop_h(1.0);
-            }
-            *edit.lock().unwrap() = Some((path, ow, oh));
+            let ui_weak = ui_weak.clone();
+            let crops = crops.clone();
+            let edit = edit.clone();
+            let select_gen = select_gen.clone();
+            std::thread::spawn(move || {
+                let Ok(img) = image::open(&path) else { return; };
+                let (ow, oh) = (img.width(), img.height());
+                if ow == 0 || oh == 0 {
+                    return;
+                }
+                // Decode a display-sized preview; normalized crop coords stay
+                // size-independent. Ship raw pixels (Send) to the UI thread.
+                let preview = img.thumbnail(1280, 1280).to_rgba8();
+                let (pw, ph) = (preview.width(), preview.height());
+                let raw = preview.into_raw();
+                let _ = slint::invoke_from_event_loop(move || {
+                    // Superseded by a newer selection? then drop this result.
+                    if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    let Some(ui) = ui_weak.upgrade() else { return; };
+                    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&raw, pw, ph);
+                    ui.set_viewer_image(Image::from_rgba8(buf));
+
+                    // Seed crop state for this file (used when the viewer enters
+                    // Crop mode later).
+                    ui.set_crop_img_w(ow as i32);
+                    ui.set_crop_img_h(oh as i32);
+                    let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
+                    ui.set_crop_box_w(bw);
+                    ui.set_crop_box_h(bh);
+                    if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
+                        ui.set_crop_x(x as f32 / ow as f32);
+                        ui.set_crop_y(y as f32 / oh as f32);
+                        ui.set_crop_w(w as f32 / ow as f32);
+                        ui.set_crop_h(h as f32 / oh as f32);
+                    } else {
+                        ui.set_crop_x(0.0);
+                        ui.set_crop_y(0.0);
+                        ui.set_crop_w(1.0);
+                        ui.set_crop_h(1.0);
+                    }
+                    *edit.lock().unwrap() = Some((path, ow, oh));
+                });
+            });
         });
     }
 
@@ -1572,20 +1616,52 @@ fn png_mode_to_idx(mode: PngOptimize) -> i32 {
     }
 }
 
-fn rows_from(paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) -> Vec<FileRow> {
+/// A decoded thumbnail, kept as raw RGBA so it is `Send` (a `slint::Image` is
+/// not) and can live in the shared cache. Rebuilt into an `Image` on the UI
+/// thread when a row is (re)created.
+#[derive(Clone)]
+struct ThumbData {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    dims: String,
+}
+
+/// Path-keyed cache of decoded thumbnails. Populated once per file by the
+/// thumbnail worker; read when rebuilding rows so an add no longer re-decodes
+/// every file already in the list (and existing thumbnails survive the rebuild).
+type ThumbCache = Arc<Mutex<HashMap<PathBuf, ThumbData>>>;
+
+fn rows_from(
+    paths: &[PathBuf],
+    crops: &HashMap<PathBuf, (u32, u32, u32, u32)>,
+    thumbs: &ThumbCache,
+) -> Vec<FileRow> {
+    let cache = thumbs.lock().unwrap();
     paths
         .iter()
-        .map(|p| FileRow {
-            name: p
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-                .into(),
-            status: "queued".into(),
-            thumb: Default::default(),
-            dims: "".into(),
-            cropped: crops.contains_key(p),
+        .map(|p| {
+            let (thumb, dims) = match cache.get(p) {
+                Some(d) => (
+                    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                        &d.rgba, d.w, d.h,
+                    )),
+                    d.dims.clone().into(),
+                ),
+                None => (Image::default(), SharedString::new()),
+            };
+            FileRow {
+                name: p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+                status: "queued".into(),
+                thumb,
+                dims,
+                cropped: crops.contains_key(p),
+            }
         })
         .collect()
 }
@@ -1599,6 +1675,7 @@ fn rows_from(paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) 
 fn spawn_thumbnails(
     ui_weak: slint::Weak<AppWindow>,
     files: Arc<Mutex<Vec<PathBuf>>>,
+    thumbs: ThumbCache,
     paths: Vec<PathBuf>,
 ) {
     std::thread::spawn(move || {
@@ -1609,11 +1686,15 @@ fn spawn_thumbnails(
             let (ow, oh) = (img.width(), img.height());
             let thumb = img.thumbnail(40, 40).to_rgba8();
             let (tw, th) = (thumb.width(), thumb.height());
-            // `SharedPixelBuffer` is `Send`; `slint::Image` is not, so we ship the
-            // buffer across the event-loop boundary and build the `Image` on the
-            // UI thread.
-            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(thumb.as_raw(), tw, th);
-            let dims: SharedString = format!("{ow}×{oh}").into();
+            let data = ThumbData {
+                rgba: thumb.into_raw(),
+                w: tw,
+                h: th,
+                dims: format!("{ow}×{oh}"),
+            };
+            // Cache first (raw RGBA is `Send`), so a later row rebuild can restore
+            // this thumbnail without re-decoding.
+            thumbs.lock().unwrap().insert(path.clone(), data.clone());
 
             let ui_weak = ui_weak.clone();
             let files = files.clone();
@@ -1625,8 +1706,13 @@ fn spawn_thumbnails(
                     if let Some(i) = idx {
                         let model = ui.get_files();
                         if let Some(mut row) = model.row_data(i) {
+                            // `slint::Image` is not `Send`, so build it here on the
+                            // UI thread from the cached raw pixels.
+                            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                &data.rgba, data.w, data.h,
+                            );
                             row.thumb = Image::from_rgba8(buf);
-                            row.dims = dims;
+                            row.dims = data.dims.clone().into();
                             model.set_row_data(i, row);
                         }
                     }
@@ -1660,8 +1746,13 @@ fn format_combo_to_format(s: &str) -> OutputFormat {
     }
 }
 
-fn refresh(rows: &Rc<VecModel<FileRow>>, paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) {
-    let new = rows_from(paths, crops);
+fn refresh(
+    rows: &Rc<VecModel<FileRow>>,
+    paths: &[PathBuf],
+    crops: &HashMap<PathBuf, (u32, u32, u32, u32)>,
+    thumbs: &ThumbCache,
+) {
+    let new = rows_from(paths, crops, thumbs);
     while rows.row_count() > 0 {
         rows.remove(0);
     }
@@ -1679,6 +1770,7 @@ fn add_paths(
     files: &Arc<Mutex<Vec<PathBuf>>>,
     rows: &Rc<VecModel<FileRow>>,
     crops: &Arc<Mutex<HashMap<PathBuf, (u32, u32, u32, u32)>>>,
+    thumbs: &ThumbCache,
     ui_weak: &slint::Weak<AppWindow>,
 ) {
     let mut guard = files.lock().unwrap();
@@ -1686,9 +1778,18 @@ fn add_paths(
     guard.sort();
     guard.dedup();
     let crops_guard = crops.lock().unwrap();
-    refresh(rows, &guard, &crops_guard);
+    refresh(rows, &guard, &crops_guard, thumbs);
     drop(crops_guard);
-    spawn_thumbnails(ui_weak.clone(), files.clone(), guard.clone());
+    // Decode only files we don't already have a thumbnail for — an add no longer
+    // re-decodes the whole list, and cached rows kept their thumbnail above.
+    let missing: Vec<PathBuf> = {
+        let cache = thumbs.lock().unwrap();
+        guard.iter().filter(|p| !cache.contains_key(*p)).cloned().collect()
+    };
+    drop(guard);
+    if !missing.is_empty() {
+        spawn_thumbnails(ui_weak.clone(), files.clone(), thumbs.clone(), missing);
+    }
 }
 
 /// Native Windows Explorer drag-and-drop support via `WM_DROPFILES`.
