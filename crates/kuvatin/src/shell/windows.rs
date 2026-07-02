@@ -4,9 +4,13 @@ use anyhow::{Context, Result};
 use std::env;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::System::Console::GetConsoleWindow;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
 };
 
 const ROOT: &str = r"Software\Classes\SystemFileAssociations\image\shell\Kuvatin";
@@ -162,6 +166,35 @@ fn registered_exe_path() -> Option<String> {
     let value = &buf[..units];
     let value = &value[..value.iter().position(|&u| u == 0).unwrap_or(value.len())];
     Some(String::from_utf16_lossy(value))
+}
+
+/// True when the process has an attached console window. The debug build is a
+/// console subsystem (run from a terminal); the release build is windowed and
+/// has none, so its stdout/stderr go nowhere.
+fn has_console() -> bool {
+    unsafe { !GetConsoleWindow().0.is_null() }
+}
+
+/// Surface an error to the user for the headless context-menu quick-run path.
+///
+/// When there's a console, the caller has already printed the detail there, so
+/// this is a no-op. When there isn't (the windowed release build launched from
+/// Explorer's right-click menu), a failure would otherwise be completely
+/// silent — so pop a modal error box instead.
+pub fn notify_error(title: &str, text: &str) {
+    if has_console() {
+        return;
+    }
+    let wtitle = wide(title);
+    let wtext = wide(text);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(wtext.as_ptr()),
+            PCWSTR(wtitle.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
 }
 
 pub fn unregister() -> Result<()> {

@@ -41,9 +41,33 @@ fn main() -> anyhow::Result<()> {
         Mode::Register => shell::register()?,
         Mode::Unregister => shell::unregister()?,
         Mode::QuickRun { preset, paths } => {
-            let failures = quickrun::run(&preset, &paths)?;
-            if failures > 0 {
-                std::process::exit(1);
+            match quickrun::run(&preset, &paths) {
+                Ok(report) if report.failure_count() > 0 => {
+                    let mut msg = format!(
+                        "{} of {} file(s) could not be processed:\n\n",
+                        report.failure_count(),
+                        report.total
+                    );
+                    for (path, err) in report.failures.iter().take(10) {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        msg.push_str(&format!("\u{2022} {name}: {err}\n"));
+                    }
+                    if report.failures.len() > 10 {
+                        msg.push_str(&format!("\u{2026}and {} more.\n", report.failures.len() - 10));
+                    }
+                    shell::notify_error("Kuvatin \u{2014} some files failed", &msg);
+                    std::process::exit(1);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // Windowed release build has no stderr, so the returned Err
+                    // would be silent — surface it before propagating.
+                    shell::notify_error("Kuvatin \u{2014} quick run failed", &e.to_string());
+                    return Err(e);
+                }
             }
         }
         Mode::Gui { paths } => gui::run(paths)?,
