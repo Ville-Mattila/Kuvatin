@@ -313,6 +313,27 @@ component NumberDropdown inherits Rectangle {
     }
 }
 
+// A small pill button/chip: highlights when `active`, fires `clicked`. Used for
+// the resolution/bitrate presets in the export dialog.
+component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+    height: 24px;
+    border-radius: 6px;
+    background: pb-ta.has-hover ? #2b313c : (root.active ? #163a33 : #20242c);
+    border-width: 1px;
+    border-color: root.active ? #2dd4bf : #343b46;
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px;
+        Text {
+            text: root.text; color: root.active ? #7ee6d8 : #cdd3dc;
+            font-size: 10px; font-weight: 600; vertical-alignment: center;
+        }
+    }
+    pb-ta := TouchArea { clicked => { root.clicked(); } }
+}
+
 // A thin 0..1 slider used for the video scrubber and volume. Reports the new
 // fraction via `changed` on click or drag.
 component Scrubber inherits Rectangle {
@@ -466,6 +487,18 @@ export component AppWindow inherits Window {
     // Selected clip's aspect-fit size in canvas px (for the preview bounding box).
     in property <float> sel-fit-w: 1280;
     in property <float> sel-fit-h: 720;
+    // Composited canvas ("viewport") size — editable. Drives the preview mapping,
+    // the inspector position ranges, and the default export size. Edits go back to
+    // Rust via set-canvas-size.
+    in-out property <int> canvas-w: 1280;
+    in-out property <int> canvas-h: 720;
+    callback set-canvas-size(int, int);   // new viewport dimensions (px)
+    // Export configuration modal + settings.
+    in-out property <bool> export-config: false;   // settings dialog open
+    in-out property <int> export-codec: 0;          // 0=H.264/MP4, 1=VP9/WebM, 2=VP8/WebM
+    in-out property <int> export-w: 1280;
+    in-out property <int> export-h: 720;
+    in-out property <int> export-bitrate: 8000;     // target video bitrate, kbps
     // Timeline drag state (drives the "new track" drop indicator).
     in-out property <bool> clip-dragging: false;
     in-out property <int> clip-drag-target-row: 0;
@@ -484,6 +517,12 @@ export component AppWindow inherits Window {
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
     callback track-reordered(int, int);              // drag a track header: from row → to row
+    // Magnetic snapping: given the dragged clip and its proposed slide (seconds),
+    // returns the slide adjusted so the nearest leading/trailing edge sticks to a
+    // neighbouring clip edge or the timeline start (within a pixel threshold).
+    // Pure so it can drive the live drag binding. Returns the raw slide if nothing
+    // is within range.
+    pure callback timeline-snap-dx(int, float, float) -> float; // (idx, slide secs, pps) -> snapped slide secs
 
     // Crop editor state. The crop rectangle is stored in NORMALIZED coordinates
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
@@ -1230,12 +1269,12 @@ export component AppWindow inherits Window {
                         // The TouchArea fills the (fixed) viewer for stable drag
                         // deltas; the visible box is derived from insp-* (reactive).
                         if root.inspector-name != "" && root.video-frame.width > 0 : edit-layer := Rectangle {
-                            // canvas 1280x720 → viewer mapping under image-fit: contain
-                            property <bool> hlim: (self.width / self.height) > (1280.0 / 720.0);
-                            property <length> disp-w: hlim ? self.height * 1280 / 720 : self.width;
+                            // canvas → viewer mapping under image-fit: contain
+                            property <bool> hlim: (self.width / self.height) > (root.canvas-w * 1.0 / root.canvas-h);
+                            property <length> disp-w: hlim ? self.height * root.canvas-w / root.canvas-h : self.width;
                             property <length> off-x: (self.width - disp-w) / 2;
-                            property <length> off-y: (self.height - (hlim ? self.height : self.width * 720 / 1280)) / 2;
-                            property <length> ppc: disp-w / 1280;      // viewer px per canvas px
+                            property <length> off-y: (self.height - (hlim ? self.height : self.width * root.canvas-h / root.canvas-w)) / 2;
+                            property <length> ppc: disp-w / root.canvas-w;      // viewer px per canvas px
                             property <float> rw: (root.insp-scale / 100) * root.sel-fit-w;   // canvas px
                             property <float> rh: (root.insp-scale / 100) * root.sel-fit-h;
                             property <length> bx: off-x + root.insp-posx * ppc;
@@ -1339,6 +1378,34 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: 11px;
                         spacing: 9px;
+                        // Project canvas (viewport) size — always editable. Click a field
+                        // to type an exact size, or pick a preset.
+                        Text { text: "CANVAS"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            NumberDropdown {
+                                label: "W"; value: root.canvas-w; minimum: 16; maximum: 7680;
+                                edited(v) => { root.set-canvas-size(v, root.canvas-h); }
+                            }
+                            NumberDropdown {
+                                label: "H"; value: root.canvas-h; minimum: 16; maximum: 4320;
+                                edited(v) => { root.set-canvas-size(root.canvas-w, v); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        ComboBox {
+                            model: ["Preset…", "1920 × 1080", "1280 × 720", "1080 × 1920 (vertical)", "1080 × 1080 (square)", "3840 × 2160 (4K)", "854 × 480"];
+                            current-index: 0;
+                            selected(t) => {
+                                if (self.current-index == 1) { root.set-canvas-size(1920, 1080); }
+                                if (self.current-index == 2) { root.set-canvas-size(1280, 720); }
+                                if (self.current-index == 3) { root.set-canvas-size(1080, 1920); }
+                                if (self.current-index == 4) { root.set-canvas-size(1080, 1080); }
+                                if (self.current-index == 5) { root.set-canvas-size(3840, 2160); }
+                                if (self.current-index == 6) { root.set-canvas-size(854, 480); }
+                            }
+                        }
+                        Rectangle { height: 1px; background: #2c313b; }
                         Text { text: root.inspector-name == "" ? "INSPECTOR" : "LAYER"; color: #8b95a6; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; }
                         if root.inspector-name == "" : Text {
                             text: "Select a clip to edit its\ntransform, opacity & volume";
@@ -1350,8 +1417,8 @@ export component AppWindow inherits Window {
                         }
                         if root.inspector-name != "" : VerticalLayout {
                             spacing: 6px;
-                            InspSlider { label: "Position X"; min: -1280; max: 1280; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
-                            InspSlider { label: "Position Y"; min: -720; max: 720; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
+                            InspSlider { label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
+                            InspSlider { label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
                             InspSlider { label: "Scale"; min: 10; max: 100; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
                             InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
                             if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
@@ -1363,8 +1430,9 @@ export component AppWindow inherits Window {
 
             // ===== Timeline band =====
             Rectangle {
-                // Sized to the tracks + one "new track" row (no dead space below).
-                height: Math.max(130px, root.timeline-track-labels.length * 30px + 68px);
+                // Sized to the tracks + one "new track" drop row with breathing
+                // room below it (so a clip dragged onto the row stays fully visible).
+                height: Math.max(140px, root.timeline-track-labels.length * 30px + 82px);
                 background: #101319;
                 border-width: 1px; border-color: #2c313b;
                 VerticalLayout {
@@ -1383,7 +1451,13 @@ export component AppWindow inherits Window {
                                 border-radius: 5px;
                                 background: exp-ta.has-hover ? #2dd4bf : #22c9b0;
                                 Text { text: "Export"; color: #08110f; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                                exp-ta := TouchArea { clicked => { root.video-export(); } }
+                                // Open the export settings dialog, defaulting the output
+                                // size to the current canvas.
+                                exp-ta := TouchArea { clicked => {
+                                    root.export-w = root.canvas-w;
+                                    root.export-h = root.canvas-h;
+                                    root.export-config = true;
+                                } }
                             }
                         }
                     }
@@ -1464,8 +1538,24 @@ export component AppWindow inherits Window {
 
                                 // live visual (previews the drag; not a drag frame)
                                 vis := Rectangle {
-                                    x: (blk.dmode == 1 || blk.dmode == 2) ? blk.ddx : 0px;
-                                    y: blk.dmode == 1 ? blk.ddy : 0px;
+                                    // Snapped horizontal slide (dmode 1): the snap callback nudges
+                                    // the nearest edge onto a neighbouring clip edge or the timeline
+                                    // start. Left-trim (dmode 2) tracks the raw pointer.
+                                    property <float> snap-dx-s: root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps);
+                                    x: blk.dmode == 1 ? (self.snap-dx-s * root.timeline-pps * 1px)
+                                        : (blk.dmode == 2 ? blk.ddx : 0px);
+                                    // Vertical: magnetically snap to the nearest track lane, clamped
+                                    // to the ACTUAL visible lane so the block can never slide past the
+                                    // (possibly compressed) bottom and vanish. The drop TARGET below
+                                    // still uses the raw delta, so dropping past the last track adds one.
+                                    y: blk.dmode == 1
+                                        ? Math.clamp(Math.round(blk.ddy / 30px) * 30px, -blk.y, lane.height - blk.height - blk.y - 2px)
+                                        : 0px;
+                                    // "Mass" + magnetic settle: ease toward the (snapped) target with a
+                                    // slight overshoot instead of tracking the cursor 1:1. Instant when
+                                    // not sliding so the drop commit itself doesn't animate.
+                                    animate x { duration: blk.dmode == 1 ? 75ms : 0ms; easing: cubic-bezier(0.25, 0.9, 0.3, 1.05); }
+                                    animate y { duration: blk.dmode == 1 ? 95ms : 0ms; easing: cubic-bezier(0.25, 0.9, 0.3, 1.07); }
                                     width: max(10px, parent.width
                                         + (blk.dmode == 2 ? -blk.ddx : 0px)
                                         + (blk.dmode == 3 ? blk.ddx : 0px));
@@ -1500,7 +1590,9 @@ export component AppWindow inherits Window {
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
                                             if (blk.dmode == 1 && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
-                                                root.timeline-clip-dropped(i, (blk.ddx / 1px) / root.timeline-pps, Math.round(blk.ddy / 30px));
+                                                // Commit the SNAPPED slide so the clip lands exactly
+                                                // where it magnetically settled, not at the raw cursor.
+                                                root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / 30px));
                                             }
                                             blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
                                             root.clip-dragging = false;
@@ -1570,20 +1662,23 @@ export component AppWindow inherits Window {
                             }
 
                             // Persistent "new track" row, just below the last track.
-                            // Subtle when idle; teal while dragging a clip; bright when
-                            // the drag targets it. Topmost so nothing can hide it.
+                            // Subtle when idle; teal while dragging a clip; bright teal
+                            // when the drag targets it. Topmost so nothing can hide it.
+                            // Semi-transparent while active so the resting clip shows
+                            // through. A dashed-look border keeps it reading as a drop
+                            // zone. Sits above the scrollbar with room to spare.
                             Rectangle {
                                 property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                y: root.timeline-track-labels.length * 30px + 3px;
-                                x: 4px; width: parent.width - 8px; height: 24px;
-                                border-radius: 6px;
-                                background: root.clip-dragging ? (active ? #2dd4bfe6 : #14302bf2) : #ffffff05;
-                                border-width: root.clip-dragging && active ? 2px : 1px;
-                                border-color: root.clip-dragging ? (active ? #ffffff : #2dd4bf) : #ffffff14;
+                                y: root.timeline-track-labels.length * 30px + 4px;
+                                x: 4px; width: parent.width - 8px; height: 26px;
+                                border-radius: 7px;
+                                background: root.clip-dragging ? (active ? #2dd4bfcc : #16342ee0) : #ffffff08;
+                                border-width: root.clip-dragging ? 2px : 1px;
+                                border-color: root.clip-dragging ? (active ? #ffffff : #2dd4bf) : #ffffff1f;
                                 Text {
                                     text: root.clip-dragging ? "+  Drop here for a new track" : "+  New track";
-                                    color: root.clip-dragging ? (active ? #08110f : #7ee6d8) : #566070;
-                                    font-size: 10px; font-weight: 700;
+                                    color: root.clip-dragging ? (active ? #08110f : #8bf0e2) : #6b7585;
+                                    font-size: 10.5px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                             }
@@ -1591,6 +1686,33 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    // Drop-zone indicator shown while dragging a timeline clip. Rendered at the
+    // Window level (a sibling of the modals) so it can NEVER be clipped by the
+    // timeline lane or hidden behind the band — the in-lane row proved unreliable.
+    // It's purely a visual affordance: the drop target is decided by drag distance,
+    // so the banner doesn't need to sit directly under the cursor.
+    if root.clip-dragging : Rectangle {
+        property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
+        property <length> band-h: Math.max(140px, root.timeline-track-labels.length * 30px + 82px);
+        width: 330px; height: 46px;
+        x: (parent.width - self.width) / 2;
+        // Float in the lower viewer, clear of the transport controls and timeline.
+        y: parent.height - self.band-h - self.height - 66px;
+        border-radius: 23px;
+        background: active ? #2dd4bf : #16342ef7;
+        border-width: 2px;
+        border-color: active ? #ffffff : #2dd4bf;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: #000000b0;
+        drop-shadow-offset-y: 5px;
+        Text {
+            text: active ? "+  Release to create a new track" : "Drag below the last track to add one";
+            color: active ? #08110f : #9ff0e4;
+            font-size: 12px; font-weight: 700;
+            horizontal-alignment: center; vertical-alignment: center;
         }
     }
 
@@ -1625,6 +1747,76 @@ export component AppWindow inherits Window {
                     text: root.import-done + " / " + root.import-total;
                     color: #9aa3b2; font-size: 11px;
                     horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Export settings dialog: choose codec, output resolution and bitrate, then
+    // Export (which opens the save dialog and starts the render).
+    if root.export-config : Rectangle {
+        background: #000000b0;
+        TouchArea {}   // swallow clicks on the dim backdrop
+        Rectangle {
+            width: 440px; height: 430px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1b1f27; border-radius: 12px; border-width: 1px; border-color: #2c313b;
+            VerticalLayout {
+                padding: 22px; spacing: 11px;
+                Text { text: "Export video"; color: #f2f4f8; font-size: 15px; font-weight: 700; }
+
+                Text { text: "FORMAT"; color: #8b95a6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+                ComboBox {
+                    model: ["H.264 · MP4  (hardware, most compatible)", "VP9 · WebM  (smaller files)", "VP8 · WebM  (older, very compatible)"];
+                    current-index <=> root.export-codec;
+                }
+
+                Text { text: "RESOLUTION"; color: #8b95a6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    NumberDropdown { label: "W"; value: root.export-w; minimum: 16; maximum: 7680; edited(v) => { root.export-w = v; } }
+                    NumberDropdown { label: "H"; value: root.export-h; minimum: 16; maximum: 4320; edited(v) => { root.export-h = v; } }
+                    PillButton { text: "Match canvas"; clicked => { root.export-w = root.canvas-w; root.export-h = root.canvas-h; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    PillButton { text: "2160p"; active: root.export-w == 3840 && root.export-h == 2160; clicked => { root.export-w = 3840; root.export-h = 2160; } }
+                    PillButton { text: "1080p"; active: root.export-w == 1920 && root.export-h == 1080; clicked => { root.export-w = 1920; root.export-h = 1080; } }
+                    PillButton { text: "720p"; active: root.export-w == 1280 && root.export-h == 720; clicked => { root.export-w = 1280; root.export-h = 720; } }
+                    PillButton { text: "480p"; active: root.export-w == 854 && root.export-h == 480; clicked => { root.export-w = 854; root.export-h = 480; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Text { text: "BITRATE (kbps)"; color: #8b95a6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    NumberDropdown { label: ""; value: root.export-bitrate; minimum: 100; maximum: 200000; edited(v) => { root.export-bitrate = v; } }
+                    PillButton { text: "Low"; active: root.export-bitrate == 2500; clicked => { root.export-bitrate = 2500; } }
+                    PillButton { text: "Med"; active: root.export-bitrate == 6000; clicked => { root.export-bitrate = 6000; } }
+                    PillButton { text: "High"; active: root.export-bitrate == 12000; clicked => { root.export-bitrate = 12000; } }
+                    PillButton { text: "Max"; active: root.export-bitrate == 24000; clicked => { root.export-bitrate = 24000; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 92px; height: 32px; border-radius: 7px;
+                        background: cancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
+                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        cancel-ta := TouchArea { clicked => { root.export-config = false; } }
+                    }
+                    Rectangle {
+                        width: 112px; height: 32px; border-radius: 7px;
+                        background: exp2-ta.has-hover ? #2dd4bf : #22c9b0;
+                        Text { text: "Export…"; color: #08110f; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        exp2-ta := TouchArea { clicked => { root.export-config = false; root.video-export(); } }
+                    }
                 }
             }
         }

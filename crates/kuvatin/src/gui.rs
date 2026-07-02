@@ -866,6 +866,60 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
+        // Magnetic snap: given the dragged clip's proposed slide (seconds), nudge
+        // its nearest edge onto a neighbouring clip edge or the timeline start when
+        // within ~8px. Pure/read-only — it drives the live drag binding AND the drop
+        // commit, so what you see snapping is exactly where the clip lands.
+        {
+            let tl_clips = tl_clips.clone();
+            ui.on_timeline_snap_dx(move |i, dx_s, pps| {
+                if pps <= 0.0 || i < 0 {
+                    return dx_s;
+                }
+                let i = i as usize;
+                let n = tl_clips.row_count();
+                let Some(dragged) = tl_clips.row_data(i) else {
+                    return dx_s;
+                };
+                let start = dragged.start;
+                let prop_start = start + dx_s;
+                let prop_end = start + dragged.duration + dx_s;
+                // Snap targets: timeline origin + every OTHER clip's start/end edge.
+                let mut targets: Vec<f32> = Vec::with_capacity(2 * n + 1);
+                targets.push(0.0);
+                for j in 0..n {
+                    if j == i {
+                        continue;
+                    }
+                    if let Some(c) = tl_clips.row_data(j) {
+                        targets.push(c.start);
+                        targets.push(c.start + c.duration);
+                    }
+                }
+                // Pick the target within threshold needing the smallest nudge,
+                // measured against whichever edge (start/end) is closest to it.
+                let threshold = 8.0 / pps; // 8 px expressed in seconds
+                let mut best_adjust = 0.0f32;
+                let mut best_dist = threshold;
+                for t in targets {
+                    for edge in [prop_start, prop_end] {
+                        let a = t - edge;
+                        if a.abs() < best_dist {
+                            best_dist = a.abs();
+                            best_adjust = a;
+                        }
+                    }
+                }
+                let snapped = dx_s + best_adjust;
+                // Never slide a clip's start before the timeline origin.
+                if start + snapped < 0.0 {
+                    -start
+                } else {
+                    snapped
+                }
+            });
+        }
+
         // Reorder tracks by dragging a header: move the GES layer, then resync
         // every clip's track from GES (a reorder shifts several layers' indices).
         {
@@ -993,6 +1047,42 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         }
 
         // Export: pick an output file + format, then start rendering.
+        // Change the composited canvas ("viewport") size. Creates the project on
+        // demand so a size chosen before importing still applies, then refreshes the
+        // selected clip's fit size (which drives the preview bounding box).
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = tl_clips.clone();
+            let sel_idx = sel_idx.clone();
+            ui.on_set_canvas_size(move |w, h| {
+                let w = w.clamp(16, 7680);
+                let h = h.clamp(16, 4320);
+                if project_slot.borrow().is_none() {
+                    *project_slot.borrow_mut() = make_project(&ui_weak);
+                }
+                if let Some(p) = project_slot.borrow_mut().as_mut() {
+                    p.set_canvas_size(w, h);
+                    let i = sel_idx.get();
+                    if i >= 0 {
+                        if let Some(row) = tl_clips.row_data(i as usize) {
+                            let cid = kuvatin_video::ClipId(row.id.to_string());
+                            if let (Some((fw, fh)), Some(ui)) =
+                                (p.clip_fit_size(&cid), ui_weak.upgrade())
+                            {
+                                ui.set_sel_fit_w(fw as f32);
+                                ui.set_sel_fit_h(fh as f32);
+                            }
+                        }
+                    }
+                }
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_canvas_w(w);
+                    ui.set_canvas_h(h);
+                }
+            });
+        }
+
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
@@ -1001,37 +1091,43 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 if export_active.get() || project_slot.borrow().is_none() {
                     return;
                 }
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                // Codec index → codec + container extension (chosen in the dialog).
+                let (codec, ext, default_name) = match ui.get_export_codec() {
+                    1 => (kuvatin_video::VideoCodec::Vp9, "webm", "export.webm"),
+                    2 => (kuvatin_video::VideoCodec::Vp8, "webm", "export.webm"),
+                    _ => (kuvatin_video::VideoCodec::H264, "mp4", "export.mp4"),
+                };
+                let settings = kuvatin_video::ExportSettings {
+                    codec,
+                    width: ui.get_export_w(),
+                    height: ui.get_export_h(),
+                    bitrate_kbps: ui.get_export_bitrate().max(0) as u32,
+                };
                 let Some(path) = rfd::FileDialog::new()
-                    .add_filter("MP4 video", &["mp4"])
-                    .add_filter("WebM video", &["webm"])
-                    .set_file_name("export.mp4")
+                    .add_filter(
+                        if ext == "mp4" { "MP4 video" } else { "WebM video" },
+                        &[ext],
+                    )
+                    .set_file_name(default_name)
                     .save_file()
                 else {
                     return;
                 };
-                let fmt = if path
-                    .extension()
-                    .map(|e| e.eq_ignore_ascii_case("webm"))
-                    .unwrap_or(false)
-                {
-                    kuvatin_video::ExportFormat::WebM
-                } else {
-                    kuvatin_video::ExportFormat::Mp4
-                };
                 let started = project_slot
                     .borrow()
                     .as_ref()
-                    .map(|p| p.begin_render(&path, fmt).is_ok())
+                    .map(|p| p.begin_render(&path, settings).is_ok())
                     .unwrap_or(false);
-                if let Some(ui) = ui_weak.upgrade() {
-                    if started {
-                        export_active.set(true);
-                        ui.set_exporting(true);
-                        ui.set_export_progress(0.0);
-                        ui.set_export_status("Starting…".into());
-                    } else {
-                        ui.set_export_status("Could not start export".into());
-                    }
+                if started {
+                    export_active.set(true);
+                    ui.set_exporting(true);
+                    ui.set_export_progress(0.0);
+                    ui.set_export_status("Starting…".into());
+                } else {
+                    ui.set_export_status("Could not start export".into());
                 }
             });
         }

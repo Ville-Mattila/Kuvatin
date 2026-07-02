@@ -168,13 +168,26 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
 pub const CANVAS_W: i32 = 1280;
 pub const CANVAS_H: i32 = 720;
 
-/// Output container/codec for export.
+/// Video codec for export. The codec implies the container/muxer and audio codec
+/// (H.264 → MP4/AAC, VP8/VP9 → WebM/Opus).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExportFormat {
-    /// MP4 with H.264 video + AAC audio.
-    Mp4,
-    /// WebM with VP9 video + Opus audio.
-    WebM,
+pub enum VideoCodec {
+    /// H.264 in MP4 (hardware NVENC when available, else software x264).
+    H264,
+    /// VP9 in WebM.
+    Vp9,
+    /// VP8 in WebM.
+    Vp8,
+}
+
+/// Export/render settings: codec (→ container), output resolution, and target
+/// video bitrate in kbit/s. A `bitrate_kbps` of 0 means "let the encoder decide".
+#[derive(Clone, Copy, Debug)]
+pub struct ExportSettings {
+    pub codec: VideoCodec,
+    pub width: i32,
+    pub height: i32,
+    pub bitrate_kbps: u32,
 }
 
 /// Progress of an export/render.
@@ -185,13 +198,18 @@ pub enum RenderStatus {
     Failed(String),
 }
 
-/// H.264 encoder preferences for export. GES's encodebin prefers hardware H.264
-/// encoders, but most of them (nvh264enc CUDA mode, D3D11/12, Media Foundation)
-/// fail to init with GES's system-memory output. `nvautogpuh264enc` (NVENC
-/// auto-GPU mode) DOES work and is fast, so rank it top; rank x264enc (software)
-/// above the *failing* hardware encoders as a universal fallback for machines
-/// without NVENC. GST_PLUGIN_FEATURE_RANK is read once at registry load, so this
-/// must run before the first gst init — hence it's at every gst-init path.
+/// Encoder ranks for export (must be set before the first gst init — read once at
+/// registry load — hence it runs at every gst-init path).
+///
+/// - `nvautogpuh264enc:512` — prefer hardware NVENC H.264 (fast). On non-NVIDIA
+///   machines the factory isn't registered, so encodebin falls back to x264enc.
+/// - `x264enc:256` — software H.264 fallback.
+/// - `mfaacenc:0` — **critical**: derank the Media Foundation AAC encoder. It ties
+///   `voaacenc` at rank 128, and when encodebin picks it for the MP4 audio track it
+///   spins up a D3D11 device that corrupts the GPU state, making NVENC's
+///   `NvEncOpenEncodeSessionEx` fail `NV_ENC_ERR_INVALID_VERSION` ("Could not encode
+///   stream" → 0-byte file). Forcing the software `voaacenc` makes hardware H.264
+///   export reliable, even after the live preview has used the GPU.
 pub(crate) fn ensure_encoder_ranks() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -199,16 +217,18 @@ pub(crate) fn ensure_encoder_ranks() {
         if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
             std::env::set_var(
                 "GST_PLUGIN_FEATURE_RANK",
-                "nvautogpuh264enc:512,x264enc:300",
+                "nvautogpuh264enc:512,x264enc:256,mfaacenc:0",
             );
         }
     });
 }
 
-/// The GES encoding profile for an export format.
-fn encoding_profile(fmt: ExportFormat) -> gst_pbutils::EncodingContainerProfile {
-    let (container, video, audio) = match fmt {
-        ExportFormat::Mp4 => (
+/// The GES encoding profile for export settings: container + video + audio caps,
+/// plus the output resolution (as a video-profile restriction so encodebin scales
+/// to it) and the target bitrate (set on whichever encoder encodebin picks).
+fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile {
+    let (container, video_caps, audio_caps) = match s.codec {
+        VideoCodec::H264 => (
             gst::Caps::builder("video/quicktime")
                 .field("variant", "iso")
                 .build(),
@@ -221,14 +241,42 @@ fn encoding_profile(fmt: ExportFormat) -> gst_pbutils::EncodingContainerProfile 
                 .field("mpegversion", 4i32)
                 .build(),
         ),
-        ExportFormat::WebM => (
+        VideoCodec::Vp9 => (
             gst::Caps::builder("video/webm").build(),
             gst::Caps::builder("video/x-vp9").build(),
             gst::Caps::builder("audio/x-opus").build(),
         ),
+        VideoCodec::Vp8 => (
+            gst::Caps::builder("video/webm").build(),
+            gst::Caps::builder("video/x-vp8").build(),
+            gst::Caps::builder("audio/x-opus").build(),
+        ),
     };
-    let video = gst_pbutils::EncodingVideoProfile::builder(&video).build();
-    let audio = gst_pbutils::EncodingAudioProfile::builder(&audio).build();
+
+    // Output resolution: encodebin inserts a videoscale to meet this restriction.
+    // Kept alive here so the builder's borrow outlives the profile build.
+    let restriction = gst::Caps::builder("video/x-raw")
+        .field("width", s.width.max(2))
+        .field("height", s.height.max(2))
+        .build();
+    let mut vb = gst_pbutils::EncodingVideoProfile::builder(&video_caps).restriction(&restriction);
+    // Target bitrate. Property name and unit differ by encoder: x264enc/NVENC use
+    // "bitrate" in kbit/s (guint); vp8enc/vp9enc use "target-bitrate" in bit/s (gint).
+    // ElementProperties applies to whichever matching encoder encodebin instantiates.
+    if s.bitrate_kbps > 0 {
+        let props = match s.codec {
+            VideoCodec::H264 => gst_pbutils::ElementProperties::builder_general()
+                .field("bitrate", s.bitrate_kbps)
+                .build(),
+            VideoCodec::Vp9 | VideoCodec::Vp8 => gst_pbutils::ElementProperties::builder_general()
+                .field("target-bitrate", (s.bitrate_kbps.saturating_mul(1000)) as i32)
+                .build(),
+        };
+        vb = vb.element_properties(props);
+    }
+    let video = vb.build();
+
+    let audio = gst_pbutils::EncodingAudioProfile::builder(&audio_caps).build();
     gst_pbutils::EncodingContainerProfile::builder(&container)
         .add_profile(video)
         .add_profile(audio)
@@ -247,18 +295,19 @@ pub struct Layout {
     pub volume: f64,
 }
 
-/// Largest (width, height) a `nat_w`x`nat_h` source fits into the canvas without
-/// distortion (letter/pillar-boxed). Falls back to the full canvas if unknown.
-fn fit_size(nat_w: u32, nat_h: u32) -> (f64, f64) {
+/// Largest (width, height) a `nat_w`x`nat_h` source fits into a `cw`x`ch` canvas
+/// without distortion (letter/pillar-boxed). Falls back to the full canvas if
+/// the source size is unknown.
+fn fit_size(nat_w: u32, nat_h: u32, cw: i32, ch: i32) -> (f64, f64) {
     if nat_w == 0 || nat_h == 0 {
-        return (CANVAS_W as f64, CANVAS_H as f64);
+        return (cw as f64, ch as f64);
     }
     let aspect = nat_w as f64 / nat_h as f64;
-    let canvas_aspect = CANVAS_W as f64 / CANVAS_H as f64;
+    let canvas_aspect = cw as f64 / ch as f64;
     if aspect > canvas_aspect {
-        (CANVAS_W as f64, CANVAS_W as f64 / aspect)
+        (cw as f64, cw as f64 / aspect)
     } else {
-        (CANVAS_H as f64 * aspect, CANVAS_H as f64)
+        (ch as f64 * aspect, ch as f64)
     }
 }
 
@@ -283,6 +332,10 @@ pub struct Project {
     dirty: std::cell::Cell<bool>,
     /// The preview video sink; kept so we can restore preview mode after a render.
     appsink: AppSink,
+    /// Composited canvas ("viewport") size in px. Configurable via
+    /// `set_canvas_size`; drives fit/layout and the video track restriction caps.
+    canvas_w: i32,
+    canvas_h: i32,
 }
 
 impl Project {
@@ -348,7 +401,36 @@ impl Project {
             clips: HashMap::new(),
             dirty: std::cell::Cell::new(false),
             appsink,
+            canvas_w: CANVAS_W,
+            canvas_h: CANVAS_H,
         })
+    }
+
+    /// Current composited canvas ("viewport") size in px.
+    pub fn canvas_size(&self) -> (i32, i32) {
+        (self.canvas_w, self.canvas_h)
+    }
+
+    /// Change the composited canvas ("viewport") size. Updates the video track
+    /// restriction caps (so the preview + render output become this size) and
+    /// repaints. Existing clip transforms keep their pixel coordinates, so set
+    /// this before laying out clips for the cleanest result.
+    pub fn set_canvas_size(&mut self, w: i32, h: i32) {
+        let w = w.clamp(16, 7680);
+        let h = h.clamp(16, 4320);
+        self.canvas_w = w;
+        self.canvas_h = h;
+        let restriction = gst::Caps::builder("video/x-raw")
+            .field("width", w)
+            .field("height", h)
+            .build();
+        for track in self.timeline.tracks() {
+            if track.track_type() == ges::TrackType::VIDEO {
+                track.set_restriction_caps(&restriction);
+            }
+        }
+        self.timeline.commit();
+        self.dirty.set(true);
     }
 
     /// Ensure at least `index + 1` layers exist; return the layer at `index`.
@@ -542,8 +624,8 @@ impl Project {
                 .unwrap_or(d)
         };
         let (fit_w, _) = match clip_natural_size(clip) {
-            Some((w, h)) => fit_size(w, h),
-            None => (CANVAS_W as f64, CANVAS_H as f64),
+            Some((w, h)) => fit_size(w, h, self.canvas_w, self.canvas_h),
+            None => (self.canvas_w as f64, self.canvas_h as f64),
         };
         let width = geti("width", 0);
         let scale = if width > 0 && fit_w > 0.0 {
@@ -568,8 +650,8 @@ impl Project {
             return;
         };
         let (fit_w, fit_h) = match clip_natural_size(clip) {
-            Some((w, h)) => fit_size(w, h),
-            None => (CANVAS_W as f64, CANVAS_H as f64),
+            Some((w, h)) => fit_size(w, h, self.canvas_w, self.canvas_h),
+            None => (self.canvas_w as f64, self.canvas_h as f64),
         };
         let width = (l.scale * fit_w).round().max(1.0) as i32;
         let height = (l.scale * fit_h).round().max(1.0) as i32;
@@ -588,7 +670,7 @@ impl Project {
     pub fn clip_fit_size(&self, id: &ClipId) -> Option<(u32, u32)> {
         let clip = self.clips.get(&id.0)?;
         let (nw, nh) = clip_natural_size(clip)?;
-        let (fw, fh) = fit_size(nw, nh);
+        let (fw, fh) = fit_size(nw, nh, self.canvas_w, self.canvas_h);
         Some((fw.round() as u32, fh.round() as u32))
     }
 
@@ -609,9 +691,9 @@ impl Project {
         let Some((nw, nh)) = clip_natural_size(clip) else {
             return;
         };
-        let (fw, fh) = fit_size(nw, nh);
-        let posx = ((CANVAS_W as f64 - fw) / 2.0).round() as i32;
-        let posy = ((CANVAS_H as f64 - fh) / 2.0).round() as i32;
+        let (fw, fh) = fit_size(nw, nh, self.canvas_w, self.canvas_h);
+        let posx = ((self.canvas_w as f64 - fw) / 2.0).round() as i32;
+        let posy = ((self.canvas_h as f64 - fh) / 2.0).round() as i32;
         let _ = clip.set_child_property("posx", &posx.to_value());
         let _ = clip.set_child_property("posy", &posy.to_value());
         let _ = clip.set_child_property("width", &(fw.round() as i32).to_value());
@@ -697,13 +779,19 @@ impl Project {
 
     /// Start rendering the whole timeline to `path`. Switches the pipeline into
     /// render mode, so the live preview is unavailable until `end_render`.
-    pub fn begin_render(&self, path: &Path, fmt: ExportFormat) -> Result<()> {
+    pub fn begin_render(&self, path: &Path, settings: ExportSettings) -> Result<()> {
+        // Fully tear the preview down and WAIT for NULL before switching to render
+        // mode. Coming straight from a playing preview, the GPU/CUDA context is not
+        // released synchronously, so the NVENC encoder fails gst_nv_encoder_init_
+        // session ("Could not encode stream" → 0-byte file). Waiting for the NULL
+        // transition to complete releases it.
         self.pipeline.set_state(gst::State::Null)?;
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
         // Drop the custom preview sink so render mode can route to encodebin.
         self.pipeline
             .preview_set_video_sink(None::<&gst::Element>);
         let uri = gst::glib::filename_to_uri(path, None)?;
-        let profile = encoding_profile(fmt);
+        let profile = encoding_profile(settings);
         self.pipeline.set_render_settings(uri.as_str(), &profile)?;
         self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
         self.pipeline.set_state(gst::State::Playing)?;
@@ -857,7 +945,19 @@ mod tests {
         let _ = std::fs::remove_file(&out);
         let mut project = Project::new(|_f| {}).expect("project");
         project.append_clip(&src, 1, None).expect("clip");
-        project.begin_render(&out, ExportFormat::WebM).expect("begin_render");
+        // VP9/WebM at a forced 640x360 with a target bitrate — exercises the codec,
+        // the resolution restriction, and the bitrate element-property path.
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::Vp9,
+                    width: 640,
+                    height: 360,
+                    bitrate_kbps: 1500,
+                },
+            )
+            .expect("begin_render");
         let mut done = false;
         for _ in 0..300 {
             match project.render_status() {
@@ -874,6 +974,80 @@ mod tests {
         let len = std::fs::metadata(&out).expect("output file").len();
         assert!(len > 1000, "output file too small: {len} bytes");
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// Regression for the 0-byte H.264 export: play the preview (as the GUI does),
+    /// then render to MP4 in-process. The original failure was the Media Foundation
+    /// AAC encoder (mfaacenc) winning a rank tie and breaking NVENC's session init;
+    /// deranking it (see `ensure_encoder_ranks`) makes hardware H.264 export work even
+    /// after a preview. Self-skips without `GST_TEST_FILE`.
+    #[test]
+    fn renders_after_preview_eos() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping renders_after_preview_eos: set GST_TEST_FILE");
+            return;
+        };
+        let src = std::path::PathBuf::from(path);
+        let out = std::env::temp_dir().join("kuvatin_eos_diag.mp4");
+        let _ = std::fs::remove_file(&out);
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&src, 1, None).expect("clip");
+        // Play the whole clip so the pipeline posts EOS onto the bus.
+        project.play().expect("play");
+        std::thread::sleep(Duration::from_secs(6));
+        project.pause().expect("pause");
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 1280,
+                    height: 720,
+                    bitrate_kbps: 8000,
+                },
+            )
+            .expect("begin_render");
+        // If the first poll returns Done, a stale EOS was consumed (the bug).
+        let first = project.render_status();
+        eprintln!("first render_status after preview-EOS: {first:?}");
+        let mut done = matches!(first, RenderStatus::Done);
+        if !done {
+            for _ in 0..300 {
+                match project.render_status() {
+                    RenderStatus::Done => {
+                        done = true;
+                        break;
+                    }
+                    RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                    RenderStatus::Rendering(_) => std::thread::sleep(Duration::from_millis(100)),
+                }
+            }
+        }
+        let _ = project.end_render();
+        let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        eprintln!("output bytes after preview-EOS render: {len} (done={done})");
+        assert!(len > 1000, "0-byte/tiny export reproduced: {len} bytes");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// The composited canvas size is configurable and clamped. Needs GStreamer on
+    /// PATH (no media file), self-skips if the pipeline can't be built.
+    #[test]
+    fn sets_canvas_size() {
+        let mut project = match Project::new(|_f| {}) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skipping sets_canvas_size: no GStreamer");
+                return;
+            }
+        };
+        assert_eq!(project.canvas_size(), (CANVAS_W, CANVAS_H));
+        project.set_canvas_size(1920, 1080);
+        assert_eq!(project.canvas_size(), (1920, 1080));
+        // Absurd values are clamped to a sane range, not accepted verbatim.
+        project.set_canvas_size(0, 999_999);
+        let (w, h) = project.canvas_size();
+        assert!((16..=7680).contains(&w) && (16..=4320).contains(&h));
     }
 
     /// Grabs a thumbnail frame off the UI thread and checks it's a sane RGBA image.

@@ -28,18 +28,20 @@ fn configure_bundled_gstreamer() {
         // Don't also scan a differently-versioned system GStreamer.
         std::env::set_var("GST_PLUGIN_SYSTEM_PATH", "");
     }
-    // H.264 export encoder ranks (must be set before any gst init). Prefer NVENC
-    // auto-GPU mode (fast, works with GES output); most other hardware encoders
-    // fail to init, so x264enc (software) sits above them as the fallback.
+    // Export encoder ranks (must be set before any gst init): prefer hardware NVENC
+    // H.264, software x264 fallback, and derank the Media Foundation AAC encoder
+    // (mfaacenc) which otherwise breaks NVENC session init. See ensure_encoder_ranks().
     if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
-        std::env::set_var("GST_PLUGIN_FEATURE_RANK", "nvautogpuh264enc:512,x264enc:300");
+        std::env::set_var(
+            "GST_PLUGIN_FEATURE_RANK",
+            "nvautogpuh264enc:512,x264enc:256,mfaacenc:0",
+        );
     }
 }
 
 fn main() -> anyhow::Result<()> {
     configure_bundled_gstreamer();
-    let mode = Cli::parse().into_mode();
-    match mode {
+    match Cli::parse().into_mode() {
         Mode::Register => shell::register()?,
         Mode::Unregister => shell::unregister()?,
         Mode::QuickRun { preset, paths } => {

@@ -9,7 +9,8 @@ description = "GStreamer-backed video playback for Kuvatin"
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
-gstreamer-pbutils = "0.23"  # EncodingProfile for export/render
+# v1_20 enables set_element_properties (per-encoder bitrate) on EncodingProfile.
+gstreamer-pbutils = { version = "0.23", features = ["v1_20"] }
 # v1_20 enables GESVideoSource::natural_size (aspect-correct scaling); SDK is 1.26.
 gstreamer-editing-services = { version = "0.23", features = ["v1_20"] }
 anyhow = { workspace = true }
