@@ -512,11 +512,20 @@ export component AppWindow inherits Window {
     in property <float> export-progress: 0.0;   // 0..1
     in property <string> export-status: "";
     callback video-export();
+    callback export-cancel();                  // abort a running render
+    // App-wide error surface (a modal that stays until dismissed). Set from Rust
+    // via the error-* properties; the OK button clears `error-visible`.
+    in-out property <bool> error-visible: false;
+    in property <string> error-title: "Something went wrong";
+    in property <string> error-detail: "";
+    callback video-mode-changed(int);          // 0 = Images, 1 = Videos
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
+    callback timeline-clip-removed(int);             // delete the clip at this index
+    callback video-bin-removed(int);                 // remove a media-bin entry
     callback track-reordered(int, int);              // drag a track header: from row → to row
     // Magnetic snapping: given the dragged clip and its proposed slide (seconds),
     // returns the slide adjusted so the nearest leading/trailing edge sticks to a
@@ -572,6 +581,26 @@ export component AppWindow inherits Window {
     in property <image> viewer-image;
     callback select-file(int);
 
+    // Keyboard shortcut targets (video mode): Space toggles play/pause, Delete
+    // removes the selected clip, Esc dismisses the topmost modal.
+    callback delete-selected-clip();
+    forward-focus: kbd;
+
+    // Global key handling. Empty + behind everything so it never eats clicks;
+    // it only receives keys when no text field (LineEdit) holds focus, so typing
+    // in the numeric fields is never hijacked.
+    kbd := FocusScope {
+        key-pressed(event) => {
+            if (root.error-visible && event.text == Key.Escape) { root.error-visible = false; return accept; }
+            if (root.export-config && event.text == Key.Escape) { root.export-config = false; return accept; }
+            if (root.app-mode == 1) {
+                if (event.text == " ") { root.video-playpause(); return accept; }
+                if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return accept; }
+            }
+            return reject;
+        }
+    }
+
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
@@ -621,7 +650,7 @@ export component AppWindow inherits Window {
                 y: (parent.height - self.height) / 2;
                 labels: ["Images", "Videos"];
                 selected: root.app-mode;
-                select(i) => { root.app-mode = i; }
+                select(i) => { root.app-mode = i; root.video-mode-changed(i); }
             }
         }
 
@@ -1218,7 +1247,8 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             if root.video-clips.length > 0 : ListView {
-                                // Click a bin item to add it to the timeline.
+                                // Click a bin item to add it to the timeline; the ×
+                                // (on hover) removes it from the bin.
                                 for asset[i] in root.video-clips : Rectangle {
                                     height: 33px; border-radius: 7px;
                                     background: asset-ta.has-hover ? #262b34 : transparent;
@@ -1235,6 +1265,14 @@ export component AppWindow inherits Window {
                                         Text {
                                             text: "+"; color: #2dd4bf; font-size: 18px; font-weight: 700;
                                             vertical-alignment: center; opacity: asset-ta.has-hover ? 1.0 : 0.0;
+                                        }
+                                        Rectangle {
+                                            width: 18px; height: 18px; y: (parent.height - self.height) / 2;
+                                            border-radius: 5px;
+                                            background: rm-ta.has-hover ? #ff547033 : transparent;
+                                            opacity: asset-ta.has-hover || rm-ta.has-hover ? 1.0 : 0.0;
+                                            Text { text: "✕"; color: rm-ta.has-hover ? #ff8098 : #7a828f; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                            rm-ta := TouchArea { clicked => { root.video-bin-removed(i); } }
                                         }
                                     }
                                 }
@@ -1575,6 +1613,14 @@ export component AppWindow inherits Window {
                                     Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
                                     Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
                                     Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                    // Delete affordance on the selected clip (also Delete key).
+                                    if clip.selected : Rectangle {
+                                        x: parent.width - self.width - 3px; y: 3px;
+                                        width: 15px; height: 15px; border-radius: 5px;
+                                        background: del-ta.has-hover ? #ff5470 : #00000088;
+                                        Text { text: "✕"; color: white; font-size: 9px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                        del-ta := TouchArea { clicked => { root.timeline-clip-removed(i); } }
+                                    }
                                 }
 
                                 // body: slide (horizontal) + move to another track
@@ -1834,19 +1880,19 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Export/render progress modal.
+    // Export/render progress modal (with Cancel).
     if root.exporting : Rectangle {
         background: #000000b0;
         TouchArea {}
         Rectangle {
-            width: 360px; height: 132px;
+            width: 360px; height: 168px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1b1f27;
             border-radius: 12px;
             border-width: 1px; border-color: #2c313b;
             VerticalLayout {
-                padding: 22px; spacing: 16px;
+                padding: 22px; spacing: 14px;
                 Text {
                     text: "Exporting video…";
                     color: #f2f4f8; font-size: 14px; font-weight: 700;
@@ -1864,6 +1910,55 @@ export component AppWindow inherits Window {
                     text: root.export-status;
                     color: #9aa3b2; font-size: 11px;
                     horizontal-alignment: center; overflow: elide;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 92px; height: 30px;
+                        border-radius: 7px;
+                        background: xcancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
+                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        xcancel-ta := TouchArea { clicked => { root.export-cancel(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // App-wide error dialog — stays until dismissed, so failures are never
+    // silent (in the release windowed build stderr does not exist).
+    if root.error-visible : Rectangle {
+        background: #000000c0;
+        TouchArea {}
+        Rectangle {
+            width: 420px; height: 200px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1b1f27; border-radius: 12px;
+            border-width: 1px; border-color: #4a2a30;
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle {
+                        width: 26px; height: 26px; border-radius: 13px; background: #ff547022;
+                        Text { text: "!"; color: #ff7088; font-size: 16px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Text { text: root.error-title; color: #f2f4f8; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                }
+                Text {
+                    text: root.error-detail;
+                    color: #9aa3b2; font-size: 12px; wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 88px; height: 32px;
+                        border-radius: 7px; background: err-ok-ta.has-hover ? #2dd4bf : #22c9b0;
+                        Text { text: "OK"; color: #08110f; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        err-ok-ta := TouchArea { clicked => { root.error-visible = false; } }
+                    }
                 }
             }
         }

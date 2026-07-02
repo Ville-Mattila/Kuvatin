@@ -15,6 +15,44 @@ use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
+/// Show the app's error dialog with `title` + `detail`. The one place failures
+/// become visible — in the release windowed build there is no stderr.
+fn show_error(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
+    ui.set_error_title(title.into());
+    ui.set_error_detail(detail.as_ref().into());
+    ui.set_error_visible(true);
+}
+
+/// Remove the timeline clip at model index `i` from GES, the model, and fix up
+/// the selection (shared by the clip's × button and the Delete key).
+fn remove_timeline_clip(
+    i: i32,
+    ui_weak: &slint::Weak<AppWindow>,
+    project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
+    tl_clips: &Rc<VecModel<TimelineClip>>,
+    sel_idx: &std::rc::Rc<std::cell::Cell<i32>>,
+) {
+    if i < 0 || (i as usize) >= tl_clips.row_count() {
+        return;
+    }
+    if let Some(row) = tl_clips.row_data(i as usize) {
+        if let Some(p) = project_slot.borrow_mut().as_mut() {
+            p.remove_clip(&kuvatin_video::ClipId(row.id.to_string()));
+        }
+    }
+    tl_clips.remove(i as usize);
+    // Keep selection consistent: the removed clip is gone; rows above it shift down.
+    let sel = sel_idx.get();
+    if sel == i {
+        sel_idx.set(-1);
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_inspector_name("".into());
+        }
+    } else if sel > i {
+        sel_idx.set(sel - 1);
+    }
+}
+
 /// Create a GES editing project whose composited preview frames are pushed to
 /// the UI's `video-frame` (from a GStreamer thread, hopped to the UI thread).
 fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Project> {
@@ -130,6 +168,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // Initialize the preset-names model and the format/quality controls from the
     // first preset so they reflect (and can override) what will actually be applied.
     refresh_presets(&ui, &store.lock().unwrap(), 0);
+
+    // If the preset file was corrupt/partial, load_or_init recovered to built-ins
+    // and left a note — surface it instead of pretending nothing happened.
+    if let Some(warning) = store.lock().unwrap().last_load_warning.clone() {
+        show_error(&ui, "Presets reset", warning);
+    }
 
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
 
@@ -635,6 +679,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // True while an export/render is running (pauses the preview timer, whose
         // seeks/commits would corrupt the render).
         let export_active = Rc::new(std::cell::Cell::new(false));
+        // The output path of the running export, so Cancel/failure can delete
+        // the partial file.
+        let export_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
 
         // Open media via the file dialog → the same import queue as drag-and-drop.
         {
@@ -1089,6 +1136,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let export_active = export_active.clone();
+            let export_path = export_path.clone();
             ui.on_video_export(move || {
                 if export_active.get() || project_slot.borrow().is_none() {
                     return;
@@ -1119,18 +1167,45 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
-                let started = project_slot
+                let result = project_slot
                     .borrow()
                     .as_ref()
-                    .map(|p| p.begin_render(&path, settings).is_ok())
-                    .unwrap_or(false);
-                if started {
-                    export_active.set(true);
-                    ui.set_exporting(true);
-                    ui.set_export_progress(0.0);
-                    ui.set_export_status("Starting…".into());
-                } else {
-                    ui.set_export_status("Could not start export".into());
+                    .map(|p| p.begin_render(&path, settings));
+                match result {
+                    Some(Ok(())) => {
+                        *export_path.borrow_mut() = Some(path);
+                        export_active.set(true);
+                        ui.set_exporting(true);
+                        ui.set_export_progress(0.0);
+                        ui.set_export_status("Starting…".into());
+                    }
+                    Some(Err(e)) => {
+                        let _ = std::fs::remove_file(&path);
+                        show_error(&ui, "Export failed to start", e.to_string());
+                    }
+                    None => {}
+                }
+            });
+        }
+
+        // Cancel a running export: tear the render down gracefully and delete the
+        // partial file.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let export_active = export_active.clone();
+            let export_path = export_path.clone();
+            ui.on_export_cancel(move || {
+                if !export_active.get() {
+                    return;
+                }
+                let path = export_path.borrow_mut().take();
+                if let (Some(p), Some(path)) = (project_slot.borrow().as_ref(), path) {
+                    let _ = p.cancel_render(&path, true);
+                }
+                export_active.set(false);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_exporting(false);
                 }
             });
         }
@@ -1140,6 +1215,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let export_active = export_active.clone();
+            let export_path = export_path.clone();
+            // Watchdog: if progress hasn't advanced for this many ticks (200ms
+            // each → 20s), tell the user the render looks stuck (Cancel is right
+            // there). Some pipeline stalls never post EOS/Error.
+            let stall = Rc::new(std::cell::Cell::new((0.0f32, 0u32)));
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
@@ -1154,15 +1234,24 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     };
                     match p.render_status() {
                         kuvatin_video::RenderStatus::Rendering(f) => {
+                            let (last, ticks) = stall.get();
+                            let ticks = if (f - last).abs() < 0.0005 { ticks + 1 } else { 0 };
+                            stall.set((f, ticks));
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_export_progress(f);
-                                ui.set_export_status(format!("{:.0}%", f * 100.0).into());
+                                ui.set_export_status(if ticks >= 100 {
+                                    "Export appears stuck — you can cancel.".into()
+                                } else {
+                                    slint::format!("{:.0}%", f * 100.0)
+                                });
                             }
                         }
                         kuvatin_video::RenderStatus::Done => {
                             let _ = p.end_render();
                             drop(slot);
                             export_active.set(false);
+                            export_path.borrow_mut().take();
+                            stall.set((0.0, 0));
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_exporting(false);
                             }
@@ -1171,16 +1260,75 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             let _ = p.end_render();
                             drop(slot);
                             export_active.set(false);
-                            eprintln!("export failed: {e}");
+                            stall.set((0.0, 0));
+                            // Delete the truncated output and show the real reason.
+                            if let Some(path) = export_path.borrow_mut().take() {
+                                let _ = std::fs::remove_file(path);
+                            }
                             if let Some(ui) = ui_weak.upgrade() {
-                                ui.set_export_status("Export failed".into());
                                 ui.set_exporting(false);
+                                show_error(&ui, "Export failed", e);
                             }
                         }
                     }
                 },
             );
             std::mem::forget(timer);
+        }
+
+        // Delete a timeline clip: the × on the selected clip.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = video_tl.clone();
+            let sel_idx = sel_idx.clone();
+            ui.on_timeline_clip_removed(move |i| {
+                remove_timeline_clip(i, &ui_weak, &project_slot, &tl_clips, &sel_idx);
+            });
+        }
+        // Delete key → remove whatever clip is selected.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = video_tl.clone();
+            let sel_idx = sel_idx.clone();
+            ui.on_delete_selected_clip(move || {
+                remove_timeline_clip(sel_idx.get(), &ui_weak, &project_slot, &tl_clips, &sel_idx);
+            });
+        }
+        // Remove a media-bin entry (× on hover). Keeps bin_paths in lockstep.
+        {
+            let video_assets = video_assets.clone();
+            let bin_paths = bin_paths.clone();
+            ui.on_video_bin_removed(move |i| {
+                if i < 0 {
+                    return;
+                }
+                let i = i as usize;
+                if i < video_assets.row_count() {
+                    video_assets.remove(i);
+                }
+                let mut bp = bin_paths.borrow_mut();
+                if i < bp.len() {
+                    bp.remove(i);
+                }
+            });
+        }
+        // Mode switch: pause the video project when leaving Videos mode so audio
+        // stops and the pipeline goes quiet (the playhead timer also gates on mode).
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            ui.on_video_mode_changed(move |mode| {
+                if mode != 1 {
+                    if let Some(p) = project_slot.borrow().as_ref() {
+                        let _ = p.pause();
+                    }
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_video_playing(false);
+                    }
+                }
+            });
         }
 
         // Advance the playhead + scrubber + time, and apply coalesced edits.
@@ -1201,6 +1349,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };
+                    // Idle when not in Videos mode — nothing to preview.
+                    if ui.get_app_mode() != 1 {
+                        return;
+                    }
                     let mut slot = project_slot.borrow_mut();
                     let Some(project) = slot.as_mut() else {
                         return;
@@ -1211,6 +1363,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         project.set_clip_layout(&kuvatin_video::ClipId(id), l);
                     }
                     project.refresh_preview();
+                    // Surface a dead preview pipeline instead of freezing silently.
+                    if let Some(err) = project.poll_preview_error() {
+                        let _ = project.pause();
+                        ui.set_video_playing(false);
+                        show_error(&ui, "Playback error", err);
+                        return;
+                    }
                     let pos = project.position().unwrap_or_default();
                     let dur = project.duration().unwrap_or_default();
                     // Loop at the end when repeat is on.
