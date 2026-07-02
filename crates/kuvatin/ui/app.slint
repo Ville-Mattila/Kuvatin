@@ -865,7 +865,13 @@ export component AppWindow inherits Window {
                                 width: 26px; border-radius: 6px;
                                 background: root.aspect-lock ? #2dd4bf : #16181d;
                                 border-width: 1px; border-color: #343b46;
-                                Text { text: "🔒"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                // SVG (not an emoji glyph, which renders as tofu in
+                                // Slint) tinted to the active/idle state.
+                                Image {
+                                    source: @image-url("../assets/ic_lock.svg");
+                                    colorize: root.aspect-lock ? #08110f : #9aa3b2;
+                                    width: 13px; height: 13px;
+                                }
                                 TouchArea { clicked => { root.aspect-lock = !root.aspect-lock; } }
                             }
                         }
@@ -1528,6 +1534,9 @@ export component AppWindow inherits Window {
                                             }
                                             hdr.ddy = 0px;
                                         }
+                                        // Reset stale drag on cancel, else the next plain
+                                        // click could fire a spurious reorder.
+                                        if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
                                     }
                                 }
                             }
@@ -1644,6 +1653,12 @@ export component AppWindow inherits Window {
                                             blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
                                             root.clip-dragging = false;
                                         }
+                                        // A cancelled grab (window deactivation, grab stolen)
+                                        // must reset too, or the drop banner stays stuck.
+                                        if (ev.kind == PointerEventKind.cancel) {
+                                            blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
+                                            root.clip-dragging = false;
+                                        }
                                     }
                                     clicked => { root.timeline-select(i); }
                                 }
@@ -1660,6 +1675,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 blk.dmode = 0; blk.ddx = 0px;
                                             }
+                                            if (ev.kind == PointerEventKind.cancel) { blk.dmode = 0; blk.ddx = 0px; }
                                         }
                                     }
                                 }
@@ -1676,6 +1692,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 blk.dmode = 0; blk.ddx = 0px;
                                             }
+                                            if (ev.kind == PointerEventKind.cancel) { blk.dmode = 0; blk.ddx = 0px; }
                                         }
                                     }
                                 }

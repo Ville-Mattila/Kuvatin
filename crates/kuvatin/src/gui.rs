@@ -150,7 +150,11 @@ fn add_to_timeline(
                 }
             }
         }
-        Err(e) => eprintln!("append clip: {e:#}"),
+        Err(e) => {
+            if let Some(ui) = ui_weak.upgrade() {
+                show_error(&ui, "Could not add clip", format!("{e:#}"));
+            }
+        }
     }
 }
 
@@ -393,7 +397,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             }
 
             if let Err(e) = store.save(&store_path) {
-                eprintln!("failed to save presets: {e}");
+                show_error(&ui, "Could not save presets", e.to_string());
             }
 
             let idx = store
@@ -421,11 +425,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             if store.presets.len() <= 1 {
                 return;
             }
-            let idx = (ui.get_current_preset() as usize).min(store.presets.len() - 1);
+            // With no selection (-1) the `as usize` wraps huge and .min() would
+            // silently target the LAST preset — bail instead of deleting it.
+            let cur = ui.get_current_preset();
+            if cur < 0 {
+                return;
+            }
+            let idx = (cur as usize).min(store.presets.len() - 1);
             store.presets.remove(idx);
 
             if let Err(e) = store.save(&store_path) {
-                eprintln!("failed to save presets: {e}");
+                show_error(&ui, "Could not save presets", e.to_string());
             }
 
             let select = idx.min(store.presets.len() - 1);
