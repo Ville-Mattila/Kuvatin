@@ -247,19 +247,36 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // thread (warming the GES asset cache); a UI timer then adds each cache-warm
     // clip quickly. So importing many files shows a progress modal instead of
     // freezing the app for the whole batch.
-    type ImportItem = (PathBuf, Option<kuvatin_video::Frame>);
+    // (path, thumbnail, Some(error) if discovery failed → not addable).
+    type ImportItem = (PathBuf, Option<kuvatin_video::Frame>, Option<String>);
     let (import_tx, import_rx) = std::sync::mpsc::channel::<PathBuf>();
     let import_ready: Arc<Mutex<std::collections::VecDeque<ImportItem>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let import_total = Rc::new(std::cell::Cell::new(0usize));
     let import_done = Rc::new(std::cell::Cell::new(0usize));
+    // Cancel flag (shared with the worker so a Cancel drains the queue fast).
+    let import_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Paths already queued or in the bin, so re-dropping a file doesn't duplicate it.
+    let import_seen: Rc<RefCell<std::collections::HashSet<PathBuf>>> =
+        Rc::new(RefCell::new(std::collections::HashSet::new()));
     {
         let ready = import_ready.clone();
+        let cancel = import_cancel.clone();
         std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
             for path in import_rx {
-                let _ = kuvatin_video::warm_asset(&path);
-                let thumb = kuvatin_video::thumbnail(&path, 160);
-                ready.lock().unwrap().push_back((path, thumb));
+                // On cancel, drain remaining paths without the expensive discovery.
+                if cancel.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let warm = kuvatin_video::warm_asset(&path);
+                let err = warm.err().map(|e| e.to_string());
+                let thumb = if err.is_none() {
+                    kuvatin_video::thumbnail(&path, 160)
+                } else {
+                    None
+                };
+                ready.lock().unwrap().push_back((path, thumb, err));
             }
         });
     }
@@ -293,6 +310,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // added by the import timer) so a big drop doesn't freeze the app.
         let import_tx = import_tx.clone();
         let import_total = import_total.clone();
+        let import_cancel = import_cancel.clone();
+        let import_seen = import_seen.clone();
         let drain_timer = slint::Timer::default();
         drain_timer.start(
             slint::TimerMode::Repeated,
@@ -304,13 +323,22 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
                 let videos = ui_weak.upgrade().map(|ui| ui.get_app_mode() == 1).unwrap_or(false);
                 if videos {
+                    import_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                    let mut queued = 0;
                     for path in dropped {
+                        if import_seen.borrow().contains(&path) {
+                            continue; // already queued or in the bin
+                        }
+                        import_seen.borrow_mut().insert(path.clone());
                         let _ = import_tx.send(path);
                         import_total.set(import_total.get() + 1);
+                        queued += 1;
                     }
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_importing(true);
-                        ui.set_import_total(import_total.get() as i32);
+                    if queued > 0 {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_importing(true);
+                            ui.set_import_total(import_total.get() as i32);
+                        }
                     }
                 } else {
                     add_paths(dropped, &files, &rows, &crops, &ui_weak);
@@ -698,6 +726,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let import_tx = import_tx.clone();
             let import_total = import_total.clone();
+            let import_cancel = import_cancel.clone();
+            let import_seen = import_seen.clone();
             ui.on_video_open(move || {
                 let Some(paths) = rfd::FileDialog::new()
                     .add_filter(
@@ -711,13 +741,47 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
+                import_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                let mut queued = 0;
                 for path in paths {
+                    if import_seen.borrow().contains(&path) {
+                        continue;
+                    }
+                    import_seen.borrow_mut().insert(path.clone());
                     let _ = import_tx.send(path);
                     import_total.set(import_total.get() + 1);
+                    queued += 1;
                 }
+                if queued > 0 {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_importing(true);
+                        ui.set_import_total(import_total.get() as i32);
+                    }
+                }
+            });
+        }
+
+        // Cancel an in-flight import: stop the modal and discard the queue. The
+        // worker keeps draining in the background (results ignored); a file whose
+        // discovery is mid-flight finishes that one call, then bows out.
+        {
+            let ui_weak = ui_weak.clone();
+            let import_cancel = import_cancel.clone();
+            let import_ready = import_ready.clone();
+            let import_total = import_total.clone();
+            let import_done = import_done.clone();
+            let import_seen = import_seen.clone();
+            let bin_paths = bin_paths.clone();
+            ui.on_import_cancel(move || {
+                import_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                import_ready.lock().unwrap().clear();
+                import_total.set(0);
+                import_done.set(0);
+                // Re-seed "seen" from what actually made it into the bin, so the
+                // discarded-but-not-added files can be imported again later.
+                *import_seen.borrow_mut() = bin_paths.borrow().iter().cloned().collect();
                 if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_importing(true);
-                    ui.set_import_total(import_total.get() as i32);
+                    ui.set_importing(false);
                 }
             });
         }
@@ -733,6 +797,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ready = import_ready.clone();
             let import_total = import_total.clone();
             let import_done = import_done.clone();
+            let import_seen = import_seen.clone();
+            // Names of files that failed discovery this import, for one summary.
+            let import_failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
@@ -740,9 +807,20 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 move || {
                     loop {
                         let next = ready.lock().unwrap().pop_front();
-                        let Some((path, thumb_frame)) = next else {
+                        let Some((path, thumb_frame, err)) = next else {
                             break;
                         };
+                        import_done.set(import_done.get() + 1);
+                        if let Some(_e) = err {
+                            // Unreadable/undiscoverable → don't add a dead bin entry.
+                            import_seen.borrow_mut().remove(&path);
+                            import_failures.borrow_mut().push(
+                                path.file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.display().to_string()),
+                            );
+                            continue;
+                        }
                         let thumb = frame_to_image(thumb_frame);
                         add_to_bin(&assets, &path, thumb.clone());
                         bin_paths.borrow_mut().push(path.clone());
@@ -751,7 +829,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         if tl_clips.row_count() == 0 {
                             add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
                         }
-                        import_done.set(import_done.get() + 1);
                     }
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.set_import_done(import_done.get() as i32);
@@ -759,6 +836,18 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             ui.set_importing(false);
                             import_total.set(0);
                             import_done.set(0);
+                            let failures = std::mem::take(&mut *import_failures.borrow_mut());
+                            if !failures.is_empty() {
+                                show_error(
+                                    &ui,
+                                    "Some files could not be imported",
+                                    format!(
+                                        "{} file(s) couldn't be read as media:\n{}",
+                                        failures.len(),
+                                        failures.join("\n")
+                                    ),
+                                );
+                            }
                         }
                     }
                 },
@@ -1306,10 +1395,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 remove_timeline_clip(sel_idx.get(), &ui_weak, &project_slot, &tl_clips, &sel_idx);
             });
         }
-        // Remove a media-bin entry (× on hover). Keeps bin_paths in lockstep.
+        // Remove a media-bin entry (× on hover). Keeps bin_paths in lockstep and
+        // frees the path from "seen" so it can be re-imported later.
         {
             let video_assets = video_assets.clone();
             let bin_paths = bin_paths.clone();
+            let import_seen = import_seen.clone();
             ui.on_video_bin_removed(move |i| {
                 if i < 0 {
                     return;
@@ -1320,7 +1411,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
                 let mut bp = bin_paths.borrow_mut();
                 if i < bp.len() {
-                    bp.remove(i);
+                    let removed = bp.remove(i);
+                    import_seen.borrow_mut().remove(&removed);
                 }
             });
         }

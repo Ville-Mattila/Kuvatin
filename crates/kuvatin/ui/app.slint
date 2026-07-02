@@ -513,6 +513,7 @@ export component AppWindow inherits Window {
     in property <string> export-status: "";
     callback video-export();
     callback export-cancel();                  // abort a running render
+    callback import-cancel();                  // abort an in-flight media import
     // App-wide error surface (a modal that stays until dismissed). Set from Rust
     // via the error-* properties; the OK button clears `error-visible`.
     in-out property <bool> error-visible: false;
@@ -1786,14 +1787,14 @@ export component AppWindow inherits Window {
         // Swallow clicks behind the modal.
         TouchArea {}
         Rectangle {
-            width: 320px; height: 128px;
+            width: 320px; height: 172px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1b1f27;
             border-radius: 12px;
             border-width: 1px; border-color: #2c313b;
             VerticalLayout {
-                padding: 22px; spacing: 16px;
+                padding: 22px; spacing: 14px;
                 Text {
                     text: "Importing files…";
                     color: #f2f4f8; font-size: 14px; font-weight: 700;
@@ -1811,6 +1812,16 @@ export component AppWindow inherits Window {
                     text: root.import-done + " / " + root.import-total;
                     color: #9aa3b2; font-size: 11px;
                     horizontal-alignment: center;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 92px; height: 30px; border-radius: 7px;
+                        background: imp-cancel-ta.has-hover ? #2b313c : #20242c;
+                        border-width: 1px; border-color: #343b46;
+                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        imp-cancel-ta := TouchArea { clicked => { root.import-cancel(); } }
+                    }
                 }
             }
         }
