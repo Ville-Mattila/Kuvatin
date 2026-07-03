@@ -117,7 +117,80 @@
   .intro-shot{perspective:1600px}
   .shot-frame{position:relative;left:-5vw;top:5vh;border-radius:16px;overflow:hidden;border:1px solid #2a323f;width:min(960px,88vw);will-change:transform;
     box-shadow:0 50px 120px -30px #000,0 0 0 1px #ffffff08,0 0 90px -20px #00d4bf55}
-  .shot-frame img{display:block;width:100%;height:auto;aspect-ratio:1320/840}
+
+  /* ---- CSS-built Images-mode mockup (shares the .vm-title/.vm-panel/.vm-h
+     vocabulary with the video mockup so both read as the same app). A live
+     loop: the file list flips queued→done row by row while the progress bar
+     fills, the viewer shows a marching-ants crop on a "photo". ---- */
+  .im{display:flex;flex-direction:column;aspect-ratio:1320/840;background:#101319;font-family:"Space Grotesk",sans-serif}
+  .im *{min-width:0}
+  .im-body{flex:1;min-height:0;display:grid;grid-template-columns:.68fr 1.5fr .74fr;gap:8px;padding:8px}
+  .im-files{display:flex;flex-direction:column;overflow:hidden}
+  .im-files .row{display:flex;align-items:center;gap:7px;padding:5px;border-radius:7px}
+  .im-files .row.sel{background:#242b37}
+  .im-files .th{width:26px;height:18px;border-radius:4px;flex:none}
+  .im-files .nm{height:5px;border-radius:3px;background:#3a4453;flex:1}
+  .th.p1{background:linear-gradient(135deg,#f5b042,#c1791f)}
+  .th.p2{background:linear-gradient(135deg,#f56b8d,#b23a5e)}
+  .th.p3{background:linear-gradient(135deg,#58c98f,#2e8f63)}
+  .im-files .st{position:relative;flex:none;width:44px;height:14px}
+  .im-files .st i,.im-files .st b{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    border-radius:999px;font-style:normal;font-weight:600;font-size:7.5px;letter-spacing:.04em}
+  .im-files .st i{color:#8b95a6;background:#ffffff0a;border:1px solid #262d39}
+  .im-files .st b{color:#04201d;background:var(--teal);opacity:0;animation:8s linear infinite}
+  /* each row flips "done" a beat later; all reset together as the bar restarts */
+  @keyframes imd1{0%,8%{opacity:0}11%,86%{opacity:1}90%,100%{opacity:0}}
+  @keyframes imd2{0%,20%{opacity:0}23%,86%{opacity:1}90%,100%{opacity:0}}
+  @keyframes imd3{0%,32%{opacity:0}35%,86%{opacity:1}90%,100%{opacity:0}}
+  @keyframes imd4{0%,44%{opacity:0}47%,86%{opacity:1}90%,100%{opacity:0}}
+  @keyframes imd5{0%,56%{opacity:0}59%,86%{opacity:1}90%,100%{opacity:0}}
+  @keyframes imd6{0%,68%{opacity:0}71%,86%{opacity:1}90%,100%{opacity:0}}
+  .im-files .drop{margin-top:auto;border:1px dashed #2b3340;border-radius:7px;padding:7px;text-align:center;
+    font-size:8px;font-weight:600;letter-spacing:.08em;color:#5e6675}
+  .im-view{position:relative;background:#0b0e13;border:1px solid #222a36;border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+  .im-photo{position:absolute;inset:0;background:
+    linear-gradient(172deg,transparent 62%,#04060b 63%),
+    radial-gradient(26% 22% at 70% 30%,#ffd08acc 0%,#f5a83f66 45%,transparent 70%),
+    radial-gradient(140% 120% at 30% 0%,#274a86 0%,#152a52 45%,#0a1428 78%,#060a14 100%)}
+  .im-photo::after{content:"";position:absolute;inset:0;
+    background:linear-gradient(115deg,transparent 42%,#ffffff10 47%,transparent 53%);
+    animation:vmsheen 7s ease-in-out infinite}
+  .im-badge{position:absolute;top:10px;left:10px;z-index:2;display:flex;align-items:center;gap:7px;
+    font-size:9.5px;font-weight:700;color:#04201d;background:linear-gradient(135deg,var(--teal),var(--teal-2));
+    padding:5px 11px;border-radius:999px;box-shadow:0 6px 24px -6px #00d4bfaa}
+  .im-crop{position:absolute;left:15%;top:14%;width:56%;aspect-ratio:16/9;z-index:1;border-radius:2px;
+    box-shadow:0 0 0 999px #00000055}
+  .im-crop svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+  .im-crop rect{fill:none;stroke:#fff;stroke-width:1.5;stroke-dasharray:7 6;animation:imants 1.3s linear infinite}
+  @keyframes imants{to{stroke-dashoffset:-26}}
+  .im-crop .hnd{position:absolute;width:7px;height:7px;background:#fff;border-radius:2px}
+  .im-crop .hnd.tl{top:-4px;left:-4px}.im-crop .hnd.tr{top:-4px;right:-4px}
+  .im-crop .hnd.bl{bottom:-4px;left:-4px}.im-crop .hnd.br{bottom:-4px;right:-4px}
+  .im-info{margin-top:auto;position:relative;z-index:2;display:flex;justify-content:space-between;gap:10px;
+    padding:8px 12px;background:#12161de6;border-top:1px solid #1c222c;font-size:9px;color:var(--muted)}
+  .im-info b{color:var(--ink);font-weight:600}
+  .im-set{display:flex;flex-direction:column}
+  .im-set .sel{display:flex;justify-content:space-between;align-items:center;gap:8px;background:#1b212c;border:1px solid #2b3340;
+    border-radius:7px;padding:6px 9px;font-size:9.5px;font-weight:600;color:var(--ink)}
+  .im-set .sel i{color:var(--muted);font-style:normal}
+  .im-set .lb2{display:flex;justify-content:space-between;font-size:7.5px;font-weight:700;letter-spacing:.12em;color:var(--muted);margin:9px 0 5px}
+  .im-set .lb2 b{color:var(--ink)}
+  .im-set .fmt{display:flex;gap:4px}
+  .im-set .fmt span{flex:1;text-align:center;font-size:8.5px;font-weight:600;color:var(--muted);
+    background:#1b212c;border:1px solid #262d39;border-radius:6px;padding:4px 0}
+  .im-set .fmt .on{background:#00d4bf1c;border-color:#00d4bf55;color:var(--teal)}
+  .im-set .tr2{height:4px;border-radius:2px;background:#262d39;position:relative;margin:3px 0}
+  .im-set .tr2 i{position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:var(--teal)}
+  .im-set .tr2 b{position:absolute;top:50%;width:9px;height:9px;border-radius:50%;background:#fff;transform:translate(-50%,-50%)}
+  .im-set .two{display:flex;gap:5px}
+  .im-set .fld{flex:1;background:#1b212c;border:1px solid #262d39;border-radius:6px;padding:5px 8px;font-size:8.5px;color:#cdd5e0}
+  .im-set .fld.wide{flex:none;width:100%}
+  .im-set .cv{margin-top:auto;text-align:center;padding:7px;border-radius:8px;font-size:10px;font-weight:700;
+    color:#04201d;background:linear-gradient(135deg,var(--teal),var(--teal-2));box-shadow:0 6px 24px -8px #00d4bfaa}
+  .im-set .pb{height:6px;border-radius:3px;background:#262d39;overflow:hidden;margin-top:7px}
+  .im-set .pb i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--teal-dim),var(--teal));
+    animation:impb 8s linear infinite}
+  @keyframes impb{0%,4%{width:4%}84%{width:100%}92%,100%{width:4%}}
 
   /* generic section heads */
   .section-head{text-align:center;max-width:720px;margin:0 auto}
@@ -314,6 +387,11 @@
     .rcard{padding:32px}
     .vm-body{grid-template-columns:1fr}
     .vm-media,.vm-insp{display:none}
+    /* intro mockup: keep just the viewer, like the video mockup keeps its canvas */
+    .im{aspect-ratio:auto}
+    .im-body{grid-template-columns:1fr}
+    .im-files,.im-set{display:none}
+    .im-view{min-height:210px}
     .vfeats{grid-template-columns:1fr;gap:12px}
     .video{padding-top:90px}
     .pill-x{display:none}
@@ -334,7 +412,11 @@
   }
   @media (prefers-reduced-motion:reduce){
     .reveal,.fade{opacity:1;transform:none}
-    .vm-ph,.vm-scrub i,.vm-canvas::after,.vm-clip.snap,.pill .dot{animation:none}
+    .vm-ph,.vm-scrub i,.vm-canvas::after,.vm-clip.snap,.pill .dot,
+    .im-photo::after,.im-crop rect,.im-set .pb i,.im-files .st b{animation:none}
+    /* static state: first rows read as already converted */
+    .im-files .row:nth-of-type(2) .st b,.im-files .row:nth-of-type(3) .st b{opacity:1}
+    .im-set .pb i{width:38%}
   }
   /* Static fallback (JS adds .no-anim when GSAP is unavailable or the user
      prefers reduced motion): the intro must stack vertically — otherwise the
@@ -410,7 +492,51 @@
       </div>
     </div>
     <div class="intro-panel intro-shot" id="introShot">
-      <div class="shot-frame" id="shotFrame"><img src="assets/app-window.png" alt="The Kuvatin app window" width="1320" height="840" /></div>
+      <div class="shot-frame" id="shotFrame">
+        <!-- CSS-built mockup of Images mode (kept current by hand, unlike a screenshot) -->
+        <div class="im" role="img" aria-label="Mockup of Kuvatin's Images mode: a batch of files converting in the file list, a live preview with a crop selection, and a settings panel with format, quality and resize controls">
+          <div class="vm-title">
+            <img src="assets/kuvatin-icon.svg" alt="" /><span class="t">Kuvatin</span>
+            <span class="seg"><span class="on">Images</span><span>Videos</span></span>
+            <span class="winb">—&ensp;□&ensp;✕</span>
+          </div>
+          <div class="im-body">
+            <div class="vm-panel im-files">
+              <div class="vm-h">FILES</div>
+              <div class="row"><span class="th p1"></span><span class="nm"></span><span class="st"><i>queued</i><b style="animation-name:imd1">done</b></span></div>
+              <div class="row"><span class="th v1"></span><span class="nm" style="max-width:72%"></span><span class="st"><i>queued</i><b style="animation-name:imd2">done</b></span></div>
+              <div class="row sel"><span class="th i1"></span><span class="nm" style="max-width:85%"></span><span class="st"><i>queued</i><b style="animation-name:imd3">done</b></span></div>
+              <div class="row"><span class="th p2"></span><span class="nm" style="max-width:64%"></span><span class="st"><i>queued</i><b style="animation-name:imd4">done</b></span></div>
+              <div class="row"><span class="th v2"></span><span class="nm" style="max-width:78%"></span><span class="st"><i>queued</i><b style="animation-name:imd5">done</b></span></div>
+              <div class="row"><span class="th p3"></span><span class="nm" style="max-width:58%"></span><span class="st"><i>queued</i><b style="animation-name:imd6">done</b></span></div>
+              <div class="drop">+ DROP IMAGES HERE</div>
+            </div>
+            <div class="im-view">
+              <div class="im-photo"></div>
+              <div class="im-badge">CROP · 16:9</div>
+              <div class="im-crop">
+                <svg aria-hidden="true"><rect x="0" y="0" width="100%" height="100%" rx="2"/></svg>
+                <span class="hnd tl"></span><span class="hnd tr"></span><span class="hnd bl"></span><span class="hnd br"></span>
+              </div>
+              <div class="im-info"><span><b>IMG_0412.png</b></span><span>3840×2160 · 4.1 MB</span></div>
+            </div>
+            <div class="vm-panel im-set">
+              <div class="vm-h">SETTINGS</div>
+              <div class="sel">Compress PNG <i>▾</i></div>
+              <div class="lb2">FORMAT</div>
+              <div class="fmt"><span class="on">png</span><span>webp</span><span>jpeg</span><span>tiff</span></div>
+              <div class="lb2">QUALITY <b>80</b></div>
+              <div class="tr2"><i style="width:80%"></i><b style="left:80%"></b></div>
+              <div class="lb2">RESIZE</div>
+              <div class="two"><span class="fld">W · 1920</span><span class="fld">H · auto</span></div>
+              <div class="lb2">SUFFIX</div>
+              <div class="fld wide">{name}_{w}x{h}</div>
+              <div class="cv">Converting…</div>
+              <div class="pb"><i></i></div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
   <div class="panhint" id="panhint"><span>Scroll</span><span class="arrow"></span></div>
