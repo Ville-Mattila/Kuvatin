@@ -21,7 +21,8 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
 - **Resize** by pixels, percent, or fit-to-box (aspect-ratio aware, Lanczos3 resampling)
 - **Crop** to a fixed size or aspect ratio, inline in the viewer or with numeric fields
 - **Batch** whole folders / multi-selections in parallel, with reusable **presets**
-  (stored in `%APPDATA%\Kuvatin\presets.toml`)
+  (stored in `%APPDATA%\Kuvatin\presets.toml`) — one bad file can't take down a
+  run, and **EXIF orientation** is applied automatically on decode
 - **Explorer context menu**: right-click images for quick preset actions
   (Convert to WebP, Resize to 1080p, Resize to 50%) or "Open in Kuvatin…"
 - **Custom frameless window** with a native drag/resize titlebar and drag-and-drop
@@ -41,9 +42,13 @@ Outputs are written next to the originals with a token-pattern name
 - **Configurable canvas** — pick the project resolution (16:9, vertical, square,
   4K, or custom) independently of the export size
 - **Export** to MP4 (H.264, **hardware NVENC** on NVIDIA GPUs with automatic
-  software x264 fallback), WebM VP9 or VP8, with resolution and bitrate control
+  software x264 fallback), WebM VP9 or VP8, with resolution, frame-rate and
+  bitrate control — cancellable mid-render (the partial file is cleaned up)
 - **Fast imports** — files load on a background thread with progress and
-  per-clip thumbnails
+  per-clip thumbnails; imports are cancellable, de-duplicated, and unreadable
+  files are reported instead of silently added
+- **Keyboard & cleanup** — Space play/pause, Delete removes the selected clip
+  (also via the × on clips and media-bin rows), Esc closes dialogs
 
 The video engine is [GStreamer Editing Services](https://gstreamer.freedesktop.org/documentation/gst-editing-services/);
 the installer bundles the full GStreamer runtime, so nothing needs to be
@@ -53,7 +58,9 @@ installed separately.
 
 Grab the latest `.msi` from the [releases page](https://github.com/Ville-Mattila/Kuvatin/releases/latest).
 It adds a Start-menu shortcut, registers the Explorer context menu, and always
-upgrades any previous version in place (no duplicate installs).
+upgrades any previous version in place (no duplicate installs). The context-menu
+registration is per-user and **self-heals at app launch**, so other Windows users
+on the same machine get the menu the first time they open Kuvatin.
 
 ## Build & run
 
@@ -69,7 +76,8 @@ cargo test                 # run the test suite
 ```
 
 The GStreamer-backed tests in `kuvatin-video` self-skip unless `GST_TEST_FILE`
-points at a media file, and must run single-threaded
+points at a media file (and `GST_TEST_IMAGE` at a still image for the overlay
+tests), and must run single-threaded
 (`cargo test -p kuvatin-video -- --test-threads=1`) — concurrent GStreamer
 pipelines deadlock.
 
@@ -103,7 +111,7 @@ cargo install cargo-wix
 crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir target\gst-staging
 cd crates\kuvatin
 cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging"
-# produces target/wix/kuvatin-<version>-x86_64.msi (~106 MB with the bundled runtime)
+# produces target/wix/kuvatin-<version>-x86_64.msi (~110 MB with the bundled runtime)
 ```
 
 ## Architecture
@@ -111,10 +119,11 @@ cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging"
 - **`crates/kuvatin-core`** — OS-agnostic image engine: formats, PNG optimization
   (oxipng + libimagequant), resize, crop, output naming, the Job/Preset model, and
   the parallel batch executor. Fully unit-tested. Portable to macOS/Linux later.
-- **`crates/kuvatin-video`** — the GStreamer video engine: single-clip playback
-  (`Player`) and the GES-backed editing `Project` (layered timeline, per-clip
-  transforms, composited preview, render-to-file with per-codec encoding
-  profiles). Headless-tested against real pipelines.
+- **`crates/kuvatin-video`** — the GStreamer video engine: the GES-backed
+  editing `Project` (layered timeline, per-clip transforms, composited preview,
+  cancellable render-to-file with per-codec encoding profiles) plus asset
+  utilities (off-thread discovery, thumbnails). Headless-tested against real
+  pipelines.
 - **`crates/kuvatin`** — the `kuvatin.exe`: Slint GUI + CLI + the Windows shell
   (registry) integration. Runs in three modes — GUI, `--preset` quick batch, and
   `--register` / `--unregister`.
@@ -132,5 +141,12 @@ this kind of use, so the whole application is distributed under the GPL.
 Working today: compress / convert / resize / crop / batch / presets / context menu /
 video timeline editing / hardware video export / custom frameless UI / `.msi`
 installer with bundled GStreamer runtime and Start-menu shortcut.
+
+**2.0.1** is a hardening release from a full-codebase audit: crash-proof batch
+encoding, collision-proof outputs, corruption-tolerant + versioned presets,
+visible error dialogs (the windowed build has no console), cancellable
+export/import, EXIF-aware decode, and a release pipeline that pins every
+third-party download by SHA-256 and gates on the test suite.
+
 Deferred to later: audio-only tracks & transitions in the video editor, a top-level
 Windows 11 menu via `IExplorerCommand`, and macOS/Linux packaging.
