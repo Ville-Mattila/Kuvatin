@@ -18,8 +18,20 @@ pub enum ResizeMode {
     FitBox { width: u32, height: u32 },
 }
 
-/// Compute the output dimensions for a `src_w` x `src_h` image. Never returns 0.
+/// Ceiling on either output dimension. A hand-edited preset (factor = 1000,
+/// width = u32::MAX) would otherwise reach `resize_exact`, whose w*h*4
+/// allocation aborts the process (capacity overflow / OOM — not unwinding).
+/// 32768 px per side (~4 GiB RGBA worst case) is beyond any sane output.
+const MAX_TARGET_DIM: u32 = 32_768;
+
+/// Compute the output dimensions for a `src_w` x `src_h` image. Never returns
+/// 0, never exceeds [`MAX_TARGET_DIM`] per side.
 pub fn compute_target_dimensions(mode: ResizeMode, src_w: u32, src_h: u32) -> (u32, u32) {
+    let (w, h) = compute_target_dimensions_unclamped(mode, src_w, src_h);
+    (w.min(MAX_TARGET_DIM), h.min(MAX_TARGET_DIM))
+}
+
+fn compute_target_dimensions_unclamped(mode: ResizeMode, src_w: u32, src_h: u32) -> (u32, u32) {
     let clamp1 = |v: u32| v.max(1);
     match mode {
         ResizeMode::None => (src_w, src_h),

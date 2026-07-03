@@ -109,16 +109,12 @@
                     </Component>
                     
                     <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='81E8676F-C198-4FFC-A88D-73A63E232A9C' KeyPath='yes'>
-                            <Environment
-                                Id='PATH'
-                                Name='PATH'
-                                Value='[Bin]'
-                                Permanent='no'
-                                Part='last'
-                                Action='set'
-                                System='yes'/>
-                        </Component>
+                        <!-- NOTE: the installer deliberately does NOT touch the
+                             system PATH. The exe's DLLs (GStreamer runtime) sit
+                             beside it in [Bin] and nothing else needs to resolve
+                             kuvatin.exe from a shell, so a PATH entry would only
+                             shadow a user's own GStreamer install with our
+                             bundled copies. -->
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
@@ -143,7 +139,11 @@
                                   Icon='ProductICO'/>
                         <RemoveFolder Id='RemoveApplicationProgramsFolder'
                                       On='uninstall'/>
-                        <RegistryValue Root='HKCU'
+                        <!-- HKMU = HKLM in this perMachine package: keying the
+                             component per-user (HKCU) in a per-machine install
+                             is an ICE38 violation and misbehaves when a
+                             different admin uninstalls. -->
+                        <RegistryValue Root='HKMU'
                                        Key='Software\Ville Mattila\Kuvatin'
                                        Name='installed'
                                        Type='integer'
@@ -173,17 +173,13 @@
             <ComponentRef Id='StartMenuShortcut'/>
 
             <!-- Bundled GStreamer runtime (DLLs next to the exe + plugins subdir),
-                 harvested by wix/bundle-gstreamer.ps1 into wix/gstreamer.wxs. -->
+                 harvested by wix/bundle-gstreamer.ps1 into wix/gstreamer.wxs.
+                 NOTE: gstreamer.wxs is regenerated each build with `heat -gg`
+                 (fresh component GUIDs). That is ONLY safe because MajorUpgrade
+                 below uses Schedule='afterInstallInitialize', which removes the
+                 old product completely before installing the new one. Change
+                 either of the two only together, or upgrades will orphan files. -->
             <ComponentGroupRef Id='GstRuntime'/>
-
-            <Feature
-                Id='Environment'
-                Title='PATH Environment Variable'
-                Description='Add the install location of the [ProductName] executable to the PATH system environment variable. This allows the [ProductName] executable to be called from any location.'
-                Level='1'
-                Absent='allow'>
-                <ComponentRef Id='Path'/>
-            </Feature>
         </Feature>
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>

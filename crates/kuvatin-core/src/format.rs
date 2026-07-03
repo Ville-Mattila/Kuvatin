@@ -23,7 +23,10 @@ impl OutputFormat {
         }
     }
 
-    /// True if `quality` (0-100) is meaningful for this format.
+    /// True if `quality` (0-100) is meaningful for this format ALONE. Caution:
+    /// PNG returns false here, yet a Job with `png: PngOptimize::Lossy` (the
+    /// default "Compress PNG" preset) DOES consume quality via libimagequant —
+    /// gate UI controls on [`crate::pipeline::Job::uses_quality`], not this.
     pub fn uses_quality(self) -> bool {
         matches!(self, OutputFormat::Jpeg | OutputFormat::Webp)
     }

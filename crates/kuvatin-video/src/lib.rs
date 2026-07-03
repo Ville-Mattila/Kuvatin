@@ -1,8 +1,13 @@
-//! GStreamer-backed video playback for Kuvatin. The GUI talks only to `Player`;
-//! all GStreamer details stay inside this crate.
+//! GStreamer-backed video engine for Kuvatin. The GUI talks only to `Project`
+//! (GES editing timeline + composited preview + render); all GStreamer details
+//! stay inside this crate.
 
-pub mod player;
-pub use player::{Frame, Player};
+/// One decoded RGBA video frame handed to the GUI (`width * height * 4` bytes).
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
 
 pub mod project;
 pub use project::{

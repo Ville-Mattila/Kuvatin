@@ -1,7 +1,13 @@
 name: release
 
-# Build the Windows .msi. On a version tag (v1.5.0) it is attached to the GitHub
+# Build the Windows .msi. On a version tag (v2.0.0) it is attached to the GitHub
 # Release; on manual dispatch it is uploaded as a workflow artifact.
+#
+# Hardening: third-party downloads (GStreamer MSIs, WiX zip) are pinned by
+# SHA-256 and the build fails on mismatch — they are executed and their DLLs are
+# harvested into the shipped installer, so an upstream/CDN compromise must not
+# flow through. Actions are pinned to commit SHAs. The full test suite runs
+# before the MSI is built, so a tag push can't ship code that fails tests.
 on:
   push:
     tags:
@@ -11,40 +17,83 @@ on:
 permissions:
   contents: write
 
+env:
+  GST_VERSION: "1.26.11"
+  # SHA-256 of the exact pinned downloads (recompute with Get-FileHash if bumping).
+  GST_RUNTIME_SHA256: "31CBC21FA0950B5C1E79C80959B2799805CB05A7A35953A13A9F790776137605"
+  GST_DEVEL_SHA256: "AF0A0720692052AAF5FB0CF2847EF34A87016EF0F914328D516F049E6C86F587"
+  WIX_ZIP_SHA256: "6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31"
+
 jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Install GStreamer (runtime + devel)
+      # For a tag build, the tag must match the workspace version the MSI is
+      # stamped with — otherwise we'd publish e.g. v2.0.1 carrying a 2.0.0 MSI.
+      - name: Verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
-          $ver = "1.26.11"
-          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc"
-          foreach ($f in @("gstreamer-1.0-msvc-x86_64-$ver.msi", "gstreamer-1.0-devel-msvc-x86_64-$ver.msi")) {
-            Invoke-WebRequest -Uri "$base/$f" -OutFile "$env:TEMP\$f"
-            Start-Process msiexec -ArgumentList "/i", "`"$env:TEMP\$f`"", "/qn", "ADDLOCAL=ALL", "/norestart" -Wait -NoNewWindow
+          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $tag = "${{ github.ref_name }}" -replace '^v',''
+          if ($ver -ne $tag) { throw "tag $tag != workspace version $ver" }
+          Write-Host "tag and version agree: $ver"
+
+      - name: Install GStreamer (runtime + devel), checksum-pinned
+        shell: pwsh
+        run: |
+          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc"
+          $files = @(
+            @{ Name = "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi";       Sha = "$env:GST_RUNTIME_SHA256" },
+            @{ Name = "gstreamer-1.0-devel-msvc-x86_64-$env:GST_VERSION.msi"; Sha = "$env:GST_DEVEL_SHA256" }
+          )
+          foreach ($f in $files) {
+            $path = "$env:TEMP\$($f.Name)"
+            Invoke-WebRequest -Uri "$base/$($f.Name)" -OutFile $path
+            $got = (Get-FileHash $path -Algorithm SHA256).Hash
+            if ($got -ne $f.Sha) { throw "checksum mismatch for $($f.Name): got $got expected $($f.Sha)" }
+            Start-Process msiexec -ArgumentList "/i", "`"$path`"", "/qn", "ADDLOCAL=ALL", "/norestart" -Wait -NoNewWindow
           }
           # The build env (PKG_CONFIG etc.) comes from .cargo/config.toml; add the
-          # runtime bin to PATH so the bundled-DLL harvest and any run can find it.
+          # runtime bin to PATH so the harvest, the tests, and any run find it.
           "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Install cargo-wix
-        run: cargo install cargo-wix
+      # Test BEFORE building the installer so a failing tag push never ships.
+      # Video tests need media fixtures and must run single-threaded (concurrent
+      # GES pipelines deadlock); the rest run normally.
+      - name: Test
+        shell: pwsh
+        run: |
+          $env:Path = "C:\Program Files\gstreamer\1.0\msvc_x86_64\bin;$env:Path"
+          $fx = "$env:TEMP\fixture_av.webm"
+          $img = "$env:TEMP\fixture.png"
+          gst-launch-1.0 -e videotestsrc num-buffers=150 ! "video/x-raw,width=320,height=180" ! vp8enc ! webmmux name=m ! filesink location=$fx audiotestsrc num-buffers=300 ! audioconvert ! vorbisenc ! m.
+          gst-launch-1.0 videotestsrc num-buffers=1 ! "video/x-raw,width=320,height=180" ! pngenc ! filesink location=$img
+          $env:GST_TEST_FILE = $fx
+          $env:GST_TEST_IMAGE = $img
+          cargo test -p kuvatin-core -p kuvatin --release
+          cargo test -p kuvatin-video --release -- --test-threads=1
 
-      - name: Install WiX Toolset v3 (no-admin binaries)
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --version 0.3.9 --locked
+
+      - name: Install WiX Toolset v3 (no-admin binaries), checksum-pinned
         shell: pwsh
         run: |
           $dest = "$env:USERPROFILE\wix3-bin"
+          $zip = "$env:TEMP\wix314-binaries.zip"
           Invoke-WebRequest `
             -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" `
-            -OutFile "$env:TEMP\wix314-binaries.zip"
-          Expand-Archive "$env:TEMP\wix314-binaries.zip" -DestinationPath $dest -Force
+            -OutFile $zip
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($got -ne "$env:WIX_ZIP_SHA256") { throw "checksum mismatch for wix314-binaries.zip: got $got expected $env:WIX_ZIP_SHA256" }
+          Expand-Archive $zip -DestinationPath $dest -Force
           "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build MSI (bundling GStreamer runtime)
@@ -55,13 +104,13 @@ jobs:
           cd crates\kuvatin
           cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kuvatin-windows-msi
           path: target/wix/*.msi
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: target/wix/*.msi

@@ -15,9 +15,44 @@ use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
-/// Create a video Player for `path`, start playback, and store it in `slot`
-/// (dropping any previous player). Decoded RGBA frames are pushed to the UI's
-/// `video-frame` from the GStreamer thread via `invoke_from_event_loop`.
+/// Show the app's error dialog with `title` + `detail`. The one place failures
+/// become visible — in the release windowed build there is no stderr.
+fn show_error(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
+    ui.set_error_title(title.into());
+    ui.set_error_detail(detail.as_ref().into());
+    ui.set_error_visible(true);
+}
+
+/// Remove the timeline clip at model index `i` from GES, the model, and fix up
+/// the selection (shared by the clip's × button and the Delete key).
+fn remove_timeline_clip(
+    i: i32,
+    ui_weak: &slint::Weak<AppWindow>,
+    project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
+    tl_clips: &Rc<VecModel<TimelineClip>>,
+    sel_idx: &std::rc::Rc<std::cell::Cell<i32>>,
+) {
+    if i < 0 || (i as usize) >= tl_clips.row_count() {
+        return;
+    }
+    if let Some(row) = tl_clips.row_data(i as usize) {
+        if let Some(p) = project_slot.borrow_mut().as_mut() {
+            p.remove_clip(&kuvatin_video::ClipId(row.id.to_string()));
+        }
+    }
+    tl_clips.remove(i as usize);
+    // Keep selection consistent: the removed clip is gone; rows above it shift down.
+    let sel = sel_idx.get();
+    if sel == i {
+        sel_idx.set(-1);
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_inspector_name("".into());
+        }
+    } else if sel > i {
+        sel_idx.set(sel - 1);
+    }
+}
+
 /// Create a GES editing project whose composited preview frames are pushed to
 /// the UI's `video-frame` (from a GStreamer thread, hopped to the UI thread).
 fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Project> {
@@ -115,11 +150,20 @@ fn add_to_timeline(
                 }
             }
         }
-        Err(e) => eprintln!("append clip: {e:#}"),
+        Err(e) => {
+            if let Some(ui) = ui_weak.upgrade() {
+                show_error(&ui, "Could not add clip", format!("{e:#}"));
+            }
+        }
     }
 }
 
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
+    // Self-heal the per-user Explorer context-menu registration: the MSI only
+    // registers for the installing user, so other accounts (or a moved exe)
+    // pick it up here on first launch. Best-effort, never blocks startup.
+    crate::shell::ensure_registered();
+
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
 
@@ -129,6 +173,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // first preset so they reflect (and can override) what will actually be applied.
     refresh_presets(&ui, &store.lock().unwrap(), 0);
 
+    // If the preset file was corrupt/partial, load_or_init recovered to built-ins
+    // and left a note — surface it instead of pretending nothing happened.
+    if let Some(warning) = store.lock().unwrap().last_load_warning.clone() {
+        show_error(&ui, "Presets reset", warning);
+    }
+
     let files: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(collect_images(&initial_paths)));
 
     // Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
@@ -136,9 +186,22 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
     let crops: Arc<Mutex<CropMap>> = Arc::new(Mutex::new(HashMap::new()));
 
-    let rows = Rc::new(VecModel::from(rows_from(&files.lock().unwrap(), &crops.lock().unwrap())));
+    // Path-keyed thumbnail cache (see `ThumbCache`): lets row rebuilds restore
+    // thumbnails and keeps re-adds from re-decoding files already seen.
+    let thumbs: ThumbCache = Arc::new(Mutex::new(HashMap::new()));
+
+    let rows = Rc::new(VecModel::from(rows_from(
+        &files.lock().unwrap(),
+        &crops.lock().unwrap(),
+        &thumbs,
+    )));
     ui.set_files(ModelRc::from(rows.clone()));
-    spawn_thumbnails(ui.as_weak(), files.clone(), files.lock().unwrap().clone());
+    spawn_thumbnails(
+        ui.as_weak(),
+        files.clone(),
+        thumbs.clone(),
+        files.lock().unwrap().clone(),
+    );
     // The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
     let edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>> = Arc::new(Mutex::new(None));
 
@@ -163,13 +226,19 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let thumbs = thumbs.clone();
         let ui_weak = ui.as_weak();
         ui.on_add_files(move || {
+            // Don't let the list change under a running batch: the progress
+            // callback addresses model rows by their snapshot index.
+            if ui_weak.upgrade().map(|u| u.get_running()).unwrap_or(false) {
+                return;
+            }
             if let Some(picked) = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
                 .pick_files()
             {
-                add_paths(picked, &files, &rows, &crops, &ui_weak);
+                add_paths(picked, &files, &rows, &crops, &thumbs, &ui_weak);
             }
         });
     }
@@ -197,19 +266,36 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // thread (warming the GES asset cache); a UI timer then adds each cache-warm
     // clip quickly. So importing many files shows a progress modal instead of
     // freezing the app for the whole batch.
-    type ImportItem = (PathBuf, Option<kuvatin_video::Frame>);
+    // (path, thumbnail, Some(error) if discovery failed → not addable).
+    type ImportItem = (PathBuf, Option<kuvatin_video::Frame>, Option<String>);
     let (import_tx, import_rx) = std::sync::mpsc::channel::<PathBuf>();
     let import_ready: Arc<Mutex<std::collections::VecDeque<ImportItem>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let import_total = Rc::new(std::cell::Cell::new(0usize));
     let import_done = Rc::new(std::cell::Cell::new(0usize));
+    // Cancel flag (shared with the worker so a Cancel drains the queue fast).
+    let import_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Paths already queued or in the bin, so re-dropping a file doesn't duplicate it.
+    let import_seen: Rc<RefCell<std::collections::HashSet<PathBuf>>> =
+        Rc::new(RefCell::new(std::collections::HashSet::new()));
     {
         let ready = import_ready.clone();
+        let cancel = import_cancel.clone();
         std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
             for path in import_rx {
-                let _ = kuvatin_video::warm_asset(&path);
-                let thumb = kuvatin_video::thumbnail(&path, 160);
-                ready.lock().unwrap().push_back((path, thumb));
+                // On cancel, drain remaining paths without the expensive discovery.
+                if cancel.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let warm = kuvatin_video::warm_asset(&path);
+                let err = warm.err().map(|e| e.to_string());
+                let thumb = if err.is_none() {
+                    kuvatin_video::thumbnail(&path, 160)
+                } else {
+                    None
+                };
+                ready.lock().unwrap().push_back((path, thumb, err));
             }
         });
     }
@@ -223,6 +309,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let thumbs = thumbs.clone();
         let ui_weak = ui.as_weak();
         let setup_weak = ui.as_weak();
         let setup_timer = slint::Timer::default();
@@ -243,6 +330,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // added by the import timer) so a big drop doesn't freeze the app.
         let import_tx = import_tx.clone();
         let import_total = import_total.clone();
+        let import_cancel = import_cancel.clone();
+        let import_seen = import_seen.clone();
         let drain_timer = slint::Timer::default();
         drain_timer.start(
             slint::TimerMode::Repeated,
@@ -254,16 +343,30 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
                 let videos = ui_weak.upgrade().map(|ui| ui.get_app_mode() == 1).unwrap_or(false);
                 if videos {
+                    import_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                    let mut queued = 0;
                     for path in dropped {
+                        if import_seen.borrow().contains(&path) {
+                            continue; // already queued or in the bin
+                        }
+                        import_seen.borrow_mut().insert(path.clone());
                         let _ = import_tx.send(path);
                         import_total.set(import_total.get() + 1);
+                        queued += 1;
                     }
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_importing(true);
-                        ui.set_import_total(import_total.get() as i32);
+                    if queued > 0 {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_importing(true);
+                            ui.set_import_total(import_total.get() as i32);
+                        }
                     }
                 } else {
-                    add_paths(dropped, &files, &rows, &crops, &ui_weak);
+                    // Ignore image drops while a batch is running — adding rows
+                    // would desync the progress callback's snapshot indices.
+                    let running = ui_weak.upgrade().map(|u| u.get_running()).unwrap_or(false);
+                    if !running {
+                        add_paths(dropped, &files, &rows, &crops, &thumbs, &ui_weak);
+                    }
                 }
             },
         );
@@ -287,25 +390,26 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             #[cfg(windows)]
             win_drop::close();
         });
-        ui.on_win_drag(|| {
-            #[cfg(windows)]
-            win_drop::drag();
-        });
     }
 
     {
         let files = files.clone();
         let rows = rows.clone();
         let crops = crops.clone();
+        let thumbs = thumbs.clone();
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
         ui.on_clear_files(move || {
             let Some(ui) = ui_weak.upgrade() else { return; };
+            if ui.get_running() {
+                return; // don't clear the list a running batch is iterating
+            }
             let mut guard = files.lock().unwrap();
             guard.clear();
             let mut crops_guard = crops.lock().unwrap();
             crops_guard.clear();
-            refresh(&rows, &guard, &crops_guard);
+            thumbs.lock().unwrap().clear();
+            refresh(&rows, &guard, &crops_guard, &thumbs);
             drop(crops_guard);
             ui.set_selected_index(-1);
             ui.set_cropping(false);
@@ -347,7 +451,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             }
 
             if let Err(e) = store.save(&store_path) {
-                eprintln!("failed to save presets: {e}");
+                show_error(&ui, "Could not save presets", e.to_string());
             }
 
             let idx = store
@@ -375,11 +479,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             if store.presets.len() <= 1 {
                 return;
             }
-            let idx = (ui.get_current_preset() as usize).min(store.presets.len() - 1);
+            // With no selection (-1) the `as usize` wraps huge and .min() would
+            // silently target the LAST preset — bail instead of deleting it.
+            let cur = ui.get_current_preset();
+            if cur < 0 {
+                return;
+            }
+            let idx = (cur as usize).min(store.presets.len() - 1);
             store.presets.remove(idx);
 
             if let Err(e) = store.save(&store_path) {
-                eprintln!("failed to save presets: {e}");
+                show_error(&ui, "Could not save presets", e.to_string());
             }
 
             let select = idx.min(store.presets.len() - 1);
@@ -391,44 +501,71 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     }
 
     // Selecting a file shows it large in the viewer (and prepares crop state).
+    // The decode runs off the UI thread so picking a big image can't freeze the
+    // app; a monotonic generation guards against a slow decode landing after the
+    // user has already moved on to a different file.
     {
         let files = files.clone();
         let crops = crops.clone();
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
+        let select_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         ui.on_select_file(move |index| {
             let Some(ui) = ui_weak.upgrade() else { return; };
             let path = match files.lock().unwrap().get(index as usize) {
                 Some(p) => p.clone(),
                 None => return,
             };
-            let Ok(img) = image::open(&path) else { return; };
-            let (ow, oh) = (img.width(), img.height());
-            if ow == 0 || oh == 0 { return; }
-
-            // Decode a display-sized preview; normalized crop coords stay size-independent.
-            let preview = img.thumbnail(1280, 1280).to_rgba8();
-            let (pw, ph) = (preview.width(), preview.height());
-            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(preview.as_raw(), pw, ph);
-            ui.set_viewer_image(Image::from_rgba8(buf));
+            // Highlight is instant; the preview arrives when the decode finishes.
             ui.set_selected_index(index);
+            let generation =
+                select_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-            // Seed crop state for this file (used when the viewer enters Crop mode later).
-            ui.set_crop_img_w(ow as i32);
-            ui.set_crop_img_h(oh as i32);
-            let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
-            ui.set_crop_box_w(bw);
-            ui.set_crop_box_h(bh);
-            if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
-                ui.set_crop_x(x as f32 / ow as f32);
-                ui.set_crop_y(y as f32 / oh as f32);
-                ui.set_crop_w(w as f32 / ow as f32);
-                ui.set_crop_h(h as f32 / oh as f32);
-            } else {
-                ui.set_crop_x(0.0); ui.set_crop_y(0.0);
-                ui.set_crop_w(1.0); ui.set_crop_h(1.0);
-            }
-            *edit.lock().unwrap() = Some((path, ow, oh));
+            let ui_weak = ui_weak.clone();
+            let crops = crops.clone();
+            let edit = edit.clone();
+            let select_gen = select_gen.clone();
+            std::thread::spawn(move || {
+                let Ok(img) = image::open(&path) else { return; };
+                let (ow, oh) = (img.width(), img.height());
+                if ow == 0 || oh == 0 {
+                    return;
+                }
+                // Decode a display-sized preview; normalized crop coords stay
+                // size-independent. Ship raw pixels (Send) to the UI thread.
+                let preview = img.thumbnail(1280, 1280).to_rgba8();
+                let (pw, ph) = (preview.width(), preview.height());
+                let raw = preview.into_raw();
+                let _ = slint::invoke_from_event_loop(move || {
+                    // Superseded by a newer selection? then drop this result.
+                    if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    let Some(ui) = ui_weak.upgrade() else { return; };
+                    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&raw, pw, ph);
+                    ui.set_viewer_image(Image::from_rgba8(buf));
+
+                    // Seed crop state for this file (used when the viewer enters
+                    // Crop mode later).
+                    ui.set_crop_img_w(ow as i32);
+                    ui.set_crop_img_h(oh as i32);
+                    let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
+                    ui.set_crop_box_w(bw);
+                    ui.set_crop_box_h(bh);
+                    if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
+                        ui.set_crop_x(x as f32 / ow as f32);
+                        ui.set_crop_y(y as f32 / oh as f32);
+                        ui.set_crop_w(w as f32 / ow as f32);
+                        ui.set_crop_h(h as f32 / oh as f32);
+                    } else {
+                        ui.set_crop_x(0.0);
+                        ui.set_crop_y(0.0);
+                        ui.set_crop_w(1.0);
+                        ui.set_crop_h(1.0);
+                    }
+                    *edit.lock().unwrap() = Some((path, ow, oh));
+                });
+            });
         });
     }
 
@@ -492,6 +629,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 Some(u) => u,
                 None => return,
             };
+            if ui.get_running() {
+                return; // a batch is already running; ignore re-entrant Convert
+            }
             let preset_idx = ui.get_current_preset() as usize;
             let preset = match store.lock().unwrap().presets.get(preset_idx) {
                 Some(p) => p.clone(),
@@ -633,12 +773,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // True while an export/render is running (pauses the preview timer, whose
         // seeks/commits would corrupt the render).
         let export_active = Rc::new(std::cell::Cell::new(false));
+        // The output path of the running export, so Cancel/failure can delete
+        // the partial file.
+        let export_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
 
         // Open media via the file dialog → the same import queue as drag-and-drop.
         {
             let ui_weak = ui_weak.clone();
             let import_tx = import_tx.clone();
             let import_total = import_total.clone();
+            let import_cancel = import_cancel.clone();
+            let import_seen = import_seen.clone();
             ui.on_video_open(move || {
                 let Some(paths) = rfd::FileDialog::new()
                     .add_filter(
@@ -652,13 +797,47 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
+                import_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                let mut queued = 0;
                 for path in paths {
+                    if import_seen.borrow().contains(&path) {
+                        continue;
+                    }
+                    import_seen.borrow_mut().insert(path.clone());
                     let _ = import_tx.send(path);
                     import_total.set(import_total.get() + 1);
+                    queued += 1;
                 }
+                if queued > 0 {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_importing(true);
+                        ui.set_import_total(import_total.get() as i32);
+                    }
+                }
+            });
+        }
+
+        // Cancel an in-flight import: stop the modal and discard the queue. The
+        // worker keeps draining in the background (results ignored); a file whose
+        // discovery is mid-flight finishes that one call, then bows out.
+        {
+            let ui_weak = ui_weak.clone();
+            let import_cancel = import_cancel.clone();
+            let import_ready = import_ready.clone();
+            let import_total = import_total.clone();
+            let import_done = import_done.clone();
+            let import_seen = import_seen.clone();
+            let bin_paths = bin_paths.clone();
+            ui.on_import_cancel(move || {
+                import_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                import_ready.lock().unwrap().clear();
+                import_total.set(0);
+                import_done.set(0);
+                // Re-seed "seen" from what actually made it into the bin, so the
+                // discarded-but-not-added files can be imported again later.
+                *import_seen.borrow_mut() = bin_paths.borrow().iter().cloned().collect();
                 if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_importing(true);
-                    ui.set_import_total(import_total.get() as i32);
+                    ui.set_importing(false);
                 }
             });
         }
@@ -674,6 +853,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ready = import_ready.clone();
             let import_total = import_total.clone();
             let import_done = import_done.clone();
+            let import_seen = import_seen.clone();
+            // Names of files that failed discovery this import, for one summary.
+            let import_failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
@@ -681,9 +863,20 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 move || {
                     loop {
                         let next = ready.lock().unwrap().pop_front();
-                        let Some((path, thumb_frame)) = next else {
+                        let Some((path, thumb_frame, err)) = next else {
                             break;
                         };
+                        import_done.set(import_done.get() + 1);
+                        if let Some(_e) = err {
+                            // Unreadable/undiscoverable → don't add a dead bin entry.
+                            import_seen.borrow_mut().remove(&path);
+                            import_failures.borrow_mut().push(
+                                path.file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.display().to_string()),
+                            );
+                            continue;
+                        }
                         let thumb = frame_to_image(thumb_frame);
                         add_to_bin(&assets, &path, thumb.clone());
                         bin_paths.borrow_mut().push(path.clone());
@@ -692,7 +885,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         if tl_clips.row_count() == 0 {
                             add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
                         }
-                        import_done.set(import_done.get() + 1);
                     }
                     if let Some(ui) = ui_weak.upgrade() {
                         ui.set_import_done(import_done.get() as i32);
@@ -700,21 +892,23 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             ui.set_importing(false);
                             import_total.set(0);
                             import_done.set(0);
+                            let failures = std::mem::take(&mut *import_failures.borrow_mut());
+                            if !failures.is_empty() {
+                                show_error(
+                                    &ui,
+                                    "Some files could not be imported",
+                                    format!(
+                                        "{} file(s) couldn't be read as media:\n{}",
+                                        failures.len(),
+                                        failures.join("\n")
+                                    ),
+                                );
+                            }
                         }
                     }
                 },
             );
             std::mem::forget(timer);
-        }
-
-        // Media-bin asset click: highlight it.
-        {
-            let ui_weak = ui_weak.clone();
-            ui.on_video_select(move |i| {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_video_selected(i);
-                }
-            });
         }
 
         // Media-bin item "add": append that file to the timeline as a new clip.
@@ -1087,6 +1281,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let export_active = export_active.clone();
+            let export_path = export_path.clone();
             ui.on_video_export(move || {
                 if export_active.get() || project_slot.borrow().is_none() {
                     return;
@@ -1104,6 +1299,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     codec,
                     width: ui.get_export_w(),
                     height: ui.get_export_h(),
+                    fps: ui.get_export_fps().clamp(1, 240) as u32,
                     bitrate_kbps: ui.get_export_bitrate().max(0) as u32,
                 };
                 let Some(path) = rfd::FileDialog::new()
@@ -1116,18 +1312,45 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
-                let started = project_slot
+                let result = project_slot
                     .borrow()
                     .as_ref()
-                    .map(|p| p.begin_render(&path, settings).is_ok())
-                    .unwrap_or(false);
-                if started {
-                    export_active.set(true);
-                    ui.set_exporting(true);
-                    ui.set_export_progress(0.0);
-                    ui.set_export_status("Starting…".into());
-                } else {
-                    ui.set_export_status("Could not start export".into());
+                    .map(|p| p.begin_render(&path, settings));
+                match result {
+                    Some(Ok(())) => {
+                        *export_path.borrow_mut() = Some(path);
+                        export_active.set(true);
+                        ui.set_exporting(true);
+                        ui.set_export_progress(0.0);
+                        ui.set_export_status("Starting…".into());
+                    }
+                    Some(Err(e)) => {
+                        let _ = std::fs::remove_file(&path);
+                        show_error(&ui, "Export failed to start", e.to_string());
+                    }
+                    None => {}
+                }
+            });
+        }
+
+        // Cancel a running export: tear the render down gracefully and delete the
+        // partial file.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let export_active = export_active.clone();
+            let export_path = export_path.clone();
+            ui.on_export_cancel(move || {
+                if !export_active.get() {
+                    return;
+                }
+                let path = export_path.borrow_mut().take();
+                if let (Some(p), Some(path)) = (project_slot.borrow().as_ref(), path) {
+                    let _ = p.cancel_render(&path, true);
+                }
+                export_active.set(false);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_exporting(false);
                 }
             });
         }
@@ -1137,6 +1360,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let export_active = export_active.clone();
+            let export_path = export_path.clone();
+            // Watchdog: if progress hasn't advanced for this many ticks (200ms
+            // each → 20s), tell the user the render looks stuck (Cancel is right
+            // there). Some pipeline stalls never post EOS/Error.
+            let stall = Rc::new(std::cell::Cell::new((0.0f32, 0u32)));
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
@@ -1151,15 +1379,24 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     };
                     match p.render_status() {
                         kuvatin_video::RenderStatus::Rendering(f) => {
+                            let (last, ticks) = stall.get();
+                            let ticks = if (f - last).abs() < 0.0005 { ticks + 1 } else { 0 };
+                            stall.set((f, ticks));
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_export_progress(f);
-                                ui.set_export_status(format!("{:.0}%", f * 100.0).into());
+                                ui.set_export_status(if ticks >= 100 {
+                                    "Export appears stuck — you can cancel.".into()
+                                } else {
+                                    slint::format!("{:.0}%", f * 100.0)
+                                });
                             }
                         }
                         kuvatin_video::RenderStatus::Done => {
                             let _ = p.end_render();
                             drop(slot);
                             export_active.set(false);
+                            export_path.borrow_mut().take();
+                            stall.set((0.0, 0));
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_exporting(false);
                             }
@@ -1168,16 +1405,78 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             let _ = p.end_render();
                             drop(slot);
                             export_active.set(false);
-                            eprintln!("export failed: {e}");
+                            stall.set((0.0, 0));
+                            // Delete the truncated output and show the real reason.
+                            if let Some(path) = export_path.borrow_mut().take() {
+                                let _ = std::fs::remove_file(path);
+                            }
                             if let Some(ui) = ui_weak.upgrade() {
-                                ui.set_export_status("Export failed".into());
                                 ui.set_exporting(false);
+                                show_error(&ui, "Export failed", e);
                             }
                         }
                     }
                 },
             );
             std::mem::forget(timer);
+        }
+
+        // Delete a timeline clip: the × on the selected clip.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = video_tl.clone();
+            let sel_idx = sel_idx.clone();
+            ui.on_timeline_clip_removed(move |i| {
+                remove_timeline_clip(i, &ui_weak, &project_slot, &tl_clips, &sel_idx);
+            });
+        }
+        // Delete key → remove whatever clip is selected.
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            let tl_clips = video_tl.clone();
+            let sel_idx = sel_idx.clone();
+            ui.on_delete_selected_clip(move || {
+                remove_timeline_clip(sel_idx.get(), &ui_weak, &project_slot, &tl_clips, &sel_idx);
+            });
+        }
+        // Remove a media-bin entry (× on hover). Keeps bin_paths in lockstep and
+        // frees the path from "seen" so it can be re-imported later.
+        {
+            let video_assets = video_assets.clone();
+            let bin_paths = bin_paths.clone();
+            let import_seen = import_seen.clone();
+            ui.on_video_bin_removed(move |i| {
+                if i < 0 {
+                    return;
+                }
+                let i = i as usize;
+                if i < video_assets.row_count() {
+                    video_assets.remove(i);
+                }
+                let mut bp = bin_paths.borrow_mut();
+                if i < bp.len() {
+                    let removed = bp.remove(i);
+                    import_seen.borrow_mut().remove(&removed);
+                }
+            });
+        }
+        // Mode switch: pause the video project when leaving Videos mode so audio
+        // stops and the pipeline goes quiet (the playhead timer also gates on mode).
+        {
+            let ui_weak = ui_weak.clone();
+            let project_slot = project_slot.clone();
+            ui.on_video_mode_changed(move |mode| {
+                if mode != 1 {
+                    if let Some(p) = project_slot.borrow().as_ref() {
+                        let _ = p.pause();
+                    }
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_video_playing(false);
+                    }
+                }
+            });
         }
 
         // Advance the playhead + scrubber + time, and apply coalesced edits.
@@ -1198,6 +1497,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     let Some(ui) = ui_weak.upgrade() else {
                         return;
                     };
+                    // Idle when not in Videos mode — nothing to preview.
+                    if ui.get_app_mode() != 1 {
+                        return;
+                    }
                     let mut slot = project_slot.borrow_mut();
                     let Some(project) = slot.as_mut() else {
                         return;
@@ -1208,6 +1511,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         project.set_clip_layout(&kuvatin_video::ClipId(id), l);
                     }
                     project.refresh_preview();
+                    // Surface a dead preview pipeline instead of freezing silently.
+                    if let Some(err) = project.poll_preview_error() {
+                        let _ = project.pause();
+                        ui.set_video_playing(false);
+                        show_error(&ui, "Playback error", err);
+                        return;
+                    }
                     let pos = project.position().unwrap_or_default();
                     let dur = project.duration().unwrap_or_default();
                     // Loop at the end when repeat is on.
@@ -1292,20 +1602,52 @@ fn png_mode_to_idx(mode: PngOptimize) -> i32 {
     }
 }
 
-fn rows_from(paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) -> Vec<FileRow> {
+/// A decoded thumbnail, kept as raw RGBA so it is `Send` (a `slint::Image` is
+/// not) and can live in the shared cache. Rebuilt into an `Image` on the UI
+/// thread when a row is (re)created.
+#[derive(Clone)]
+struct ThumbData {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+    dims: String,
+}
+
+/// Path-keyed cache of decoded thumbnails. Populated once per file by the
+/// thumbnail worker; read when rebuilding rows so an add no longer re-decodes
+/// every file already in the list (and existing thumbnails survive the rebuild).
+type ThumbCache = Arc<Mutex<HashMap<PathBuf, ThumbData>>>;
+
+fn rows_from(
+    paths: &[PathBuf],
+    crops: &HashMap<PathBuf, (u32, u32, u32, u32)>,
+    thumbs: &ThumbCache,
+) -> Vec<FileRow> {
+    let cache = thumbs.lock().unwrap();
     paths
         .iter()
-        .map(|p| FileRow {
-            name: p
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-                .into(),
-            status: "queued".into(),
-            thumb: Default::default(),
-            dims: "".into(),
-            cropped: crops.contains_key(p),
+        .map(|p| {
+            let (thumb, dims) = match cache.get(p) {
+                Some(d) => (
+                    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                        &d.rgba, d.w, d.h,
+                    )),
+                    d.dims.clone().into(),
+                ),
+                None => (Image::default(), SharedString::new()),
+            };
+            FileRow {
+                name: p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+                status: "queued".into(),
+                thumb,
+                dims,
+                cropped: crops.contains_key(p),
+            }
         })
         .collect()
 }
@@ -1319,6 +1661,7 @@ fn rows_from(paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) 
 fn spawn_thumbnails(
     ui_weak: slint::Weak<AppWindow>,
     files: Arc<Mutex<Vec<PathBuf>>>,
+    thumbs: ThumbCache,
     paths: Vec<PathBuf>,
 ) {
     std::thread::spawn(move || {
@@ -1329,11 +1672,15 @@ fn spawn_thumbnails(
             let (ow, oh) = (img.width(), img.height());
             let thumb = img.thumbnail(40, 40).to_rgba8();
             let (tw, th) = (thumb.width(), thumb.height());
-            // `SharedPixelBuffer` is `Send`; `slint::Image` is not, so we ship the
-            // buffer across the event-loop boundary and build the `Image` on the
-            // UI thread.
-            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(thumb.as_raw(), tw, th);
-            let dims: SharedString = format!("{ow}×{oh}").into();
+            let data = ThumbData {
+                rgba: thumb.into_raw(),
+                w: tw,
+                h: th,
+                dims: format!("{ow}×{oh}"),
+            };
+            // Cache first (raw RGBA is `Send`), so a later row rebuild can restore
+            // this thumbnail without re-decoding.
+            thumbs.lock().unwrap().insert(path.clone(), data.clone());
 
             let ui_weak = ui_weak.clone();
             let files = files.clone();
@@ -1345,8 +1692,13 @@ fn spawn_thumbnails(
                     if let Some(i) = idx {
                         let model = ui.get_files();
                         if let Some(mut row) = model.row_data(i) {
+                            // `slint::Image` is not `Send`, so build it here on the
+                            // UI thread from the cached raw pixels.
+                            let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                &data.rgba, data.w, data.h,
+                            );
                             row.thumb = Image::from_rgba8(buf);
-                            row.dims = dims;
+                            row.dims = data.dims.clone().into();
                             model.set_row_data(i, row);
                         }
                     }
@@ -1380,8 +1732,13 @@ fn format_combo_to_format(s: &str) -> OutputFormat {
     }
 }
 
-fn refresh(rows: &Rc<VecModel<FileRow>>, paths: &[PathBuf], crops: &HashMap<PathBuf, (u32, u32, u32, u32)>) {
-    let new = rows_from(paths, crops);
+fn refresh(
+    rows: &Rc<VecModel<FileRow>>,
+    paths: &[PathBuf],
+    crops: &HashMap<PathBuf, (u32, u32, u32, u32)>,
+    thumbs: &ThumbCache,
+) {
+    let new = rows_from(paths, crops, thumbs);
     while rows.row_count() > 0 {
         rows.remove(0);
     }
@@ -1399,6 +1756,7 @@ fn add_paths(
     files: &Arc<Mutex<Vec<PathBuf>>>,
     rows: &Rc<VecModel<FileRow>>,
     crops: &Arc<Mutex<HashMap<PathBuf, (u32, u32, u32, u32)>>>,
+    thumbs: &ThumbCache,
     ui_weak: &slint::Weak<AppWindow>,
 ) {
     let mut guard = files.lock().unwrap();
@@ -1406,9 +1764,18 @@ fn add_paths(
     guard.sort();
     guard.dedup();
     let crops_guard = crops.lock().unwrap();
-    refresh(rows, &guard, &crops_guard);
+    refresh(rows, &guard, &crops_guard, thumbs);
     drop(crops_guard);
-    spawn_thumbnails(ui_weak.clone(), files.clone(), guard.clone());
+    // Decode only files we don't already have a thumbnail for — an add no longer
+    // re-decodes the whole list, and cached rows kept their thumbnail above.
+    let missing: Vec<PathBuf> = {
+        let cache = thumbs.lock().unwrap();
+        guard.iter().filter(|p| !cache.contains_key(*p)).cloned().collect()
+    };
+    drop(guard);
+    if !missing.is_empty() {
+        spawn_thumbnails(ui_weak.clone(), files.clone(), thumbs.clone(), missing);
+    }
 }
 
 /// Native Windows Explorer drag-and-drop support via `WM_DROPFILES`.
@@ -1431,11 +1798,10 @@ mod win_drop {
         DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
     };
     use windows::Win32::System::Ole::RevokeDragDrop;
-    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, SendMessageW, ShowWindow, HTBOTTOM,
+        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, ShowWindow, HTBOTTOM,
         HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-        HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES, WM_NCLBUTTONDOWN,
+        HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES,
     };
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -1462,24 +1828,6 @@ mod win_drop {
         HWND_RAW
             .get()
             .map(|raw| HWND(*raw as *mut std::ffi::c_void))
-    }
-
-    /// Begin the native window move loop. Wired to the title-bar drag region:
-    /// release the implicit mouse capture, then tell Windows the user grabbed the
-    /// "caption" so it runs its own move loop (including edge snapping).
-    pub fn drag() {
-        if let Some(hwnd) = hwnd() {
-            // SAFETY: hwnd is valid and we run on the UI thread that owns it.
-            unsafe {
-                let _ = ReleaseCapture();
-                SendMessageW(
-                    hwnd,
-                    WM_NCLBUTTONDOWN,
-                    WPARAM(HTCAPTION as usize),
-                    LPARAM(0),
-                );
-            }
-        }
     }
 
     /// Minimize the window.

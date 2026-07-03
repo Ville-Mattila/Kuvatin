@@ -28,15 +28,11 @@ fn configure_bundled_gstreamer() {
         // Don't also scan a differently-versioned system GStreamer.
         std::env::set_var("GST_PLUGIN_SYSTEM_PATH", "");
     }
-    // Export encoder ranks (must be set before any gst init): prefer hardware NVENC
-    // H.264, software x264 fallback, and derank the Media Foundation AAC encoder
-    // (mfaacenc) which otherwise breaks NVENC session init. See ensure_encoder_ranks().
-    if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
-        std::env::set_var(
-            "GST_PLUGIN_FEATURE_RANK",
-            "nvautogpuh264enc:512,x264enc:256,mfaacenc:0",
-        );
-    }
+    // Export encoder ranks (NVENC first, x264 fallback, mfaacenc disabled) are
+    // applied programmatically right after every gst::init() — see
+    // kuvatin-video's ensure_encoder_ranks(). The old GST_PLUGIN_FEATURE_RANK
+    // env-var approach silently deactivated whenever the user's environment
+    // already set that variable.
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,9 +41,33 @@ fn main() -> anyhow::Result<()> {
         Mode::Register => shell::register()?,
         Mode::Unregister => shell::unregister()?,
         Mode::QuickRun { preset, paths } => {
-            let failures = quickrun::run(&preset, &paths)?;
-            if failures > 0 {
-                std::process::exit(1);
+            match quickrun::run(&preset, &paths) {
+                Ok(report) if report.failure_count() > 0 => {
+                    let mut msg = format!(
+                        "{} of {} file(s) could not be processed:\n\n",
+                        report.failure_count(),
+                        report.total
+                    );
+                    for (path, err) in report.failures.iter().take(10) {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        msg.push_str(&format!("\u{2022} {name}: {err}\n"));
+                    }
+                    if report.failures.len() > 10 {
+                        msg.push_str(&format!("\u{2026}and {} more.\n", report.failures.len() - 10));
+                    }
+                    shell::notify_error("Kuvatin \u{2014} some files failed", &msg);
+                    std::process::exit(1);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    // Windowed release build has no stderr, so the returned Err
+                    // would be silent — surface it before propagating.
+                    shell::notify_error("Kuvatin \u{2014} quick run failed", &e.to_string());
+                    return Err(e);
+                }
             }
         }
         Mode::Gui { paths } => gui::run(paths)?,

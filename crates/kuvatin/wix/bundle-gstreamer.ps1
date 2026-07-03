@@ -43,6 +43,10 @@ Write-Host "Staged $dllCount DLLs ($mb MB)"
 # Harvest into a ComponentGroup rooted at the exe's Bin directory. -srd drops the
 # staging root so contents land directly in Bin; -var lets candle resolve the
 # source path at build time.
+# NOTE: -gg generates FRESH component GUIDs on every build. That is ONLY safe
+# because main.wxs uses MajorUpgrade Schedule='afterInstallInitialize' (full
+# uninstall of the old product before the new one installs). If that schedule
+# ever changes, switch to stable GUIDs here or upgrades will orphan files.
 Write-Host "Harvesting -> $OutWxs"
 & $HeatExe dir $StageDir `
     -nologo -gg -srd -sreg -scom `

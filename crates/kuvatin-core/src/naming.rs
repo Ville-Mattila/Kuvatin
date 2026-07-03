@@ -28,12 +28,23 @@ impl Default for OutputPolicy {
     }
 }
 
+/// Strip characters that are path separators or invalid in Windows file names.
+/// The suffix comes from user settings / presets.toml and is interpolated
+/// straight into file and folder names — `..\` or `x/y` in it would otherwise
+/// write outside the intended directory.
+fn sanitize_component(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect()
+}
+
 /// Folder name derived from a suffix: leading/trailing separators and spaces are
 /// trimmed (so `-kuvatin` becomes `kuvatin`); falls back to `output` if empty.
 pub fn subfolder_name(suffix: &str) -> String {
-    let trimmed = suffix
+    let sanitized = sanitize_component(suffix);
+    let trimmed = sanitized
         .trim()
-        .trim_matches(|c| c == '-' || c == '_' || c == ' ');
+        .trim_matches(|c| c == '-' || c == '_' || c == ' ' || c == '.');
     if trimmed.is_empty() {
         "output".to_string()
     } else {
@@ -43,7 +54,7 @@ pub fn subfolder_name(suffix: &str) -> String {
 
 /// The output file name for a given stem: `<stem><suffix>.<ext>`.
 pub fn output_file_name(stem: &str, suffix: &str, format: OutputFormat) -> String {
-    format!("{stem}{suffix}.{}", format.extension())
+    format!("{stem}{}.{}", sanitize_component(suffix), format.extension())
 }
 
 /// Expand the policy into a final path next to `input` (or in a suffix-named

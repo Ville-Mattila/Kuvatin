@@ -42,9 +42,9 @@ pub struct ClipGeom {
 /// the UI thread; a subsequent `add_clip`/`append_clip` then hits the warm cache
 /// and returns immediately instead of blocking the UI on discovery.
 pub fn warm_asset(path: &Path) -> Result<()> {
-    ensure_encoder_ranks();
     gst::init()?;
     ges::init()?;
+    ensure_encoder_ranks();
     let uri = gst::glib::filename_to_uri(path, None)?;
     let _ = ges::UriClipAsset::request_sync(&uri)?;
     Ok(())
@@ -65,17 +65,29 @@ fn find_by_factory(bin: &gst::Bin, factory: &str) -> Option<gst::Element> {
     None
 }
 
-/// Extract an RGBA `Frame` from a GStreamer sample.
+/// Extract an RGBA `Frame` from a GStreamer sample, honoring the plane stride.
+/// Buffers from GPU-download paths carry padded rows (VideoMeta); a raw
+/// `map.as_slice()` copy of those yields a sheared/oversized frame.
 fn sample_to_frame(sample: &gst::Sample) -> Option<Frame> {
+    use gstreamer_video::VideoFrameExt;
     let caps = sample.caps()?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
-    let buffer = sample.buffer()?;
-    let map = buffer.map_readable().ok()?;
-    Some(Frame {
-        width: info.width(),
-        height: info.height(),
-        rgba: map.as_slice().to_vec(),
-    })
+    let buffer = sample.buffer_owned()?;
+    let vframe = gstreamer_video::VideoFrame::from_buffer_readable(buffer, &info).ok()?;
+    let (width, height) = (info.width(), info.height());
+    let stride = vframe.plane_stride()[0] as usize;
+    let data = vframe.plane_data(0).ok()?;
+    let row_bytes = width as usize * 4;
+    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
+    if stride == row_bytes {
+        rgba.extend_from_slice(&data[..row_bytes * height as usize]);
+    } else {
+        for row in 0..height as usize {
+            let start = row * stride;
+            rgba.extend_from_slice(&data[start..start + row_bytes]);
+        }
+    }
+    Some(Frame { width, height, rgba })
 }
 
 /// Push one RGBA video sample to the frame callback.
@@ -92,8 +104,8 @@ fn emit_sample(
 /// natural aspect) for a media file. Safe to call off the UI thread; None on
 /// failure. Seeks a little in to skip black intro frames.
 pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
-    ensure_encoder_ranks();
     gst::init().ok()?;
+    ensure_encoder_ranks();
     let uri = gst::glib::filename_to_uri(path, None).ok()?;
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("uridecodebin")
@@ -133,6 +145,8 @@ pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
         }
     });
     if pipeline.set_state(gst::State::Paused).is_err() {
+        // Partially-started elements/threads would outlive the call otherwise.
+        let _ = pipeline.set_state(gst::State::Null);
         return None;
     }
     if pipeline.state(gst::ClockTime::from_seconds(5)).0.is_err() {
@@ -152,6 +166,33 @@ pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
     let frame = sink.pull_preroll().ok().and_then(|s| sample_to_frame(&s));
     let _ = pipeline.set_state(gst::State::Null);
     frame
+}
+
+/// Clips may never be shorter than this (0.2 s) via edge-trimming.
+const MIN_TRIM_NS: i128 = 200_000_000;
+
+/// Left-edge trim math: the clip's END stays fixed; start and inpoint move by
+/// the (clamped) delta and the duration shrinks/grows to match. All results are
+/// guaranteed non-negative — the previous version applied the min-duration
+/// override AFTER the >=0 clamps, so a clip already shorter than the minimum
+/// could push inpoint/start negative and wrap through the u64 cast into a
+/// ~10^5-hour ClockTime. Precedence here: never-negative beats min-duration.
+fn trim_left_math(start: i128, inpoint: i128, dur: i128, delta: i128) -> (i128, i128, i128) {
+    let mut d = delta;
+    d = d.min(dur - MIN_TRIM_NS); // keep at least the minimum (may go negative)
+    d = d.max(-inpoint).max(-start); // never trim before the source/timeline origin
+    ((start + d).max(0), (inpoint + d).max(0), (dur - d).max(0))
+}
+
+/// Right-edge trim math: only the duration changes. Clamped to the minimum,
+/// then capped by the source's max-duration (which wins over the minimum when
+/// the two conflict, e.g. `inpoint` near the end of the media), floored at 0.
+fn trim_right_math(inpoint: i128, dur: i128, delta: i128, max_ns: Option<i128>) -> i128 {
+    let mut nd = (dur + delta).max(MIN_TRIM_NS);
+    if let Some(m) = max_ns {
+        nd = nd.min(m - inpoint);
+    }
+    nd.max(0)
 }
 
 /// Read a GES clip's current timeline geometry.
@@ -180,13 +221,17 @@ pub enum VideoCodec {
     Vp8,
 }
 
-/// Export/render settings: codec (→ container), output resolution, and target
-/// video bitrate in kbit/s. A `bitrate_kbps` of 0 means "let the encoder decide".
+/// Export/render settings: codec (→ container), output resolution, frame rate,
+/// and target video bitrate in kbit/s. A `bitrate_kbps` of 0 means "let the
+/// encoder decide".
 #[derive(Clone, Copy, Debug)]
 pub struct ExportSettings {
     pub codec: VideoCodec,
     pub width: i32,
     pub height: i32,
+    /// Output frames per second. The encoding profile pins the framerate (see
+    /// `encoding_profile`), so this decides the constant output rate.
+    pub fps: u32,
     pub bitrate_kbps: u32,
 }
 
@@ -198,29 +243,39 @@ pub enum RenderStatus {
     Failed(String),
 }
 
-/// Encoder ranks for export (must be set before the first gst init — read once at
-/// registry load — hence it runs at every gst-init path).
+/// Encoder ranks for export, applied programmatically to the registry right
+/// after `gst::init()` (call at every init site, before any pipeline exists):
 ///
-/// - `nvautogpuh264enc:512` — prefer hardware NVENC H.264 (fast). On non-NVIDIA
-///   machines the factory isn't registered, so encodebin falls back to x264enc.
-/// - `x264enc:256` — software H.264 fallback.
-/// - `mfaacenc:0` — **critical**: derank the Media Foundation AAC encoder. It ties
-///   `voaacenc` at rank 128, and when encodebin picks it for the MP4 audio track it
-///   spins up a D3D11 device that corrupts the GPU state, making NVENC's
-///   `NvEncOpenEncodeSessionEx` fail `NV_ENC_ERR_INVALID_VERSION` ("Could not encode
-///   stream" → 0-byte file). Forcing the software `voaacenc` makes hardware H.264
-///   export reliable, even after the live preview has used the GPU.
+/// - `nvautogpuh264enc` → 512 — prefer hardware NVENC H.264 (fast). On
+///   non-NVIDIA machines the factory doesn't exist, so encodebin falls back.
+/// - `x264enc` → 256 — software H.264 fallback.
+/// - `mfaacenc` → NONE — **critical**: the Media Foundation AAC encoder ties
+///   `voaacenc` at rank 128, and when encodebin picks it for the MP4 audio
+///   track it spins up a D3D11 device that corrupts the GPU state, making
+///   NVENC's `NvEncOpenEncodeSessionEx` fail `NV_ENC_ERR_INVALID_VERSION`
+///   ("Could not encode stream" → 0-byte file). Forcing software `voaacenc`
+///   makes hardware H.264 export reliable, even after the preview used the GPU.
+///
+/// Registry API instead of the GST_PLUGIN_FEATURE_RANK env var: the env-var
+/// approach silently deactivated whenever the user's environment already set
+/// that variable (re-breaking export with zero diagnostics), and writing env
+/// vars from worker threads is a thread-safety hazard. Setting ranks on the
+/// registry features directly merges with any user configuration — an explicit
+/// env override still wins because the registry parses it at init, after which
+/// we only *adjust* the specific features below. Idempotent; cheap after the
+/// first call.
 pub(crate) fn ensure_encoder_ranks() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("GST_PLUGIN_FEATURE_RANK").is_none() {
-            std::env::set_var(
-                "GST_PLUGIN_FEATURE_RANK",
-                "nvautogpuh264enc:512,x264enc:256,mfaacenc:0",
-            );
+    use gst::prelude::PluginFeatureExtManual;
+    let registry = gst::Registry::get();
+    for (name, rank) in [
+        ("nvautogpuh264enc", gst::Rank::from(512)),
+        ("x264enc", gst::Rank::from(256)),
+        ("mfaacenc", gst::Rank::NONE),
+    ] {
+        if let Some(feature) = registry.lookup_feature(name) {
+            feature.set_rank(rank);
         }
-    });
+    }
 }
 
 /// The GES encoding profile for export settings: container + video + audio caps,
@@ -268,7 +323,7 @@ fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile 
         .field("format", pixfmt)
         .field("width", s.width.max(2))
         .field("height", s.height.max(2))
-        .field("framerate", gst::Fraction::new(30, 1))
+        .field("framerate", gst::Fraction::new(s.fps.clamp(1, 240) as i32, 1))
         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .build();
     let mut vb = gst_pbutils::EncodingVideoProfile::builder(&video_caps).restriction(&restriction);
@@ -354,9 +409,9 @@ impl Project {
     /// Build an empty project whose preview pushes RGBA frames to `on_frame`
     /// (called from a GStreamer thread — the GUI must hop to the UI thread).
     pub fn new(on_frame: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
-        ensure_encoder_ranks();
         gst::init()?;
         ges::init()?;
+        ensure_encoder_ranks();
 
         let timeline = ges::Timeline::new_audio_video();
         let layer = timeline.append_layer();
@@ -472,7 +527,13 @@ impl Project {
         // Async commit (see append_clip): commit_sync() can deadlock during an
         // async pipeline state-change, so never block on the commit here.
         self.timeline.commit();
-        let name = clip.name().map(|s| s.to_string()).unwrap_or_default();
+        // GES auto-names clips; a missing name would silently collide on the
+        // "" key and orphan the previous clip — treat it as the error it is.
+        let name = clip
+            .name()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
         self.clips.insert(name.clone(), clip.clone().upcast());
         Ok(ClipId(name))
     }
@@ -504,7 +565,11 @@ impl Project {
         // pipeline is mid async state-change (e.g. a second clip added right
         // after play()), because the commit ack can't arrive until preroll ends.
         self.timeline.commit();
-        let name = clip.name().map(|s| s.to_string()).unwrap_or_default();
+        let name = clip
+            .name()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
         self.clips.insert(name.clone(), clip.clone());
         Ok(ClipInfo {
             id: ClipId(name),
@@ -541,27 +606,16 @@ impl Project {
         let max_ns = clip
             .property::<Option<gst::ClockTime>>("max-duration")
             .map(|m| m.nseconds() as i128);
-        let min_dur = 200_000_000i128; // 0.2 s
         let delta = (delta_secs * 1e9) as i128;
 
         if edge < 0 {
-            // Left edge: end (start + duration) stays fixed; inpoint moves with start.
-            let mut d = delta;
-            if inpoint + d < 0 {
-                d = -inpoint;
-            }
-            if start + d < 0 {
-                d = -start;
-            }
-            if dur - d < min_dur {
-                d = dur - min_dur;
-            }
-            let new_start = gst::ClockTime::from_nseconds((start + d) as u64);
-            let new_inp = gst::ClockTime::from_nseconds((inpoint + d) as u64);
-            let new_dur = gst::ClockTime::from_nseconds((dur - d) as u64);
+            let (ns, ni, nd) = trim_left_math(start, inpoint, dur, delta);
+            let new_start = gst::ClockTime::from_nseconds(ns as u64);
+            let new_inp = gst::ClockTime::from_nseconds(ni as u64);
+            let new_dur = gst::ClockTime::from_nseconds(nd as u64);
             // Apply the shrinking property first so inpoint + duration never
             // transiently exceeds max-duration (which GES would clamp).
-            if d >= 0 {
+            if nd <= dur {
                 clip.set_duration(new_dur);
                 clip.set_inpoint(new_inp);
             } else {
@@ -570,17 +624,8 @@ impl Project {
             }
             clip.set_start(new_start);
         } else {
-            // Right edge: only the duration changes.
-            let mut new_dur = dur + delta;
-            if new_dur < min_dur {
-                new_dur = min_dur;
-            }
-            if let Some(m) = max_ns {
-                if inpoint + new_dur > m {
-                    new_dur = m - inpoint;
-                }
-            }
-            clip.set_duration(gst::ClockTime::from_nseconds(new_dur as u64));
+            let nd = trim_right_math(inpoint, dur, delta, max_ns);
+            clip.set_duration(gst::ClockTime::from_nseconds(nd as u64));
         }
         self.timeline.commit();
         self.dirty.set(true);
@@ -606,6 +651,31 @@ impl Project {
     /// The clip's current track index (its layer's priority, 0 = top).
     pub fn clip_track(&self, id: &ClipId) -> Option<usize> {
         self.clips.get(&id.0)?.layer().map(|l| l.priority() as usize)
+    }
+
+    /// Remove a clip from the timeline entirely. Returns whether it existed.
+    /// Empty TRAILING layers are pruned (never populated or middle ones, so
+    /// remaining track indices stay stable); at least one layer always remains.
+    pub fn remove_clip(&mut self, id: &ClipId) -> bool {
+        let Some(clip) = self.clips.remove(&id.0) else {
+            return false;
+        };
+        if let Some(layer) = clip.layer() {
+            let _ = layer.remove_clip(&clip);
+        }
+        // Prune empty trailing layers so "drag down for a new track" mistakes
+        // don't accumulate dead rows forever.
+        while self.layers.len() > 1 {
+            let last = self.layers.last().unwrap();
+            if !last.clips().is_empty() {
+                break;
+            }
+            let last = self.layers.pop().unwrap();
+            let _ = self.timeline.remove_layer(&last);
+        }
+        self.timeline.commit();
+        self.dirty.set(true);
+        true
     }
 
     /// Reorder tracks: move the track at `from` to position `to` (0 = top).
@@ -640,8 +710,11 @@ impl Project {
             None => (self.canvas_w as f64, self.canvas_h as f64),
         };
         let width = geti("width", 0);
+        // No upper clamp: set_clip_layout accepts scale > 1.0 (zoom-in), so the
+        // read-back must round-trip it — a 1.0 ceiling here silently snapped
+        // zoomed clips back to 100% whenever the inspector refreshed.
         let scale = if width > 0 && fit_w > 0.0 {
-            (width as f64 / fit_w).clamp(0.0, 1.0)
+            (width as f64 / fit_w).max(0.0)
         } else {
             1.0
         };
@@ -746,9 +819,22 @@ impl Project {
         Ok(())
     }
 
+    /// Fast seek (snaps to the nearest keyframe). Use DURING a scrub drag,
+    /// where responsiveness beats precision; land with [`Self::seek_accurate`].
     pub fn seek(&self, pos: Duration) -> Result<()> {
         self.pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
+        )?;
+        Ok(())
+    }
+
+    /// Frame-accurate seek — the displayed frame matches the requested time
+    /// exactly (decodes from the previous keyframe). Use when a scrub drag
+    /// ends, so the playhead and the picture agree.
+    pub fn seek_accurate(&self, pos: Duration) -> Result<()> {
+        self.pipeline.seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
         )?;
         Ok(())
@@ -772,10 +858,31 @@ impl Project {
             return;
         }
         let pos = self.position().unwrap_or(Duration::ZERO);
+        // ACCURATE: this repaints the paused frame after an edit — snapping to
+        // the nearest keyframe (KEY_UNIT) showed a frame that could be seconds
+        // away from the displayed playhead time on long-GOP media.
         let _ = self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
         );
+    }
+
+    /// Non-blocking check for a preview-pipeline ERROR (decoder death, missing
+    /// plugin, sink failure). Drive from the UI timer: the preview otherwise
+    /// just freezes silently — bus messages queue unread outside render mode.
+    /// Returns a displayable message once per error.
+    pub fn poll_preview_error(&self) -> Option<String> {
+        let bus = self.pipeline.bus()?;
+        while let Some(msg) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            if let gst::MessageView::Error(err) = msg.view() {
+                return Some(format!(
+                    "{} [{}]",
+                    err.error(),
+                    err.src().map(|s| s.name().to_string()).unwrap_or_default()
+                ));
+            }
+        }
+        None
     }
 
     pub fn position(&self) -> Option<Duration> {
@@ -791,6 +898,10 @@ impl Project {
 
     /// Start rendering the whole timeline to `path`. Switches the pipeline into
     /// render mode, so the live preview is unavailable until `end_render`.
+    ///
+    /// On ANY failure the preview is restored before returning — the sink is
+    /// detached before the fallible steps, and leaving it detached used to kill
+    /// the preview (black screen) for the rest of the session.
     pub fn begin_render(&self, path: &Path, settings: ExportSettings) -> Result<()> {
         // Fully tear the preview down and WAIT for NULL before switching to render
         // mode. Coming straight from a playing preview, the GPU/CUDA context is not
@@ -802,12 +913,39 @@ impl Project {
         // Drop the custom preview sink so render mode can route to encodebin.
         self.pipeline
             .preview_set_video_sink(None::<&gst::Element>);
-        let uri = gst::glib::filename_to_uri(path, None)?;
-        let profile = encoding_profile(settings);
-        self.pipeline.set_render_settings(uri.as_str(), &profile)?;
-        self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
-        self.pipeline.set_state(gst::State::Playing)?;
-        Ok(())
+        let attempt = (|| -> Result<()> {
+            let uri = gst::glib::filename_to_uri(path, None)?;
+            let profile = encoding_profile(settings);
+            self.pipeline.set_render_settings(uri.as_str(), &profile)?;
+            self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
+            self.pipeline.set_state(gst::State::Playing)?;
+            Ok(())
+        })();
+        if attempt.is_err() {
+            let _ = self.end_render();
+        }
+        attempt
+    }
+
+    /// Abort a running render as gracefully as possible: send EOS so the muxer
+    /// can finalize (a hard Null teardown leaves an unplayable file with no
+    /// moov atom), wait briefly, then restore the preview. Deletes the partial
+    /// output when `delete_partial` is set. Also correct to call on a FAILED
+    /// render for cleanup.
+    pub fn cancel_render(&self, output: &Path, delete_partial: bool) -> Result<()> {
+        let _ = self.pipeline.send_event(gst::event::Eos::new());
+        if let Some(bus) = self.pipeline.bus() {
+            // Give the muxer up to 2 s to flush and post EOS.
+            let _ = bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(2),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+        }
+        let restore = self.end_render();
+        if delete_partial {
+            let _ = std::fs::remove_file(output);
+        }
+        restore
     }
 
     /// Poll render progress — drive this from a UI timer. Consumes EOS/ERROR bus
@@ -862,6 +1000,66 @@ impl Drop for Project {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Pure trim math: no input may produce a negative (u64-wrapping) value.
+    /// These are the exact wraps the audit found reachable via short clips.
+    #[test]
+    fn trim_math_never_goes_negative() {
+        let s = 1_000_000_000i128; // 1 s in ns
+
+        // Left edge, clip already SHORTER than the 0.2 s minimum at the origin:
+        // the min-duration override used to push inpoint/start negative.
+        let (ns, ni, nd) = trim_left_math(0, 0, 100_000_000, 50_000_000);
+        assert!(ns >= 0 && ni >= 0 && nd >= 0, "wrapped: {ns} {ni} {nd}");
+
+        // Left edge, ordinary trim: end stays fixed.
+        let (ns, ni, nd) = trim_left_math(2 * s, s, 5 * s, s);
+        assert_eq!((ns, ni, nd), (3 * s, 2 * s, 4 * s));
+        assert_eq!(ns + nd, 2 * s + 5 * s, "right end moved");
+
+        // Left edge can't trim before the source origin.
+        let (ns, ni, nd) = trim_left_math(3 * s, s, 5 * s, -2 * s);
+        assert_eq!(ni, 0, "inpoint clamped to source start");
+        assert!(ns >= 0 && nd >= 0);
+
+        // Right edge: inpoint at/past max-duration used to underflow.
+        let nd = trim_right_math(10 * s, 5 * s, s, Some(8 * s));
+        assert!(nd >= 0, "wrapped: {nd}");
+
+        // Right edge respects the minimum when there's room.
+        let nd = trim_right_math(0, s, -10 * s, Some(100 * s));
+        assert_eq!(nd, MIN_TRIM_NS);
+    }
+
+    /// remove_clip deletes from GES + the map, prunes empty trailing layers,
+    /// and the remaining clips keep working. Self-skips without `GST_TEST_FILE`.
+    #[test]
+    fn removes_clips_and_prunes_trailing_layers() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping removes_clips_and_prunes_trailing_layers: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip(&path, 0, None).expect("a");
+        let b = project.append_clip(&path, 1, None).expect("b");
+        let c = project.append_clip(&path, 2, None).expect("c");
+        assert_eq!(project.track_count(), 3);
+
+        // Removing the middle clip must not shift the other tracks.
+        assert!(project.remove_clip(&b.id));
+        assert_eq!(project.track_count(), 3, "middle layer kept (not trailing)");
+        assert_eq!(project.clip_track(&c.id), Some(2));
+
+        // Removing the bottom clip prunes the now-empty trailing layers (2 and 1).
+        assert!(project.remove_clip(&c.id));
+        assert_eq!(project.track_count(), 1, "empty trailing layers pruned");
+        assert_eq!(project.clip_track(&a.id), Some(0));
+
+        // Unknown id is a no-op; the survivor still slides fine.
+        assert!(!project.remove_clip(&ClipId("nope".into())));
+        assert!(project.slide_clip(&a.id, 1.0).is_some());
+    }
 
     /// Adds a clip to a project and asserts the preview produces frames. Self-
     /// skips without `GST_TEST_FILE`; needs the GStreamer `bin` on PATH.
@@ -966,6 +1164,7 @@ mod tests {
                     codec: VideoCodec::Vp9,
                     width: 640,
                     height: 360,
+                    fps: 30,
                     bitrate_kbps: 1500,
                 },
             )
@@ -1015,6 +1214,7 @@ mod tests {
                     codec: VideoCodec::H264,
                     width: 1280,
                     height: 720,
+                    fps: 30,
                     bitrate_kbps: 8000,
                 },
             )
@@ -1082,6 +1282,7 @@ mod tests {
                     codec: VideoCodec::H264,
                     width: 1280,
                     height: 720,
+                    fps: 30,
                     bitrate_kbps: 8000,
                 },
             )
@@ -1151,9 +1352,9 @@ mod tests {
             return;
         };
         let path = std::path::PathBuf::from(path);
-        ensure_encoder_ranks();
         gst::init().unwrap();
         ges::init().unwrap();
+        ensure_encoder_ranks();
         let p2 = path.clone();
         let ok = std::thread::spawn(move || warm_asset(&p2).is_ok())
             .join()

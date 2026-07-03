@@ -97,21 +97,26 @@ component Card inherits Rectangle {
 // Secondary (card-colored) button used for Add/Clear.
 component SecondaryButton inherits Rectangle {
     in property <string> text;
+    in property <bool> enabled: true;
     callback clicked();
     height: 34px;
     min-width: 96px;
     border-radius: 8px;
     border-width: 1px;
     border-color: #2c313b;
-    background: ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c);
+    background: !root.enabled
+        ? #191d24
+        : (ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c));
     Text {
         text: root.text;
-        color: #f2f4f8;
+        color: root.enabled ? #f2f4f8 : #5b6472;
         font-size: 13px;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { root.clicked(); }
     }
 }
@@ -290,24 +295,29 @@ component NumberDropdown inherits Rectangle {
     in property <int> minimum: 0;
     in property <int> maximum: 100000;
     callback edited(int);           // fires with the new clamped value
-    property <bool> open: false;
     width: 66px; height: 24px; border-radius: 6px;
     background: #16181d; border-width: 1px; border-color: #343b46;
     HorizontalLayout {
         padding-left: 6px; padding-right: 6px;
         Text { text: root.label + " " + root.value; color: #e6e9ef; font-size: 10px; vertical-alignment: center; }
     }
-    ta := TouchArea { clicked => { root.open = !root.open; } }
-    if root.open : Rectangle {
-        y: parent.height + 3px; width: 92px; height: 30px;
-        background: #20242c; border-radius: 6px; border-width: 1px; border-color: #343b46;
-        LineEdit {
-            width: 84px; x: 4px; y: 3px;
-            text: root.value;
-            input-type: number;
-            accepted(t) => {
-                root.edited(Math.clamp(t.to-float(), root.minimum, root.maximum));
-                root.open = false;
+    ta := TouchArea { clicked => { popup.show(); } }
+    // A real PopupWindow renders in a top-level overlay, so the editor is never
+    // clipped or overdrawn by controls stacked below it in a dialog. It only
+    // dismisses on an *outside* click, so clicking into the field keeps it open.
+    popup := PopupWindow {
+        x: 0; y: root.height + 3px; width: 92px; height: 30px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: #20242c; border-radius: 6px; border-width: 1px; border-color: #343b46;
+            LineEdit {
+                width: 84px; x: 4px; y: 3px;
+                text: root.value;
+                input-type: number;
+                accepted(t) => {
+                    root.edited(Math.clamp(t.to-float(), root.minimum, root.maximum));
+                    popup.close();
+                }
             }
         }
     }
@@ -460,9 +470,7 @@ export component AppWindow inherits Window {
     in property <string> video-time: "0:00 / 0:00";
     in-out property <float> video-volume: 1.0;       // 0..1
     in property <[VideoAsset]> video-clips;
-    in-out property <int> video-selected: -1;
     callback video-open();
-    callback video-select(int);            // highlight a media-bin item
     callback video-add(int);               // add a media-bin item to the timeline
     callback video-playpause();
     callback video-seek(float);            // fraction 0..1
@@ -472,6 +480,10 @@ export component AppWindow inherits Window {
     // Timeline editor.
     in property <[TimelineClip]> timeline-clips;
     in property <[string]> timeline-track-labels;  // one per track, top row first
+    // Height of a single timeline track row. One source of truth: the band
+    // height, header rows, lane stripes, clip Y and every drag/reorder distance
+    // are all derived from this (change it here and the whole timeline follows).
+    property <length> track-h: 30px;
     in property <float> timeline-pps: 14.0;   // pixels per second (zoom)
     in-out property <length> tl-scroll: 0px;  // horizontal scroll offset of the lane
     in property <float> playhead: 0.0;        // seconds
@@ -498,6 +510,7 @@ export component AppWindow inherits Window {
     in-out property <int> export-codec: 0;          // 0=H.264/MP4, 1=VP9/WebM, 2=VP8/WebM
     in-out property <int> export-w: 1280;
     in-out property <int> export-h: 720;
+    in-out property <int> export-fps: 30;            // output frames per second
     in-out property <int> export-bitrate: 8000;     // target video bitrate, kbps
     // Timeline drag state (drives the "new track" drop indicator).
     in-out property <bool> clip-dragging: false;
@@ -511,11 +524,21 @@ export component AppWindow inherits Window {
     in property <float> export-progress: 0.0;   // 0..1
     in property <string> export-status: "";
     callback video-export();
+    callback export-cancel();                  // abort a running render
+    callback import-cancel();                  // abort an in-flight media import
+    // App-wide error surface (a modal that stays until dismissed). Set from Rust
+    // via the error-* properties; the OK button clears `error-visible`.
+    in-out property <bool> error-visible: false;
+    in property <string> error-title: "Something went wrong";
+    in property <string> error-detail: "";
+    callback video-mode-changed(int);          // 0 = Images, 1 = Videos
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
+    callback timeline-clip-removed(int);             // delete the clip at this index
+    callback video-bin-removed(int);                 // remove a media-bin entry
     callback track-reordered(int, int);              // drag a track header: from row → to row
     // Magnetic snapping: given the dragged clip and its proposed slide (seconds),
     // returns the slide adjusted so the nearest leading/trailing edge sticks to a
@@ -556,7 +579,6 @@ export component AppWindow inherits Window {
     callback win-minimize();
     callback win-maximize();
     callback win-close();
-    callback win-drag();
 
     callback add-files();
     callback clear-files();
@@ -570,6 +592,26 @@ export component AppWindow inherits Window {
     in-out property <int> selected-index: -1;
     in property <image> viewer-image;
     callback select-file(int);
+
+    // Keyboard shortcut targets (video mode): Space toggles play/pause, Delete
+    // removes the selected clip, Esc dismisses the topmost modal.
+    callback delete-selected-clip();
+    forward-focus: kbd;
+
+    // Global key handling. Empty + behind everything so it never eats clicks;
+    // it only receives keys when no text field (LineEdit) holds focus, so typing
+    // in the numeric fields is never hijacked.
+    kbd := FocusScope {
+        key-pressed(event) => {
+            if (root.error-visible && event.text == Key.Escape) { root.error-visible = false; return accept; }
+            if (root.export-config && event.text == Key.Escape) { root.export-config = false; return accept; }
+            if (root.app-mode == 1) {
+                if (event.text == " ") { root.video-playpause(); return accept; }
+                if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return accept; }
+            }
+            return reject;
+        }
+    }
 
     VerticalLayout {
         padding: 0px;
@@ -620,7 +662,7 @@ export component AppWindow inherits Window {
                 y: (parent.height - self.height) / 2;
                 labels: ["Images", "Videos"];
                 selected: root.app-mode;
-                select(i) => { root.app-mode = i; }
+                select(i) => { root.app-mode = i; root.video-mode-changed(i); }
             }
         }
 
@@ -770,10 +812,12 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         SecondaryButton {
                             text: "Add files…";
+                            enabled: !root.running;
                             clicked => { root.add-files(); }
                         }
                         SecondaryButton {
                             text: "Clear";
+                            enabled: !root.running;
                             clicked => { root.clear-files(); }
                         }
                         Rectangle { horizontal-stretch: 1; }
@@ -835,7 +879,13 @@ export component AppWindow inherits Window {
                                 width: 26px; border-radius: 6px;
                                 background: root.aspect-lock ? #2dd4bf : #16181d;
                                 border-width: 1px; border-color: #343b46;
-                                Text { text: "🔒"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                                // SVG (not an emoji glyph, which renders as tofu in
+                                // Slint) tinted to the active/idle state.
+                                Image {
+                                    source: @image-url("../assets/ic_lock.svg");
+                                    colorize: root.aspect-lock ? #08110f : #9aa3b2;
+                                    width: 13px; height: 13px;
+                                }
                                 TouchArea { clicked => { root.aspect-lock = !root.aspect-lock; } }
                             }
                         }
@@ -1217,7 +1267,8 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             if root.video-clips.length > 0 : ListView {
-                                // Click a bin item to add it to the timeline.
+                                // Click a bin item to add it to the timeline; the ×
+                                // (on hover) removes it from the bin.
                                 for asset[i] in root.video-clips : Rectangle {
                                     height: 33px; border-radius: 7px;
                                     background: asset-ta.has-hover ? #262b34 : transparent;
@@ -1234,6 +1285,14 @@ export component AppWindow inherits Window {
                                         Text {
                                             text: "+"; color: #2dd4bf; font-size: 18px; font-weight: 700;
                                             vertical-alignment: center; opacity: asset-ta.has-hover ? 1.0 : 0.0;
+                                        }
+                                        Rectangle {
+                                            width: 18px; height: 18px; y: (parent.height - self.height) / 2;
+                                            border-radius: 5px;
+                                            background: rm-ta.has-hover ? #ff547033 : transparent;
+                                            opacity: asset-ta.has-hover || rm-ta.has-hover ? 1.0 : 0.0;
+                                            Text { text: "✕"; color: rm-ta.has-hover ? #ff8098 : #7a828f; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                            rm-ta := TouchArea { clicked => { root.video-bin-removed(i); } }
                                         }
                                     }
                                 }
@@ -1432,7 +1491,7 @@ export component AppWindow inherits Window {
             Rectangle {
                 // Sized to the tracks + one "new track" drop row with breathing
                 // room below it (so a clip dragged onto the row stays fully visible).
-                height: Math.max(140px, root.timeline-track-labels.length * 30px + 82px);
+                height: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
                 background: #101319;
                 border-width: 1px; border-color: #2c313b;
                 VerticalLayout {
@@ -1470,7 +1529,7 @@ export component AppWindow inherits Window {
                             width: 94px;
                             // Drag a header up/down to reorder tracks.
                             for lbl[t] in root.timeline-track-labels : hdr := Rectangle {
-                                height: 30px;
+                                height: root.track-h;
                                 background: hta.pressed ? #20242c : #13161c;
                                 border-width: 1px; border-color: #181c23;
                                 property <length> ddy: 0px;
@@ -1485,10 +1544,13 @@ export component AppWindow inherits Window {
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
                                             if (Math.abs(hdr.ddy / 1px) > 15) {
-                                                root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / 30px), 0, root.timeline-track-labels.length - 1));
+                                                root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-track-labels.length - 1));
                                             }
                                             hdr.ddy = 0px;
                                         }
+                                        // Reset stale drag on cancel, else the next plain
+                                        // click could fire a spurious reorder.
+                                        if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
                                     }
                                 }
                             }
@@ -1518,7 +1580,7 @@ export component AppWindow inherits Window {
 
                             // row background stripes (fixed; span the visible lane)
                             VerticalLayout {
-                                for lbl[t] in root.timeline-track-labels : Rectangle { height: 30px; border-width: 1px; border-color: #181c23; }
+                                for lbl[t] in root.timeline-track-labels : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
                             }
 
                             // clip blocks. The wrapper `blk` keeps the clip's MODEL
@@ -1528,7 +1590,7 @@ export component AppWindow inherits Window {
                             for clip[i] in root.timeline-clips : blk := Rectangle {
                                 x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                 // track 0 = GES layer 0 = top (both on-screen and composited).
-                                y: clip.track * 30px + 4px;
+                                y: clip.track * root.track-h + 4px;
                                 width: (clip.duration * root.timeline-pps) * 1px;
                                 height: 22px;
                                 background: transparent;
@@ -1549,7 +1611,7 @@ export component AppWindow inherits Window {
                                     // (possibly compressed) bottom and vanish. The drop TARGET below
                                     // still uses the raw delta, so dropping past the last track adds one.
                                     y: blk.dmode == 1
-                                        ? Math.clamp(Math.round(blk.ddy / 30px) * 30px, -blk.y, lane.height - blk.height - blk.y - 2px)
+                                        ? Math.clamp(Math.round(blk.ddy / root.track-h) * root.track-h, -blk.y, lane.height - blk.height - blk.y - 2px)
                                         : 0px;
                                     // "Mass" + magnetic settle: ease toward the (snapped) target with a
                                     // slight overshoot instead of tracking the cursor 1:1. Instant when
@@ -1574,6 +1636,14 @@ export component AppWindow inherits Window {
                                     Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
                                     Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
                                     Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                    // Delete affordance on the selected clip (also Delete key).
+                                    if clip.selected : Rectangle {
+                                        x: parent.width - self.width - 3px; y: 3px;
+                                        width: 15px; height: 15px; border-radius: 5px;
+                                        background: del-ta.has-hover ? #ff5470 : #00000088;
+                                        Text { text: "✕"; color: white; font-size: 9px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                        del-ta := TouchArea { clicked => { root.timeline-clip-removed(i); } }
+                                    }
                                 }
 
                                 // body: slide (horizontal) + move to another track
@@ -1585,15 +1655,21 @@ export component AppWindow inherits Window {
                                         blk.ddx = self.mouse-x - self.pressed-x;
                                         blk.ddy = self.mouse-y - self.pressed-y;
                                         root.clip-dragging = true;
-                                        root.clip-drag-target-row = clip.track + Math.round(blk.ddy / 30px);
+                                        root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
                                     }
                                     pointer-event(ev) => {
                                         if (ev.kind == PointerEventKind.up) {
                                             if (blk.dmode == 1 && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
                                                 // Commit the SNAPPED slide so the clip lands exactly
                                                 // where it magnetically settled, not at the raw cursor.
-                                                root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / 30px));
+                                                root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / root.track-h));
                                             }
+                                            blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
+                                            root.clip-dragging = false;
+                                        }
+                                        // A cancelled grab (window deactivation, grab stolen)
+                                        // must reset too, or the drop banner stays stuck.
+                                        if (ev.kind == PointerEventKind.cancel) {
                                             blk.dmode = 0; blk.ddx = 0px; blk.ddy = 0px;
                                             root.clip-dragging = false;
                                         }
@@ -1613,6 +1689,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 blk.dmode = 0; blk.ddx = 0px;
                                             }
+                                            if (ev.kind == PointerEventKind.cancel) { blk.dmode = 0; blk.ddx = 0px; }
                                         }
                                     }
                                 }
@@ -1629,6 +1706,7 @@ export component AppWindow inherits Window {
                                                 }
                                                 blk.dmode = 0; blk.ddx = 0px;
                                             }
+                                            if (ev.kind == PointerEventKind.cancel) { blk.dmode = 0; blk.ddx = 0px; }
                                         }
                                     }
                                 }
@@ -1669,7 +1747,7 @@ export component AppWindow inherits Window {
                             // zone. Sits above the scrollbar with room to spare.
                             Rectangle {
                                 property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                y: root.timeline-track-labels.length * 30px + 4px;
+                                y: root.timeline-track-labels.length * root.track-h + 4px;
                                 x: 4px; width: parent.width - 8px; height: 26px;
                                 border-radius: 7px;
                                 background: root.clip-dragging ? (active ? #2dd4bfcc : #16342ee0) : #ffffff08;
@@ -1696,7 +1774,7 @@ export component AppWindow inherits Window {
     // so the banner doesn't need to sit directly under the cursor.
     if root.clip-dragging : Rectangle {
         property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-        property <length> band-h: Math.max(140px, root.timeline-track-labels.length * 30px + 82px);
+        property <length> band-h: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
         width: 330px; height: 46px;
         x: (parent.width - self.width) / 2;
         // Float in the lower viewer, clear of the transport controls and timeline.
@@ -1722,14 +1800,14 @@ export component AppWindow inherits Window {
         // Swallow clicks behind the modal.
         TouchArea {}
         Rectangle {
-            width: 320px; height: 128px;
+            width: 320px; height: 172px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1b1f27;
             border-radius: 12px;
             border-width: 1px; border-color: #2c313b;
             VerticalLayout {
-                padding: 22px; spacing: 16px;
+                padding: 22px; spacing: 14px;
                 Text {
                     text: "Importing files…";
                     color: #f2f4f8; font-size: 14px; font-weight: 700;
@@ -1748,6 +1826,16 @@ export component AppWindow inherits Window {
                     color: #9aa3b2; font-size: 11px;
                     horizontal-alignment: center;
                 }
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 92px; height: 30px; border-radius: 7px;
+                        background: imp-cancel-ta.has-hover ? #2b313c : #20242c;
+                        border-width: 1px; border-color: #343b46;
+                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        imp-cancel-ta := TouchArea { clicked => { root.import-cancel(); } }
+                    }
+                }
             }
         }
     }
@@ -1758,7 +1846,7 @@ export component AppWindow inherits Window {
         background: #000000b0;
         TouchArea {}   // swallow clicks on the dim backdrop
         Rectangle {
-            width: 440px; height: 430px;
+            width: 440px; height: 496px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1b1f27; border-radius: 12px; border-width: 1px; border-color: #2c313b;
@@ -1786,6 +1874,17 @@ export component AppWindow inherits Window {
                     PillButton { text: "1080p"; active: root.export-w == 1920 && root.export-h == 1080; clicked => { root.export-w = 1920; root.export-h = 1080; } }
                     PillButton { text: "720p"; active: root.export-w == 1280 && root.export-h == 720; clicked => { root.export-w = 1280; root.export-h = 720; } }
                     PillButton { text: "480p"; active: root.export-w == 854 && root.export-h == 480; clicked => { root.export-w = 854; root.export-h = 480; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Text { text: "FRAME RATE"; color: #8b95a6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    NumberDropdown { label: ""; value: root.export-fps; minimum: 1; maximum: 240; edited(v) => { root.export-fps = v; } }
+                    PillButton { text: "24"; active: root.export-fps == 24; clicked => { root.export-fps = 24; } }
+                    PillButton { text: "25"; active: root.export-fps == 25; clicked => { root.export-fps = 25; } }
+                    PillButton { text: "30"; active: root.export-fps == 30; clicked => { root.export-fps = 30; } }
+                    PillButton { text: "60"; active: root.export-fps == 60; clicked => { root.export-fps = 60; } }
                     Rectangle { horizontal-stretch: 1; }
                 }
 
@@ -1822,19 +1921,19 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Export/render progress modal.
+    // Export/render progress modal (with Cancel).
     if root.exporting : Rectangle {
         background: #000000b0;
         TouchArea {}
         Rectangle {
-            width: 360px; height: 132px;
+            width: 360px; height: 168px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: #1b1f27;
             border-radius: 12px;
             border-width: 1px; border-color: #2c313b;
             VerticalLayout {
-                padding: 22px; spacing: 16px;
+                padding: 22px; spacing: 14px;
                 Text {
                     text: "Exporting video…";
                     color: #f2f4f8; font-size: 14px; font-weight: 700;
@@ -1852,6 +1951,55 @@ export component AppWindow inherits Window {
                     text: root.export-status;
                     color: #9aa3b2; font-size: 11px;
                     horizontal-alignment: center; overflow: elide;
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 92px; height: 30px;
+                        border-radius: 7px;
+                        background: xcancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
+                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        xcancel-ta := TouchArea { clicked => { root.export-cancel(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // App-wide error dialog — stays until dismissed, so failures are never
+    // silent (in the release windowed build stderr does not exist).
+    if root.error-visible : Rectangle {
+        background: #000000c0;
+        TouchArea {}
+        Rectangle {
+            width: 420px; height: 200px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1b1f27; border-radius: 12px;
+            border-width: 1px; border-color: #4a2a30;
+            VerticalLayout {
+                padding: 24px; spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle {
+                        width: 26px; height: 26px; border-radius: 13px; background: #ff547022;
+                        Text { text: "!"; color: #ff7088; font-size: 16px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Text { text: root.error-title; color: #f2f4f8; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                }
+                Text {
+                    text: root.error-detail;
+                    color: #9aa3b2; font-size: 12px; wrap: word-wrap;
+                    vertical-stretch: 1;
+                }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 88px; height: 32px;
+                        border-radius: 7px; background: err-ok-ta.has-hover ? #2dd4bf : #22c9b0;
+                        Text { text: "OK"; color: #08110f; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        err-ok-ta := TouchArea { clicked => { root.error-visible = false; } }
+                    }
                 }
             }
         }
