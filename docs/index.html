@@ -779,6 +779,10 @@ cargo run <span class="c">-p</span> kuvatin</code>
     // Static mode: stack the intro (see html.no-anim CSS) and show everything.
     document.documentElement.classList.add("no-anim");
     document.querySelectorAll(".reveal,.fade").forEach(function(el){ el.style.opacity=1; el.style.transform="none"; });
+    // The compression demo never animates here — show its end state, not "0%".
+    var pctEl = document.getElementById("pct"), afterBar = document.getElementById("afterBar");
+    if(pctEl){ pctEl.textContent = "80"; }             // = round(1 - 0.47/2.41)
+    if(afterBar){ afterBar.style.width = "19.5%"; }    // = 0.47/2.41 of the bar
     window.addEventListener("scroll", function(){ onScrollNav(window.scrollY); });
     return;
   }
@@ -825,10 +829,26 @@ cargo run <span class="c">-p</span> kuvatin</code>
     var afterBar = document.getElementById("afterBar"), pctEl = document.getElementById("pct");
     var beforeMB = 2.41, afterMB = 0.47, pctTarget = Math.round((1 - afterMB/beforeMB)*100);
     gsap.set(afterBar, { scaleX:1, transformOrigin:"0 50%" });
-    ScrollTrigger.create({ trigger:demo, start:"top 80%", once:true, onEnter:function(){
+    var grid = demo.querySelector(".demo-grid") || demo;
+    function play(){
       gsap.fromTo(afterBar, { scaleX:1 }, { scaleX:afterMB/beforeMB, duration:1.4, ease:"power3.inOut", transformOrigin:"0 50%" });
       var o = { v:0 }; gsap.to(o, { v:pctTarget, duration:1.6, ease:"power2.out", onUpdate:function(){ pctEl.textContent = Math.round(o.v); }});
-    }});
+    }
+    // One-shot driven by an IntersectionObserver on the bars themselves, NOT a
+    // ScrollTrigger on the section: ScrollTrigger start positions below the
+    // pinned intro came out short by the whole pin distance (~2.4 viewports),
+    // and the section's top also crosses the viewport well before the bars do —
+    // either way the tween finished off-screen. IO fires on the grid's real
+    // rendered position, immune to pin-spacer math. -22% bottom margin ≈ fire
+    // when the bars enter the top 78% of the viewport.
+    if("IntersectionObserver" in window){
+      var io = new IntersectionObserver(function(entries){
+        if(entries[0].isIntersecting){ io.disconnect(); play(); }
+      }, { rootMargin:"0px 0px -22% 0px" });
+      io.observe(grid);
+    } else {
+      ScrollTrigger.create({ trigger:grid, start:"top 78%", once:true, onEnter:play });
+    }
   })();
 
   /* ============ MOBILE: stacked layout — no pin/path, but keep the motion ============ */
