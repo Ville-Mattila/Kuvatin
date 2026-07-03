@@ -139,11 +139,14 @@
                                   Icon='ProductICO'/>
                         <RemoveFolder Id='RemoveApplicationProgramsFolder'
                                       On='uninstall'/>
-                        <!-- HKMU = HKLM in this perMachine package: keying the
-                             component per-user (HKCU) in a per-machine install
-                             is an ICE38 violation and misbehaves when a
-                             different admin uninstalls. -->
-                        <RegistryValue Root='HKMU'
+                        <!-- Per-user keypath for the per-user Start-menu shortcut.
+                             An ambiguous HKMU root here trips ICE57 ("per-user
+                             data with a keypath that can be per-user or
+                             per-machine"); HKCU makes the whole component
+                             unambiguously per-user, which is what a
+                             ProgramMenuFolder shortcut is. This is the form that
+                             shipped in 2.0.0. -->
+                        <RegistryValue Root='HKCU'
                                        Key='Software\Ville Mattila\Kuvatin'
                                        Name='installed'
                                        Type='integer'
