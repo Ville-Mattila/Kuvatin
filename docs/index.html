@@ -876,16 +876,25 @@ cargo run <span class="c">-p</span> kuvatin</code>
   }
 
   /* ============ PHASE 1: pinned horizontal pan — travel LEFT, screenshot tilts in ============ */
+  // scrub:true, not a lagged scrub — Lenis already smooths the scroll itself, and
+  // a lagged scrub keeps catching up for ~a second AFTER the pin releases, which
+  // piles leftover tween motion on top of native scrolling (a visible hitch).
   var introTl = gsap.timeline({
     defaults:{ duration:1, ease:"none" },
-    scrollTrigger:{ trigger:"#top", start:"top top", end:"+=240%", pin:true, scrub:1.2, anticipatePin:1 }
+    scrollTrigger:{ trigger:"#top", start:"top top", end:"+=240%", pin:true, scrub:true, anticipatePin:1 }
   });
   // pan + tilt run together over the whole pin so the motion is one smooth,
   // continuous sweep instead of a pan then a separate snap-in.
   introTl.fromTo("#introStage", { xPercent:0 }, { xPercent:-50, ease:"sine.out" }, 0)
-         // round the corner: as the horizontal pan eases out, drift upward (begin the
-         // downward scroll) so the motion arcs from sideways into down, not a hard 90°
-         .fromTo("#introStage", { yPercent:0 }, { yPercent:-24, ease:"sine.in" }, 0)
+         // Round the corner into vertical scroll with a VELOCITY-MATCHED exit:
+         // the drift must leave the pin moving at exactly native scroll speed or
+         // the handoff visibly snags (it used to exit at ~0.16 px/px, then jump
+         // to 1.0). expo.in's end slope is 10·ln2 ≈ 6.93, and the pin spans
+         // 240vh, so a travel of 240/6.93 ≈ 34.62vh gives d(y)/d(scroll) = 1.0
+         // at release — the stage is already scrolling at full speed when GSAP
+         // lets go. expo.in also stays near zero for most of the pin, so the
+         // screenshot holds centered until it accelerates away.
+         .fromTo("#introStage", { yPercent:0 }, { yPercent:-34.62, ease:"expo.in" }, 0)
          .fromTo("#introLogo", { opacity:1 }, { opacity:0.2, ease:"power1.in" }, 0)
          .fromTo("#shotFrame",
             { rotateY:-40, rotateX:5, scale:.86, opacity:.4, transformPerspective:1600 },
