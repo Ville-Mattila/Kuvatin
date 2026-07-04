@@ -741,6 +741,19 @@ export component AppWindow inherits Window {
 
                         // populated list
                         if root.files.length > 0: ListView {
+                            // Keep the selected row in view when the selection is
+                            // moved from elsewhere (wheel-flipping over the preview):
+                            // nudge the viewport just enough to reveal the 44px row.
+                            property <int> sel: root.selected-index;
+                            changed sel => {
+                                if (self.sel >= 0) {
+                                    if (-self.viewport-y > self.sel * 44px) {
+                                        self.viewport-y = -self.sel * 44px;
+                                    } else if (-self.viewport-y + self.visible-height < (self.sel + 1) * 44px) {
+                                        self.viewport-y = -((self.sel + 1) * 44px - self.visible-height);
+                                    }
+                                }
+                            }
                             for row[i] in root.files: Rectangle {
                                 height: 44px;
                                 background: root.selected-index == i
@@ -966,6 +979,35 @@ export component AppWindow inherits Window {
                                 if (root.crop-y + root.crop-h > 1) {
                                     root.crop-h = 1 - root.crop-y;
                                 }
+                            }
+                        }
+
+                        // Mouse wheel over the preview flips through the images,
+                        // photo-viewer style. Touchpads deliver many small deltas,
+                        // so accumulate and step once per notch-worth (24px);
+                        // declared before the preview/crop elements so the crop
+                        // editor's own touch areas stack above it.
+                        TouchArea {
+                            property <length> acc: 0;
+                            scroll-event(e) => {
+                                if (root.cropping || root.files.length == 0) {
+                                    return reject;
+                                }
+                                self.acc += e.delta-y;
+                                if (self.acc <= -24px) {
+                                    self.acc = 0;
+                                    if (root.selected-index < root.files.length - 1) {
+                                        root.select-file(root.selected-index + 1);
+                                    }
+                                } else if (self.acc >= 24px) {
+                                    self.acc = 0;
+                                    if (root.selected-index > 0) {
+                                        root.select-file(root.selected-index - 1);
+                                    } else if (root.selected-index < 0) {
+                                        root.select-file(0);
+                                    }
+                                }
+                                return accept;
                             }
                         }
 
