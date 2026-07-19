@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin-core"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "directories",
  "image",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin-video"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "gstreamer",
