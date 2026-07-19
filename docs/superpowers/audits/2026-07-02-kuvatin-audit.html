@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kuvatin — Codebase Audit &amp; Hardening Plan · 2026-07-02</title>
+<style>
+  :root{
+    --teal:#00d4bf; --blue:#3f7df5; --bg:#0a0c10; --panel:#13171f; --panel2:#181d27;
+    --ink:#eef2f7; --muted:#8b95a6; --line:#222a36;
+    --crit:#ff4d6a; --high:#ff9f43; --med:#ffd93d; --low:#6bc5f8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:0 0 80px}
+  ::selection{background:var(--teal);color:#04201d}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 28px}
+  a{color:var(--teal);text-decoration:none} a:hover{text-decoration:underline}
+  code{font:12.5px/1.5 Consolas,monospace;background:#ffffff0d;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cdd5e0}
+  h1,h2,h3{line-height:1.15;letter-spacing:-.02em}
+
+  header{padding:56px 0 34px;border-bottom:1px solid var(--line);
+    background:radial-gradient(900px 340px at 20% -10%, #00d4bf14, transparent 65%),
+               radial-gradient(700px 300px at 85% 0%, #3f7df512, transparent 60%)}
+  .kicker{color:var(--teal);font-weight:700;font-size:12px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:14px}
+  header h1{font-size:clamp(30px,5vw,44px);margin-bottom:12px}
+  header p.lead{color:var(--muted);max-width:70ch}
+  .meta{display:flex;gap:20px;flex-wrap:wrap;margin-top:20px;font-size:13px;color:var(--muted)}
+  .meta b{color:var(--ink)}
+
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:34px 0 8px}
+  .stat{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .stat .n{font-size:34px;font-weight:800;letter-spacing:-.03em}
+  .stat .l{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;margin-top:2px}
+  .stat.c .n{color:var(--crit)} .stat.h .n{color:var(--high)} .stat.m .n{color:var(--med)} .stat.lo .n{color:var(--low)}
+
+  section{margin-top:52px}
+  section>h2{font-size:24px;margin-bottom:6px}
+  section>p.sub{color:var(--muted);margin-bottom:22px;max-width:76ch}
+
+  .score{width:100%;border-collapse:collapse;font-size:13.5px}
+  .score th{color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.12em;text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+  .score td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .score td:first-child{white-space:nowrap;font-weight:700}
+  .grade{display:inline-block;width:34px;height:34px;border-radius:9px;text-align:center;line-height:34px;font-weight:800;font-size:15px}
+  .gB{background:#00d4bf22;color:var(--teal);border:1px solid #00d4bf44}
+  .gC{background:#ffd93d1e;color:var(--med);border:1px solid #ffd93d3d}
+  .gD{background:#ff9f4320;color:var(--high);border:1px solid #ff9f4340}
+
+  .sevhead{display:flex;align-items:center;gap:12px;margin:34px 0 14px}
+  .sevhead .dot{width:12px;height:12px;border-radius:50%}
+  .sevhead h3{font-size:18px}
+  .sevhead .count{color:var(--muted);font-size:13px}
+  .find{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-left-width:3px;border-radius:12px;padding:16px 18px;margin-bottom:10px}
+  .find .top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:6px}
+  .find .id{font:700 12px Consolas,monospace;color:var(--muted)}
+  .find .title{font-weight:700;font-size:15px}
+  .chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:2px 9px;border-radius:999px;text-transform:uppercase}
+  .a-core{background:#00d4bf18;color:var(--teal);border:1px solid #00d4bf33}
+  .a-video{background:#3f7df51a;color:#8fb4ff;border:1px solid #3f7df538}
+  .a-gui{background:#ffd93d14;color:#ffd93d;border:1px solid #ffd93d30}
+  .a-ship{background:#ff9f4316;color:var(--high);border:1px solid #ff9f4333}
+  .find p{color:#b9c2d0;font-size:13.5px}
+  .find .fix{margin-top:7px;color:var(--muted);font-size:13px}
+  .find .fix b{color:var(--teal);font-weight:700}
+  .find .loc{margin-top:7px;font-size:12px;color:var(--muted)}
+  .find .plan{float:right;font:700 11.5px Consolas,monospace;color:#8fb4ff;background:#3f7df512;border:1px solid #3f7df530;border-radius:6px;padding:2px 8px;margin-left:10px}
+  .sev-c{border-left-color:var(--crit)} .sev-h{border-left-color:var(--high)}
+  .sev-m{border-left-color:var(--med)} .sev-l{border-left-color:var(--low)}
+
+  .phases{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
+  .phases th{color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.12em;text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+  .phases td{padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .phases td:first-child{white-space:nowrap;font-weight:700;color:var(--teal)}
+  .exec{background:linear-gradient(135deg,#0f1a18,#101319);border:1px solid #00d4bf33;border-radius:14px;padding:22px 24px;margin-top:22px}
+  .exec h3{color:var(--teal);font-size:16px;margin-bottom:8px}
+  .exec code{display:block;padding:12px 14px;margin-top:10px;font-size:13px;background:#0a0c10;border-radius:8px}
+  .note{font-size:12.5px;color:var(--muted);margin-top:10px}
+  footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px;text-align:center}
+  @media(max-width:760px){ .stats{grid-template-columns:repeat(2,1fr)} .find .plan{float:none;display:inline-block;margin:6px 0 0} }
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <div class="kicker">Kuvatin · Codebase Audit</div>
+  <h1>56 findings, one executable plan.</h1>
+  <p class="lead">Full audit of the Kuvatin workspace at <b>v2.0.0</b> (commit <code>4deb4d8</code>): four parallel reviewers over the image engine, video engine, GUI/shell, UI markup, installer and CI — top findings manually re-verified in source. Every finding maps to a task in the hardening plan below.</p>
+  <div class="meta">
+    <span>Date <b>2026-07-02</b></span>
+    <span>Scope <b>kuvatin-core · kuvatin-video · kuvatin (GUI/CLI/shell) · app.slint · WiX · CI · site</b></span>
+    <span>Plan <b><code>docs/superpowers/plans/2026-07-02-kuvatin-hardening.md</code></b></span>
+  </div>
+  <div class="stats">
+    <div class="stat c"><div class="n">1</div><div class="l">Critical</div></div>
+    <div class="stat h"><div class="n">11</div><div class="l">High</div></div>
+    <div class="stat m"><div class="n">20</div><div class="l">Medium</div></div>
+    <div class="stat lo"><div class="n">24</div><div class="l">Low</div></div>
+  </div>
+</div></header>
+
+<div class="wrap">
+
+<!-- Resolution note, added after the hardening work shipped. -->
+<div style="margin-top:28px;background:#00d4bf12;border:1px solid #00d4bf44;border-radius:12px;padding:16px 20px;display:flex;gap:14px;align-items:baseline">
+  <span style="font-size:18px;font-weight:800;color:var(--teal)">✓</span>
+  <p style="font-size:14px;color:var(--ink)"><b>Resolved.</b> The hardening plan below was executed in full and shipped as
+  <a href="https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.0.1"><b>v2.0.1</b></a> (2026-07-03):
+  the Critical, all 11 High and nearly every Medium/Low finding are fixed; the few deliberate exceptions
+  (gui.rs split, ICC handling, Authenticode signing, Phase&nbsp;7 features) are tracked in the plan.
+  This report is kept as the audit record of v2.0.0.</p>
+</div>
+
+<section>
+  <h2>Health scorecard</h2>
+  <p class="sub">The codebase is in good shape for its age — carefully commented, defensively written in its arithmetic, with real regression tests around the hardest-won GStreamer behavior. The dominant systemic weaknesses: <b>errors are invisible</b> in the shipped windowed build (every failure path reports to a stderr that doesn't exist), <b>nothing added can be removed</b> (clips, bin items), and third-party trust boundaries (WebP encoder, CI downloads) are unguarded.</p>
+  <table class="score">
+    <tr><th>Area</th><th></th><th>Assessment</th></tr>
+    <tr><td>kuvatin-core (images)</td><td><span class="grade gC">C+</span></td><td>Happy path solid and tested; but a panicking WebP encode on big images, a naming race under the parallel executor, and silently-dropped EXIF orientation/metadata undermine its core promise.</td></tr>
+    <tr><td>kuvatin-video (engine)</td><td><span class="grade gB">B−</span></td><td>Hard bugs already fought and regression-tested; lifecycle asymmetry (a failed export start strands the pipeline; nothing is removable/persistable) and an environment-dependent export fix are the weak spots.</td></tr>
+    <tr><td>kuvatin (GUI / shell)</td><td><span class="grade gC">C</span></td><td>Careful wiring, no reachable borrow-panics found — but error invisibility is systemic, both blocking modals are uncancellable on a frameless window, and table-stakes editor operations are missing.</td></tr>
+    <tr><td>Installer / CI / site</td><td><span class="grade gD">D+</span></td><td>Ships working MSIs, but embeds unverified third-party binaries, runs zero tests before releasing, mixes per-machine install with per-user registration, and pushes ~100 GStreamer DLLs onto the system PATH.</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Findings</h2>
+  <p class="sub">Each card: what breaks, where, how to fix, and the plan task <span class="plan" style="float:none">§x.y</span> that resolves it. Areas: <span class="chip a-core">core</span> <span class="chip a-video">video</span> <span class="chip a-gui">gui</span> <span class="chip a-ship">ship</span> (installer/CI/site).</p>
+
+  <div class="sevhead"><span class="dot" style="background:var(--crit)"></span><h3>Critical</h3><span class="count">1 finding — fix first</span></div>
+
+  <div class="find sev-c"><span class="plan">§1.1</span><div class="top"><span class="id">C1</span><span class="chip a-gui">gui</span><span class="chip a-core">core</span><span class="title">A corrupt presets.toml permanently bricks startup — silently</span></div>
+    <p>Preset saves are non-atomic (<code>fs::write</code>); a crash mid-save leaves truncated TOML. Startup then fails at <code>load_or_init(...)?</code> and, with <code>windows_subsystem="windows"</code>, the error goes nowhere: double-clicking the app simply does nothing, forever, until the user deletes an AppData file they've never heard of. Any preset missing one field (e.g. written by a newer version) triggers the same all-or-nothing parse failure.</p>
+    <div class="fix"><b>Fix:</b> atomic save (tmp + rename); on parse failure back up the bad file and fall back to built-ins instead of aborting; message-box any fatal startup error.</div>
+    <div class="loc">kuvatin-core/src/preset.rs:64–86 · kuvatin/src/gui.rs:124 · kuvatin/src/main.rs:1</div></div>
+
+  <div class="sevhead"><span class="dot" style="background:var(--high)"></span><h3>High</h3><span class="count">11 findings</span></div>
+
+  <div class="find sev-h"><span class="plan">§2.1 §2.2</span><div class="top"><span class="id">H1</span><span class="chip a-gui">gui</span><span class="title">Export failures are invisible to the user</span></div>
+    <p>On a failed render the code writes a status string and closes the modal in the same tick — the message is never rendered; the real GStreamer error goes to <code>eprintln!</code>, which doesn't exist in the release build. The user watches the progress dialog vanish and later finds a broken partial file (this exact path shipped the 111&nbsp;KB-file mystery). "Could not start export" has the same never-shown bug.</p>
+    <div class="fix"><b>Fix:</b> persistent error dialog carrying the actual pipeline message; delete the partial file.</div>
+    <div class="loc">kuvatin/src/gui.rs:1130, 1167–1175 · ui/app.slint:1826–1855</div></div>
+
+  <div class="find sev-h"><span class="plan">§2.2</span><div class="top"><span class="id">H2</span><span class="chip a-gui">gui</span><span class="title">Export cannot be cancelled; a hung render soft-locks the whole app</span></div>
+    <p>The export modal has no Cancel and its full-window TouchArea swallows every click — including the custom title-bar close button (the window is frameless). If the pipeline stalls without posting EOS/Error (a real failure mode), the only escape is Task Manager. The import modal has the identical no-escape design.</p>
+    <div class="fix"><b>Fix:</b> Cancel buttons (render teardown + partial-file cleanup), stall watchdog, and don't let overlays cover the window controls.</div>
+    <div class="loc">ui/app.slint:1826–1858, 1720–1753 · gui.rs:1140–1181</div></div>
+
+  <div class="find sev-h"><span class="plan">§2.4</span><div class="top"><span class="id">H3</span><span class="chip a-video">video</span><span class="chip a-gui">gui</span><span class="title">Nothing can be deleted — not a timeline clip, not a media-bin entry</span></div>
+    <p>Three independent reviewers confirmed: the engine has no <code>remove_clip</code> API at all, and the GUI's only removal anywhere is preset deletion. A wrong clip on the timeline is permanent until app restart; the clips map and GES layers grow monotonically for the process lifetime.</p>
+    <div class="fix"><b>Fix:</b> <code>Project::remove_clip</code> + trailing-layer pruning; ×-affordances and Delete key; re-key selection by id (indices will desync once removal exists).</div>
+    <div class="loc">kuvatin-video/src/project.rs:342, 458–852 · gui.rs · app.slint:464–525</div></div>
+
+  <div class="find sev-h"><span class="plan">§1.5</span><div class="top"><span class="id">H4</span><span class="chip a-video">video</span><span class="title">A failed export start leaves the preview permanently black</span></div>
+    <p><code>begin_render</code> detaches the preview sink before its fallible steps; on any error it returns with the pipeline at Null, sinkless, possibly in RENDER mode — and the GUI's failure path never restores it. Preview and playback are dead for the rest of the session.</p>
+    <div class="fix"><b>Fix:</b> restore sink + FULL_PREVIEW on every error path inside <code>begin_render</code>.</div>
+    <div class="loc">kuvatin-video/src/project.rs:794–811 · gui.rs:1119–1131</div></div>
+
+  <div class="find sev-h"><span class="plan">§1.2</span><div class="top"><span class="id">H5</span><span class="chip a-core">core</span><span class="title">WebP encode panics on legitimate inputs</span></div>
+    <p>The webp crate's <code>encode()</code> unwraps internally; libwebp rejects dimensions &gt;16383&nbsp;px and out-of-range quality. Converting a phone panorama to WebP panics — and via the CLI/context-menu path, a hand-edited <code>quality&nbsp;=&nbsp;150</code> in presets.toml reaches the encoder unclamped.</p>
+    <div class="fix"><b>Fix:</b> <code>encode_simple</code> with mapped errors; clamp quality at the core boundary.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:89 (+149) · quickrun.rs:12</div></div>
+
+  <div class="find sev-h"><span class="plan">§1.3</span><div class="top"><span class="id">H6</span><span class="chip a-core">core</span><span class="title">Parallel batches can silently overwrite each other's outputs</span></div>
+    <p><code>ensure_unique</code> is exists()-then-write with nothing reserving the name in between: <code>photo.png</code> and <code>photo.jpg</code> converting to WebP in the same folder race to <code>photo-kuvatin.webp</code> — one result is lost while both report success.</p>
+    <div class="fix"><b>Fix:</b> reserve with <code>create_new(true)</code> in a suffix-bumping loop.</div>
+    <div class="loc">kuvatin-core/src/naming.rs:68–82 · pipeline.rs:197,207</div></div>
+
+  <div class="find sev-h"><span class="plan">§4.1</span><div class="top"><span class="id">H7</span><span class="chip a-core">core</span><span class="title">EXIF orientation dropped — phone photos convert rotated</span></div>
+    <p><code>image::open</code> doesn't apply the orientation tag and every encode path strips metadata: a portrait phone JPEG converts to a WebP/PNG lying on its side, with no warning. For a photo tool, this is the biggest everyday quality bug.</p>
+    <div class="fix"><b>Fix:</b> read orientation via <code>ImageReader</code> and <code>apply_orientation</code> before processing.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:191, 219</div></div>
+
+  <div class="find sev-h"><span class="plan">§3.1</span><div class="top"><span class="id">H8</span><span class="chip a-video">video</span><span class="title">The NVENC export fix silently deactivates on configured machines</span></div>
+    <p>The critical <code>mfaacenc:0</code> derank is applied via <code>GST_PLUGIN_FEATURE_RANK</code> — but only if that env var is unset. Any user who has it set for other GStreamer software gets the documented 0-byte-export failure back, with zero diagnostics. The env write also happens from worker threads (<code>set_var</code> thread-safety hazard).</p>
+    <div class="fix"><b>Fix:</b> set ranks programmatically via the registry API after <code>gst::init()</code>; verify with the regression suite under a pre-set env var.</div>
+    <div class="loc">kuvatin-video/src/project.rs:207–224 · kuvatin/src/main.rs</div></div>
+
+  <div class="find sev-h"><span class="plan">§2.3</span><div class="top"><span class="id">H9</span><span class="chip a-gui">gui</span><span class="title">Import can hang forever, and failed files still enter the media bin</span></div>
+    <p>The import worker's synchronous discovery blocks indefinitely on e.g. an unreachable network path, behind an uncancellable modal. Discovery failures are ignored (<code>let _ =</code>) — the file is added to the bin anyway, producing dead entries that (see H3) can't be removed.</p>
+    <div class="fix"><b>Fix:</b> Cancel drains the queue; failed files excluded + one summary error.</div>
+    <div class="loc">gui.rs:206–215, 683–693 · app.slint:1720</div></div>
+
+  <div class="find sev-h"><span class="plan">§2.1</span><div class="top"><span class="id">H10</span><span class="chip a-gui">gui</span><span class="title">Explorer context-menu conversions fail silently</span></div>
+    <p>Registry commands hardcode preset names; rename or delete "Convert to WebP" in the GUI and the right-click action launches, errors to invisible stderr, and does nothing — unexplainable for the user.</p>
+    <div class="fix"><b>Fix:</b> native message box on quickrun failure in windowed builds; longer-term, stable preset IDs.</div>
+    <div class="loc">shell/windows.rs:16–21 · quickrun.rs:13–15</div></div>
+
+  <div class="find sev-h"><span class="plan">§5.1</span><div class="top"><span class="id">H11</span><span class="chip a-ship">ship</span><span class="title">CI bundles unverified downloads into the shipped installer</span></div>
+    <p>The release workflow downloads two GStreamer MSIs and the WiX zip with no checksum, executes them, and harvests those DLLs into the Kuvatin MSI — the strongest supply-chain lever into what every end user installs.</p>
+    <div class="fix"><b>Fix:</b> pin SHA-256 for all three; fail the build on mismatch.</div>
+    <div class="loc">.github/workflows/release.yml:27–32, 44–47</div></div>
+
+  <div class="sevhead"><span class="dot" style="background:var(--med)"></span><h3>Medium</h3><span class="count">20 findings</span></div>
+
+  <div class="find sev-m"><span class="plan">§1.4</span><div class="top"><span class="id">M1</span><span class="chip a-core">core</span><span class="title">One panicking file aborts the whole batch</span></div><p>Only <code>Result</code> errors are isolated; a panic (e.g. H5) unwinds the entire rayon batch, discarding all results and freezing GUI progress — violating the crate's own documented contract.</p><div class="loc">kuvatin-core/src/batch.rs:47–74</div></div>
+  <div class="find sev-m"><span class="plan">§1.3</span><div class="top"><span class="id">M2</span><span class="chip a-core">core</span><span class="title">Output-folder mode: same-stem inputs deterministically clobber</span></div><p><code>A\photo.jpg</code> and <code>B\photo.jpg</code> to one output folder both plan <code>photo-kuvatin.ext</code> before anything is written — the second overwrites the first, both "succeed". No race needed.</p><div class="loc">naming.rs:68 · pipeline.rs:218–238</div></div>
+  <div class="find sev-m"><span class="plan">§4.3</span><div class="top"><span class="id">M3</span><span class="chip a-core">core</span><span class="title">Animated GIFs silently flattened to frame 1</span></div><p>Converting an animation discards every frame after the first and reports success.</p><div class="loc">pipeline.rs:191</div></div>
+  <div class="find sev-m"><span class="plan">§1.1</span><div class="top"><span class="id">M4</span><span class="chip a-core">core</span><span class="title">presets.toml has no version field or migration path</span></div><p>All-or-nothing parse (part of C1): unknown future fields/variants hard-fail old binaries; no per-entry recovery.</p><div class="loc">preset.rs:64–76</div></div>
+  <div class="find sev-m"><span class="plan">deferred</span><div class="top"><span class="id">M5</span><span class="chip a-core">core</span><span class="title">ICC color profiles dropped on every convert</span></div><p>Display-P3/AdobeRGB photos shift colors after conversion; quantization runs on unmanaged values. Deliberately deferred — document as a known limitation.</p><div class="loc">pipeline.rs:69–105</div></div>
+  <div class="find sev-m"><span class="plan">§3.4</span><div class="top"><span class="id">M6</span><span class="chip a-video">video</span><span class="title">Export framerate hardcoded to 30 fps</span></div><p>60 fps sources are halved; 24/25 fps content gets judder. The caps pinning is correct (NVENC needs it); the <em>value</em> shouldn't be fixed.</p><div class="loc">project.rs:271 · ExportSettings:186–191</div></div>
+  <div class="find sev-m"><span class="plan">§3.3</span><div class="top"><span class="id">M7</span><span class="chip a-video">video</span><span class="title">All seeks are KEY_UNIT — nothing is frame-accurate</span></div><p>Scrubbing, paused-edit repaints and playhead placement snap to keyframes (seconds off on long-GOP media); a doc comment claims frame accuracy it doesn't have.</p><div class="loc">project.rs:750–752, 775–778 · player.rs:105–112</div></div>
+  <div class="find sev-m"><span class="plan">§3.2</span><div class="top"><span class="id">M8</span><span class="chip a-video">video</span><span class="title">Preview pipeline errors are swallowed — playback freezes silently</span></div><p>Bus errors are only read during render; a decoder failure in preview just stops frames with no notification path to the GUI.</p><div class="loc">project.rs (preview mode, no bus watch)</div></div>
+  <div class="find sev-m"><span class="plan">§1.6</span><div class="top"><span class="id">M9</span><span class="chip a-video">video</span><span class="title">trim_clip clamp math can wrap negative values through <code>as u64</code></span></div><p>A clip shorter than the 0.2 s floor (creatable via <code>add_clip</code>) can produce a wrapped ~10⁵-hour ClockTime on left-trim; right-trim can underflow similarly.</p><div class="loc">project.rs:547–583</div></div>
+  <div class="find sev-m"><span class="plan">§3.5</span><div class="top"><span class="id">M10</span><span class="chip a-video">video</span><span class="title"><code>Player</code> is dead code — a second, divergent playback stack</span></div><p>The GUI never constructs it (superseded by <code>Project</code>); duplicate frame-extraction code invites drift, plus a stale doc comment on <code>make_project</code>.</p><div class="loc">player.rs:25–136 · lib.rs:4–5 · gui.rs:18–20</div></div>
+  <div class="find sev-m"><span class="plan">§7.1</span><div class="top"><span class="id">M11</span><span class="chip a-video">video</span><span class="title">No project save/load — every edit dies with the session</span></div><p>No serialization exists anywhere; a composed timeline evaporates on close. GES ships a formatter that isn't wired up.</p><div class="loc">kuvatin-video (absence)</div></div>
+  <div class="find sev-m"><span class="plan">§6.3</span><div class="top"><span class="id">M12</span><span class="chip a-gui">gui</span><span class="title">File list is mutable during a running batch — status badges land on wrong rows</span></div><p>Progress resolves indices against a pre-run snapshot but writes into the live (re-sorted) model; there's also no way to cancel a long batch.</p><div class="loc">gui.rs:589–607 · app.slint:773–777</div></div>
+  <div class="find sev-m"><span class="plan">§2.5</span><div class="top"><span class="id">M13</span><span class="chip a-gui">gui</span><span class="title">Video keeps playing (audibly) in Images mode; preview timer never rests</span></div><p>Mode switch is Slint-only — no Rust callback pauses the pipeline or gates the 100 ms timer.</p><div class="loc">app.slint:623 · gui.rs:1189–1236</div></div>
+  <div class="find sev-m"><span class="plan">§2.3</span><div class="top"><span class="id">M14</span><span class="chip a-gui">gui</span><span class="title">Duplicate media-bin entries on re-import</span></div><p>No dedup in the video import path (image mode dedups); duplicates pile up and (H3) can't be removed.</p><div class="loc">gui.rs:683–693</div></div>
+  <div class="find sev-m"><span class="plan">§5.5</span><div class="top"><span class="id">M15</span><span class="chip a-ship">ship</span><span class="title">Per-machine MSI, per-user registration</span></div><p>Only the installing user gets the context menu; uninstall by a different admin orphans HKCU keys pointing at a deleted exe; the Start-menu shortcut's HKCU KeyPath is an ICE38 violation with the same cross-user misbehavior.</p><div class="loc">main.wxs:77, 137–152, 199–215 · shell/windows.rs:32, 120</div></div>
+  <div class="find sev-m"><span class="plan">§5.4</span><div class="top"><span class="id">M16</span><span class="chip a-ship">ship</span><span class="title">~100 bundled GStreamer DLLs are put on the system PATH</span></div><p>Other processes resolving those DLL names can load Kuvatin's copies (version conflicts with real GStreamer installs); the app itself gains nothing from PATH.</p><div class="loc">main.wxs:111–121, 179–186</div></div>
+  <div class="find sev-m"><span class="plan">§6.2</span><div class="top"><span class="id">M17</span><span class="chip a-gui">gui</span><span class="title">NumberDropdown popovers are painted under, and click-shadowed by, later siblings</span></div><p>The inline editor escapes its 24 px field into siblings declared after it (crop toolbar, export dialog, canvas fields), which paint over it and steal its clicks.</p><div class="loc">app.slint:301–313, 826–833, 1778–1790, 1386–1393</div></div>
+  <div class="find sev-m"><span class="plan">§6.2</span><div class="top"><span class="id">M18</span><span class="chip a-gui">gui</span><span class="title">Drag handlers never handle pointer <em>cancel</em></span></div><p>A stolen grab or window deactivation leaves <code>clip-dragging</code> stuck (the drop banner floats forever) and stale header-drag state fires a spurious track reorder on the next plain click.</p><div class="loc">app.slint:1482–1493, 1581–1634</div></div>
+  <div class="find sev-m"><span class="plan">§2.6</span><div class="top"><span class="id">M19</span><span class="chip a-gui">gui</span><span class="title">Zero keyboard support</span></div><p>No FocusScope, no key handler, no shortcut in 1,861 lines of UI: no Space, no Delete, no Esc, no Tab traversal. Fully mouse-dependent.</p><div class="loc">app.slint (whole file)</div></div>
+  <div class="find sev-m"><span class="plan">§5.2 §5.3</span><div class="top"><span class="id">M20</span><span class="chip a-ship">ship</span><span class="title">Release CI: no tests, mutable action tags, unsigned MSI, no tag/version check</span></div><p>A tag push ships whatever compiles; five actions pinned by mutable tag (one with <code>contents:write</code>); SmartScreen flags every download as unknown publisher.</p><div class="loc">release.yml:18–65</div></div>
+
+  <div class="sevhead"><span class="dot" style="background:var(--low)"></span><h3>Low</h3><span class="count">24 findings — grouped</span></div>
+
+  <div class="find sev-l"><span class="plan">§3.6</span><div class="top"><span class="id">L1–L5</span><span class="chip a-video">video</span><span class="title">Engine nits</span></div>
+    <p><b>L1</b> <code>thumbnail</code> leaks its pipeline on one early-return path (project.rs:135). <b>L2</b> <code>sample_to_frame</code> ignores stride/VideoMeta — works today by luck (69–79). <b>L3</b> scale read-back clamps to 1.0, making &gt;100% zoom unrepresentable (644 vs 668). <b>L4</b> empty GES clip name would silently collide in the clips map (475, 507). <b>L5</b> cold-cache <code>append_clip</code> blocks the UI thread; render abort yanks to Null leaving an unplayable partial (489, 844–852).</p></div>
+  <div class="find sev-l"><span class="plan">§1.6 §5.2</span><div class="top"><span class="id">L6</span><span class="chip a-video">video</span><span class="title">Riskiest edit math has zero test coverage — and the whole suite self-skips without fixtures</span></div>
+    <p><code>slide_clip</code>/<code>trim_clip</code>/layout round-trips are untested; a fixture-less <code>cargo test</code> (like today's CI) asserts nothing about this crate.</p></div>
+  <div class="find sev-l"><span class="plan">§4.4 §4.2</span><div class="top"><span class="id">L7–L12</span><span class="chip a-core">core</span><span class="title">Input-hardening gaps</span></div>
+    <p><b>L7</b> unbounded resize targets can OOM-abort the process (resize.rs:22–74). <b>L8</b> suffix/subfolder interpolated into paths unsanitized (naming.rs:33–47). <b>L9</b> AspectRatio u64→u32 truncation can yield a 1-px crop (crop.rs:43–47). <b>L10</b> zero-dimension images panic in clamp (crop.rs:37,54). <b>L11</b> JPEG conversion drops alpha to black instead of compositing white (pipeline.rs:78). <b>L12</b> <code>uses_quality()</code> wrong for lossy PNG — a trap for future UI gating (format.rs:27–29).</p></div>
+  <div class="find sev-l"><span class="plan">§6.3 §2.5 §2.2</span><div class="top"><span class="id">L13–L15</span><span class="chip a-gui">gui</span><span class="title">GUI nits</span></div>
+    <p><b>L13</b> delete-preset with nothing selected deletes the <em>last</em> preset (gui.rs:378). <b>L14</b> five leaked timers, two ticking forever while idle (239–1235). <b>L15</b> <code>begin_render</code> blocks the UI up to ~3 s before the modal paints; failed exports leave the partial file on disk.</p></div>
+  <div class="find sev-l"><span class="plan">§5.5 §5.6</span><div class="top"><span class="id">L16–L18</span><span class="chip a-ship">ship</span><span class="title">Shell &amp; packaging nits</span></div>
+    <p><b>L16</b> classic <code>"%1"</code> verbs spawn one process per selected file (process storm; Windows hides the verbs above ~15 items); unregister always claims success. <b>L17</b> <code>gui::run</code> is a ~1,120-line monolith with duplicated job/preset logic. <b>L18</b> <code>heat&nbsp;-gg</code> fresh-GUIDs-per-build is only safe because of the MajorUpgrade schedule — an undocumented load-bearing coupling.</p></div>
+  <div class="find sev-l"><span class="plan">§6.2 §3.5 §6.4</span><div class="top"><span class="id">L19–L24</span><span class="chip a-gui">gui</span><span class="chip a-ship">ship</span><span class="title">UI &amp; site nits</span></div>
+    <p><b>L19</b> 🔒 emoji aspect-lock button — same missing-glyph class as the already-fixed transport icons (app.slint:838). <b>L20</b> 30 px track height duplicated at ~10 sites; canvas 1280/720 literals duplicated across Slint and Rust. <b>L21</b> the idle "+ New track" row looks clickable but clicking it scrubs the playhead. <b>L22</b> dead UI API: <code>video-select</code>/<code>video-selected</code>/<code>win-drag</code>. <b>L23</b> landing-page CDN scripts (GSAP/Lenis) lack SRI hashes. <b>L24</b> <code>og-image.png</code> still renders the pre-2.0 tagline.</p></div>
+</section>
+
+<section>
+  <h2>The plan</h2>
+  <p class="sub">Everything above maps into <b><code>docs/superpowers/plans/2026-07-02-kuvatin-hardening.md</code></b> — a self-contained, phase-ordered plan an AI session can execute without any other context: per-task files, exact changes, test commands (with this repo's non-negotiables: video tests serialized, fixture generation, the GES/NVENC gotchas), and done-criteria.</p>
+  <table class="phases">
+    <tr><th>Phase</th><th>Theme</th><th>Resolves</th></tr>
+    <tr><td>Phase 1</td><td>Stop the bleeding — crashes, data loss, bricked startup, dead preview</td><td>C1 · H4 H5 H6 · M1 M4 M9</td></tr>
+    <tr><td>Phase 2</td><td>Errors users can see; controls users need — dialogs, cancel, delete, keyboard</td><td>H1 H2 H3 H9 H10 · M13 M14 M19 · L13 L15</td></tr>
+    <tr><td>Phase 3</td><td>Video engine robustness — ranks, bus errors, accurate seeks, fps, dead code</td><td>H8 · M6 M7 M8 M10 · L1–L5</td></tr>
+    <tr><td>Phase 4</td><td>Image fidelity — EXIF, JPEG alpha, GIF honesty, input hardening</td><td>H7 · M3 · L7–L12 (M5 deferred)</td></tr>
+    <tr><td>Phase 5</td><td>Installer &amp; CI hardening — checksums, test gate, pinning, PATH, registration scope</td><td>H11 · M15 M16 M20 · L6 L16 L18</td></tr>
+    <tr><td>Phase 6</td><td>Architecture &amp; polish — gui.rs split, Slint hygiene, perf, site follow-ups</td><td>M12 M17 M18 · L14 L17 L19–L24</td></tr>
+    <tr><td>Phase 7</td><td><i>Product leaps (ask first)</i> — save/load, undo/redo, zoom/split, audio tracks, transitions, new icon</td><td>M11 + the roadmap</td></tr>
+  </table>
+
+  <div class="exec">
+    <h3>▶ To execute</h3>
+    <p style="color:#b9c2d0;font-size:14px">Open a Claude Code (Opus 4.8) session in the repo and say:</p>
+    <code>Execute docs/superpowers/plans/2026-07-02-kuvatin-hardening.md — phases 1 through 6, then stop and report.</code>
+    <p class="note">The plan tells the executor to pause for your manual smoke test after Phase 2 and Phase 6, and to ask before Phase 7. Estimated scope: Phases 1–2 ≈ one solid session; 3–6 ≈ one to two more. Phase 7 items are individually sized on request.</p>
+  </div>
+</section>
+
+<footer>
+  Kuvatin codebase audit · v2.0.0 @ 4deb4d8 · 2026-07-02 · four parallel AI reviewers (video engine · GUI/shell · image core · UI/installer/CI), high-severity findings manually re-verified in source before inclusion.
+</footer>
+
+</div>
+</body>
+</html>
