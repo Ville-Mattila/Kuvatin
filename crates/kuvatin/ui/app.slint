@@ -323,6 +323,9 @@ component NumberDropdown inherits Rectangle {
         close-policy: close-on-click-outside;
         Rectangle {
             background: #20242c; border-radius: 6px; border-width: 1px; border-color: #343b46;
+            opacity: 0;
+            animate opacity { duration: 130ms; easing: ease-out; }
+            init => { self.opacity = 1; }
             LineEdit {
                 width: 84px; x: 4px; y: 3px;
                 text: root.value;
@@ -724,6 +727,9 @@ export component AppWindow inherits Window {
 
                         // empty-state
                         if root.files.length == 0: VerticalLayout {
+                            opacity: 0;
+                            animate opacity { duration: 200ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                             alignment: center;
                             spacing: 16px;
 
@@ -788,6 +794,10 @@ export component AppWindow inherits Window {
                                     ? #2dd4bf18
                                     : (row-ta.has-hover ? #262b34 : (Math.mod(i, 2) == 0 ? transparent : #1c2027));
                                 animate background { duration: 120ms; }
+                                // newly added files fade in
+                                opacity: 0;
+                                animate opacity { duration: 160ms; easing: ease-out; }
+                                init => { self.opacity = 1; }
                                 row-ta := TouchArea {
                                     clicked => { root.select-file(i); }
                                 }
@@ -910,6 +920,9 @@ export component AppWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
 
                         if root.cropping : HorizontalLayout {
+                            opacity: 0;
+                            animate opacity { duration: 160ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                             spacing: 6px;
                             NumberDropdown { label: "X"; value: round(root.crop-x * root.crop-img-w); maximum: root.crop-img-w - 1;
                                 edited(v) => { root.crop-x = Math.clamp(v / Math.max(root.crop-img-w, 1), 0.0, 1.0 - root.crop-w); } }
@@ -921,16 +934,19 @@ export component AppWindow inherits Window {
                                 edited(v) => { root.crop-h = Math.clamp(v / Math.max(root.crop-img-h, 1), 0.0, 1.0 - root.crop-y); } }
                             Rectangle {
                                 width: 26px; border-radius: 6px;
-                                background: root.aspect-lock ? #2dd4bf : #16181d;
-                                border-width: 1px; border-color: #343b46;
+                                background: root.aspect-lock ? #2dd4bf : (lock-ta.has-hover ? #1b202a : #16181d);
+                                border-width: 1px;
+                                border-color: root.aspect-lock ? #2dd4bf : (lock-ta.has-hover ? #46505f : #343b46);
+                                animate background, border-color { duration: 120ms; }
                                 // SVG (not an emoji glyph, which renders as tofu in
                                 // Slint) tinted to the active/idle state.
                                 Image {
                                     source: @image-url("../assets/ic_lock.svg");
                                     colorize: root.aspect-lock ? #08110f : #9aa3b2;
+                                    animate colorize { duration: 120ms; }
                                     width: 13px; height: 13px;
                                 }
-                                TouchArea { clicked => { root.aspect-lock = !root.aspect-lock; } }
+                                lock-ta := TouchArea { clicked => { root.aspect-lock = !root.aspect-lock; } }
                             }
                         }
                     }
@@ -1046,6 +1062,9 @@ export component AppWindow inherits Window {
                             text: "Select a file to preview";
                             color: #6b7585; font-size: 13px;
                             horizontal-alignment: center; vertical-alignment: center;
+                            opacity: 0;
+                            animate opacity { duration: 200ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                         }
 
                         // Plain preview when not cropping.
@@ -1217,6 +1236,9 @@ export component AppWindow inherits Window {
 
                     // PNG size optimization (only relevant for PNG output).
                     if root.format == "png": VerticalLayout {
+                        opacity: 0;
+                        animate opacity { duration: 160ms; easing: ease-out; }
+                        init => { self.opacity = 1; }
                         spacing: 6px;
                         FieldLabel { text: "PNG OPTIMIZATION"; }
                         ComboBox {
@@ -1229,6 +1251,9 @@ export component AppWindow inherits Window {
                     // in "Compress (lossy)" mode (png-mode == 2).
                     if root.format == "jpeg" || root.format == "webp"
                         || (root.format == "png" && root.png-mode == 2): VerticalLayout {
+                        opacity: 0;
+                        animate opacity { duration: 160ms; easing: ease-out; }
+                        init => { self.opacity = 1; }
                         spacing: 6px;
                         FieldLabel { text: "QUALITY (\{root.quality})"; }
                         QualitySlider {
@@ -1291,9 +1316,19 @@ export component AppWindow inherits Window {
                     // spacer pushes the action block to the bottom
                     Rectangle { vertical-stretch: 1; }
 
-                    if root.running: ProgressIndicator {
-                        height: 6px;
-                        progress: root.progress;
+                    // Custom bar (matches the import/export bars): glides between
+                    // per-file progress steps and fades in when the run starts.
+                    if root.running: Rectangle {
+                        height: 6px; border-radius: 3px; background: #2c313b;
+                        opacity: 0;
+                        animate opacity { duration: 150ms; }
+                        init => { self.opacity = 1; }
+                        Rectangle {
+                            x: 0; height: parent.height; border-radius: 3px;
+                            width: parent.width * Math.clamp(root.progress, 0, 1);
+                            animate width { duration: 220ms; easing: ease-out; }
+                            background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
+                        }
                     }
 
                     Rectangle {
@@ -1350,6 +1385,9 @@ export component AppWindow inherits Window {
                                 text: "Open a video or image\nto add it here";
                                 color: #6b7585; font-size: 11px;
                                 horizontal-alignment: center; vertical-alignment: center;
+                                opacity: 0;
+                                animate opacity { duration: 200ms; easing: ease-out; }
+                                init => { self.opacity = 1; }
                             }
                             if root.video-clips.length > 0 : ListView {
                                 // Click a bin item to add it to the timeline; the ×
@@ -1358,6 +1396,9 @@ export component AppWindow inherits Window {
                                     height: 33px; border-radius: 7px;
                                     background: asset-ta.has-hover ? #262b34 : transparent;
                                     animate background { duration: 120ms; }
+                                    opacity: 0;
+                                    animate opacity { duration: 160ms; easing: ease-out; }
+                                    init => { self.opacity = 1; }
                                     asset-ta := TouchArea { clicked => { root.video-add(i); } }
                                     HorizontalLayout {
                                         padding-left: 8px; padding-right: 8px; spacing: 8px;
@@ -1410,17 +1451,30 @@ export component AppWindow inherits Window {
                         background: #000;
                         border-radius: 9px; border-width: 1px; border-color: #2c313b;
                         clip: true;
-                        if root.video-frame.width > 0 : Image { source: root.video-frame; image-fit: contain; width: 100%; height: 100%; }
+                        if root.video-frame.width > 0 : Image {
+                            source: root.video-frame; image-fit: contain; width: 100%; height: 100%;
+                            // the composited preview fades in when the first frame lands
+                            opacity: 0;
+                            animate opacity { duration: 200ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
+                        }
                         if root.video-frame.width <= 0 : Text {
                             text: "Add a clip to the timeline to preview";
                             color: #6b7585; font-size: 13px;
                             horizontal-alignment: center; vertical-alignment: center;
+                            opacity: 0;
+                            animate opacity { duration: 200ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                         }
 
                         // Bounding box: move/resize the selected clip on the canvas.
                         // The TouchArea fills the (fixed) viewer for stable drag
                         // deltas; the visible box is derived from insp-* (reactive).
                         if root.inspector-name != "" && root.video-frame.width > 0 : edit-layer := Rectangle {
+                            // selection box fades in when a clip becomes selected
+                            opacity: 0;
+                            animate opacity { duration: 140ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                             // canvas → viewer mapping under image-fit: contain
                             property <bool> hlim: (self.width / self.height) > (root.canvas-w * 1.0 / root.canvas-h);
                             property <length> disp-w: hlim ? self.height * root.canvas-w / root.canvas-h : self.width;
@@ -1493,10 +1547,20 @@ export component AppWindow inherits Window {
                             width: 32px; border-radius: 8px;
                             background: pp-ta.has-hover ? #20242c : transparent;
                             animate background { duration: 110ms; }
+                            // Two stacked icons cross-fading beats an instant source swap.
                             Image {
-                                source: root.video-playing ? @image-url("../assets/ic_pause.svg") : @image-url("../assets/ic_play.svg");
+                                source: @image-url("../assets/ic_play.svg");
                                 colorize: #e6e9ef; width: 15px; height: 15px;
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                opacity: root.video-playing ? 0 : 1;
+                                animate opacity { duration: 120ms; }
+                            }
+                            Image {
+                                source: @image-url("../assets/ic_pause.svg");
+                                colorize: #e6e9ef; width: 15px; height: 15px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                opacity: root.video-playing ? 1 : 0;
+                                animate opacity { duration: 120ms; }
                             }
                             pp-ta := TouchArea { clicked => { root.video-playpause(); } }
                         }
@@ -1565,12 +1629,21 @@ export component AppWindow inherits Window {
                         if root.inspector-name == "" : Text {
                             text: "Select a clip to edit its\ntransform, opacity & volume";
                             color: #6b7585; font-size: 11px; vertical-alignment: center; horizontal-alignment: center;
+                            opacity: 0;
+                            animate opacity { duration: 180ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                         }
                         if root.inspector-name != "" : Text {
                             text: root.inspector-name; color: #f2f4f8; font-size: 13px; font-weight: 600;
                             overflow: elide;
+                            opacity: 0;
+                            animate opacity { duration: 180ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                         }
                         if root.inspector-name != "" : VerticalLayout {
+                            opacity: 0;
+                            animate opacity { duration: 180ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                             spacing: 6px;
                             InspSlider { label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
                             InspSlider { label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
@@ -1692,6 +1765,10 @@ export component AppWindow inherits Window {
                                 width: (clip.duration * root.timeline-pps) * 1px;
                                 height: 22px;
                                 background: transparent;
+                                // a clip dropped onto the timeline fades in
+                                opacity: 0;
+                                animate opacity { duration: 180ms; easing: ease-out; }
+                                init => { self.opacity = 1; }
                                 property <length> ddx: 0px;
                                 property <length> ddy: 0px;
                                 property <int> dmode: 0;
