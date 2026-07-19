@@ -55,13 +55,15 @@ component QualitySlider inherits Rectangle {
         height: 6px;
         border-radius: 3px;
         background: #2c313b;
-        // filled portion
+        // filled portion (the short animate gives clicks/preset changes a glide
+        // without making drags feel laggy)
         Rectangle {
             x: 0;
             width: parent.width * (root.value / 100.0);
             height: parent.height;
             border-radius: 3px;
             background: #2dd4bf;
+            animate width { duration: 80ms; easing: ease-out; }
         }
     }
 
@@ -75,6 +77,8 @@ component QualitySlider inherits Rectangle {
         border-color: #2dd4bf;
         y: parent.height / 2 - 8px;
         x: (root.width - 16px) * (root.value / 100.0);
+        animate x { duration: 80ms; easing: ease-out; }
+        animate background { duration: 100ms; }
     }
 
     ta := TouchArea {
@@ -107,12 +111,14 @@ component SecondaryButton inherits Rectangle {
     background: !root.enabled
         ? #191d24
         : (ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c));
+    animate background { duration: 130ms; }
     Text {
         text: root.text;
         color: root.enabled ? #f2f4f8 : #5b6472;
         font-size: 13px;
         horizontal-alignment: center;
         vertical-alignment: center;
+        animate color { duration: 130ms; }
     }
     ta := TouchArea {
         enabled: root.enabled;
@@ -159,6 +165,7 @@ component CropHandle inherits Rectangle {
         y: (parent.height - self.height) / 2;
         border-radius: 5px;
         background: ha.pressed ? #14b8a6 : #2dd4bf;
+        animate background { duration: 100ms; }
         border-width: 2px;
         border-color: #08110f;
     }
@@ -189,7 +196,9 @@ component WinButton inherits Rectangle {
     callback clicked();
     width: 46px;
     background: ta.has-hover ? (root.danger ? #e23b3b : #2c313b) : transparent;
+    animate background { duration: 110ms; }
     property <color> ink: ta.has-hover && root.danger ? #ffffff : #c8ccd4;
+    animate ink { duration: 110ms; }
 
     // Minimize: a single horizontal line.
     if root.kind == "min": Rectangle {
@@ -256,6 +265,7 @@ component SegToggle inherits Rectangle {
                 font-size: 12.5px;
                 font-weight: 600;
                 color: root.selected == i ? #08110f : #9aa3b2;
+                animate color { duration: 120ms; }
             }
             ta := TouchArea { clicked => { root.select(i); } }
         }
@@ -296,7 +306,10 @@ component NumberDropdown inherits Rectangle {
     in property <int> maximum: 100000;
     callback edited(int);           // fires with the new clamped value
     width: 66px; height: 24px; border-radius: 6px;
-    background: #16181d; border-width: 1px; border-color: #343b46;
+    background: ta.has-hover ? #1b202a : #16181d;
+    border-width: 1px;
+    border-color: ta.has-hover ? #46505f : #343b46;
+    animate background, border-color { duration: 120ms; }
     HorizontalLayout {
         padding-left: 6px; padding-right: 6px;
         Text { text: root.label + " " + root.value; color: #e6e9ef; font-size: 10px; vertical-alignment: center; }
@@ -334,11 +347,13 @@ component PillButton inherits Rectangle {
     background: pb-ta.has-hover ? #2b313c : (root.active ? #163a33 : #20242c);
     border-width: 1px;
     border-color: root.active ? #2dd4bf : #343b46;
+    animate background, border-color { duration: 120ms; }
     HorizontalLayout {
         padding-left: 10px; padding-right: 10px;
         Text {
             text: root.text; color: root.active ? #7ee6d8 : #cdd3dc;
             font-size: 10px; font-weight: 600; vertical-alignment: center;
+            animate color { duration: 120ms; }
         }
     }
     pb-ta := TouchArea { clicked => { root.clicked(); } }
@@ -363,6 +378,9 @@ component Scrubber inherits Rectangle {
             height: parent.height;
             border-radius: 3px;
             background: #2dd4bf;
+            // Linear 90ms: interpolates the ~100ms playback poll into a
+            // continuous glide instead of a stepping bar.
+            animate width { duration: 90ms; easing: linear; }
         }
     }
     Rectangle {
@@ -374,6 +392,8 @@ component Scrubber inherits Rectangle {
         border-color: #2dd4bf;
         y: parent.height / 2 - 6px;
         x: (root.width - 12px) * Math.clamp(root.value, 0, 1);
+        animate x { duration: 90ms; easing: linear; }
+        animate background { duration: 100ms; }
     }
     sta := TouchArea {
         function emit(mx: length) { root.changed(Math.clamp(mx / root.width, 0, 1)); }
@@ -412,6 +432,8 @@ component InspSlider inherits Rectangle {
                     x: 0; width: parent.width * root.frac; height: parent.height;
                     border-radius: 3px;
                     background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
+                    // Glides when a different clip is selected and its values load.
+                    animate width { duration: 80ms; easing: ease-out; }
                 }
             }
             knob := Rectangle {
@@ -420,6 +442,8 @@ component InspSlider inherits Rectangle {
                 border-width: 2px; border-color: #2dd4bf;
                 y: parent.height / 2 - 6px;
                 x: (parent.width - 12px) * root.frac;
+                animate x { duration: 80ms; easing: ease-out; }
+                animate background { duration: 100ms; }
             }
             kta := TouchArea {
                 function emit(mx: length) {
@@ -668,6 +692,10 @@ export component AppWindow inherits Window {
 
         // Body -----------------------------------------------------------
         if root.app-mode == 0: HorizontalLayout {
+            // Fade the whole mode in when toggled (created fresh each switch).
+            opacity: 0;
+            animate opacity { duration: 170ms; easing: ease-out; }
+            init => { self.opacity = 1; }
             padding: 16px;
             spacing: 0px;
 
@@ -759,6 +787,7 @@ export component AppWindow inherits Window {
                                 background: root.selected-index == i
                                     ? #2dd4bf18
                                     : (row-ta.has-hover ? #262b34 : (Math.mod(i, 2) == 0 ? transparent : #1c2027));
+                                animate background { duration: 120ms; }
                                 row-ta := TouchArea {
                                     clicked => { root.select-file(i); }
                                 }
@@ -813,6 +842,8 @@ export component AppWindow inherits Window {
                                         color: row.status == "done"
                                             ? #2dd4bf
                                             : (row.status == "error" ? #f87171 : #9aa3b2);
+                                        // queued → done/error fades instead of flicking
+                                        animate color { duration: 250ms; }
                                         font-size: 12px;
                                         vertical-alignment: center;
                                     }
@@ -1022,6 +1053,10 @@ export component AppWindow inherits Window {
                             source: root.viewer-image;
                             image-fit: contain;
                             width: 100%; height: 100%;
+                            // Fades in when the first selection lands / crop exits.
+                            opacity: 0;
+                            animate opacity { duration: 180ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
                         }
 
                         // Inline crop editor: a centered crop-box-w × crop-box-h
@@ -1035,6 +1070,9 @@ export component AppWindow inherits Window {
                             height: root.crop-box-h * 1px;
                             border-radius: 6px;
                             clip: true;
+                            opacity: 0;
+                            animate opacity { duration: 160ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
 
                             Image {
                                 source: root.viewer-image;
@@ -1266,9 +1304,11 @@ export component AppWindow inherits Window {
                             : (convert-ta.pressed
                                 ? #14b8a6
                                 : (convert-ta.has-hover ? #14b8a6 : #2dd4bf));
+                        animate background { duration: 150ms; }
                         Text {
                             text: root.running ? "Converting…" : "Convert";
                             color: root.running ? #9aa3b2 : #08110f;
+                            animate color { duration: 150ms; }
                             font-size: 14px;
                             font-weight: 700;
                             horizontal-alignment: center;
@@ -1283,6 +1323,9 @@ export component AppWindow inherits Window {
             }
         }
         if root.app-mode == 1: VerticalLayout {
+            opacity: 0;
+            animate opacity { duration: 170ms; easing: ease-out; }
+            init => { self.opacity = 1; }
             spacing: 0px;
 
             // ===== Main row: media bin · composited viewer + transport · inspector =====
@@ -1314,6 +1357,7 @@ export component AppWindow inherits Window {
                                 for asset[i] in root.video-clips : Rectangle {
                                     height: 33px; border-radius: 7px;
                                     background: asset-ta.has-hover ? #262b34 : transparent;
+                                    animate background { duration: 120ms; }
                                     asset-ta := TouchArea { clicked => { root.video-add(i); } }
                                     HorizontalLayout {
                                         padding-left: 8px; padding-right: 8px; spacing: 8px;
@@ -1327,13 +1371,20 @@ export component AppWindow inherits Window {
                                         Text {
                                             text: "+"; color: #2dd4bf; font-size: 18px; font-weight: 700;
                                             vertical-alignment: center; opacity: asset-ta.has-hover ? 1.0 : 0.0;
+                                            animate opacity { duration: 130ms; }
                                         }
                                         Rectangle {
                                             width: 18px; height: 18px; y: (parent.height - self.height) / 2;
                                             border-radius: 5px;
                                             background: rm-ta.has-hover ? #ff547033 : transparent;
                                             opacity: asset-ta.has-hover || rm-ta.has-hover ? 1.0 : 0.0;
-                                            Text { text: "✕"; color: rm-ta.has-hover ? #ff8098 : #7a828f; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                                            animate opacity { duration: 130ms; }
+                                            animate background { duration: 100ms; }
+                                            Text {
+                                                text: "✕"; color: rm-ta.has-hover ? #ff8098 : #7a828f; font-size: 10px;
+                                                horizontal-alignment: center; vertical-alignment: center;
+                                                animate color { duration: 100ms; }
+                                            }
                                             rm-ta := TouchArea { clicked => { root.video-bin-removed(i); } }
                                         }
                                     }
@@ -1441,6 +1492,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             width: 32px; border-radius: 8px;
                             background: pp-ta.has-hover ? #20242c : transparent;
+                            animate background { duration: 110ms; }
                             Image {
                                 source: root.video-playing ? @image-url("../assets/ic_pause.svg") : @image-url("../assets/ic_play.svg");
                                 colorize: #e6e9ef; width: 15px; height: 15px;
@@ -1452,9 +1504,11 @@ export component AppWindow inherits Window {
                         Rectangle {
                             width: 32px; border-radius: 8px;
                             background: root.video-repeat ? #2dd4bf22 : (rp-ta.has-hover ? #20242c : transparent);
+                            animate background { duration: 110ms; }
                             Image {
                                 source: @image-url("../assets/ic_repeat.svg");
                                 colorize: root.video-repeat ? #2dd4bf : #9aa3b2; width: 16px; height: 16px;
+                                animate colorize { duration: 150ms; }
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                             }
                             rp-ta := TouchArea { clicked => { root.video-repeat = !root.video-repeat; } }
@@ -1551,6 +1605,7 @@ export component AppWindow inherits Window {
                                 width: 74px; y: (parent.height - self.height) / 2; height: 19px;
                                 border-radius: 5px;
                                 background: exp-ta.has-hover ? #2dd4bf : #22c9b0;
+                                animate background { duration: 120ms; }
                                 Text { text: "Export"; color: #08110f; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                                 // Open the export settings dialog, defaulting the output
                                 // size to the current canvas.
@@ -1573,11 +1628,12 @@ export component AppWindow inherits Window {
                             for lbl[t] in root.timeline-track-labels : hdr := Rectangle {
                                 height: root.track-h;
                                 background: hta.pressed ? #20242c : #13161c;
+                                animate background { duration: 100ms; }
                                 border-width: 1px; border-color: #181c23;
                                 property <length> ddy: 0px;
                                 HorizontalLayout {
                                     padding-left: 9px; spacing: 6px;
-                                    Text { text: "≡"; color: hta.has-hover ? #8b95a6 : #5e6675; font-size: 11px; vertical-alignment: center; }
+                                    Text { text: "≡"; color: hta.has-hover ? #8b95a6 : #5e6675; font-size: 11px; vertical-alignment: center; animate color { duration: 120ms; } }
                                     Text { text: lbl; color: #8b95a6; font-size: 9px; vertical-alignment: center; overflow: elide; }
                                 }
                                 hta := TouchArea {
@@ -1671,6 +1727,7 @@ export component AppWindow inherits Window {
                                         : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
                                     border-width: clip.selected ? 2px : 1px;
                                     border-color: clip.selected ? #2dd4bf : #00000055;
+                                    animate border-color { duration: 130ms; }
                                     // thumbnail (covers the gradient once generated)
                                     Image { source: clip.thumb; image-fit: cover; width: 100%; height: 100%; }
                                     // left scrim so the name stays legible over the thumb
@@ -1683,6 +1740,10 @@ export component AppWindow inherits Window {
                                         x: parent.width - self.width - 3px; y: 3px;
                                         width: 15px; height: 15px; border-radius: 5px;
                                         background: del-ta.has-hover ? #ff5470 : #00000088;
+                                        animate background { duration: 100ms; }
+                                        opacity: 0;
+                                        animate opacity { duration: 140ms; }
+                                        init => { self.opacity = 1; }
                                         Text { text: "✕"; color: white; font-size: 9px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                                         del-ta := TouchArea { clicked => { root.timeline-clip-removed(i); } }
                                     }
@@ -1754,9 +1815,11 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // playhead
+                            // playhead — the 90ms linear animate interpolates the
+                            // ~100ms position poll into a continuous glide.
                             Rectangle {
                                 x: (root.playhead * root.timeline-pps) * 1px - lane.scroll;
+                                animate x { duration: 90ms; easing: linear; }
                                 width: 2px; height: parent.height;
                                 background: #ff5470;
                             }
@@ -1771,6 +1834,7 @@ export component AppWindow inherits Window {
                                     width: parent.thumb-w; height: parent.height;
                                     border-radius: 3px;
                                     background: sbta.pressed ? #2dd4bf : (sbta.has-hover ? #ffffff66 : #ffffff40);
+                                    animate background { duration: 120ms; }
                                 }
                                 sbta := TouchArea {
                                     function set(mx: length) {
@@ -1790,14 +1854,17 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
                                 y: root.timeline-track-labels.length * root.track-h + 4px;
+                                animate y { duration: 160ms; easing: ease-out; }
                                 x: 4px; width: parent.width - 8px; height: 26px;
                                 border-radius: 7px;
                                 background: root.clip-dragging ? (active ? #2dd4bfcc : #16342ee0) : #ffffff08;
                                 border-width: root.clip-dragging ? 2px : 1px;
                                 border-color: root.clip-dragging ? (active ? #ffffff : #2dd4bf) : #ffffff1f;
+                                animate background, border-color { duration: 140ms; }
                                 Text {
                                     text: root.clip-dragging ? "+  Drop here for a new track" : "+  New track";
                                     color: root.clip-dragging ? (active ? #08110f : #8bf0e2) : #6b7585;
+                                    animate color { duration: 140ms; }
                                     font-size: 10.5px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
@@ -1817,20 +1884,28 @@ export component AppWindow inherits Window {
     if root.clip-dragging : Rectangle {
         property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
         property <length> band-h: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
+        // Entrance: fade + rise so the banner glides in instead of popping.
+        property <length> rise: 10px;
+        opacity: 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+        animate rise { duration: 200ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.1); }
+        init => { self.opacity = 1; self.rise = 0px; }
         width: 330px; height: 46px;
         x: (parent.width - self.width) / 2;
         // Float in the lower viewer, clear of the transport controls and timeline.
-        y: parent.height - self.band-h - self.height - 66px;
+        y: parent.height - self.band-h - self.height - 66px + self.rise;
         border-radius: 23px;
         background: active ? #2dd4bf : #16342ef7;
         border-width: 2px;
         border-color: active ? #ffffff : #2dd4bf;
+        animate background, border-color { duration: 140ms; }
         drop-shadow-blur: 18px;
         drop-shadow-color: #000000b0;
         drop-shadow-offset-y: 5px;
         Text {
             text: active ? "+  Release to create a new track" : "Drag below the last track to add one";
             color: active ? #08110f : #9ff0e4;
+            animate color { duration: 140ms; }
             font-size: 12px; font-weight: 700;
             horizontal-alignment: center; vertical-alignment: center;
         }
@@ -1839,12 +1914,18 @@ export component AppWindow inherits Window {
     // Import progress modal — overlays everything while files are being imported.
     if root.importing : Rectangle {
         background: #000000b0;
+        opacity: 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+        init => { self.opacity = 1; }
         // Swallow clicks behind the modal.
         TouchArea {}
         Rectangle {
+            property <length> rise: 14px;
+            animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
+            init => { self.rise = 0px; }
             width: 320px; height: 172px;
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: (parent.height - self.height) / 2 + self.rise;
             background: #1b1f27;
             border-radius: 12px;
             border-width: 1px; border-color: #2c313b;
@@ -1860,6 +1941,8 @@ export component AppWindow inherits Window {
                     Rectangle {
                         x: 0; height: parent.height; border-radius: 4px;
                         width: root.import-total > 0 ? parent.width * root.import-done / root.import-total : 0px;
+                        // Per-file steps are chunky; glide between them.
+                        animate width { duration: 250ms; easing: ease-out; }
                         background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
                     }
                 }
@@ -1873,6 +1956,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         width: 92px; height: 30px; border-radius: 7px;
                         background: imp-cancel-ta.has-hover ? #2b313c : #20242c;
+                        animate background { duration: 120ms; }
                         border-width: 1px; border-color: #343b46;
                         Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         imp-cancel-ta := TouchArea { clicked => { root.import-cancel(); } }
@@ -1886,11 +1970,17 @@ export component AppWindow inherits Window {
     // Export (which opens the save dialog and starts the render).
     if root.export-config : Rectangle {
         background: #000000b0;
+        opacity: 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+        init => { self.opacity = 1; }
         TouchArea {}   // swallow clicks on the dim backdrop
         Rectangle {
+            property <length> rise: 14px;
+            animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
+            init => { self.rise = 0px; }
             width: 440px; height: 496px;
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: (parent.height - self.height) / 2 + self.rise;
             background: #1b1f27; border-radius: 12px; border-width: 1px; border-color: #2c313b;
             VerticalLayout {
                 padding: 22px; spacing: 11px;
@@ -1949,12 +2039,14 @@ export component AppWindow inherits Window {
                     Rectangle {
                         width: 92px; height: 32px; border-radius: 7px;
                         background: cancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
+                        animate background { duration: 120ms; }
                         Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         cancel-ta := TouchArea { clicked => { root.export-config = false; } }
                     }
                     Rectangle {
                         width: 112px; height: 32px; border-radius: 7px;
                         background: exp2-ta.has-hover ? #2dd4bf : #22c9b0;
+                        animate background { duration: 120ms; }
                         Text { text: "Export…"; color: #08110f; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                         exp2-ta := TouchArea { clicked => { root.export-config = false; root.video-export(); } }
                     }
@@ -1966,11 +2058,17 @@ export component AppWindow inherits Window {
     // Export/render progress modal (with Cancel).
     if root.exporting : Rectangle {
         background: #000000b0;
+        opacity: 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+        init => { self.opacity = 1; }
         TouchArea {}
         Rectangle {
+            property <length> rise: 14px;
+            animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
+            init => { self.rise = 0px; }
             width: 360px; height: 168px;
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: (parent.height - self.height) / 2 + self.rise;
             background: #1b1f27;
             border-radius: 12px;
             border-width: 1px; border-color: #2c313b;
@@ -1986,6 +2084,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         x: 0; height: parent.height; border-radius: 4px;
                         width: parent.width * Math.clamp(root.export-progress, 0, 1);
+                        animate width { duration: 180ms; easing: linear; }
                         background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
                     }
                 }
@@ -2000,6 +2099,7 @@ export component AppWindow inherits Window {
                         width: 92px; height: 30px;
                         border-radius: 7px;
                         background: xcancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
+                        animate background { duration: 120ms; }
                         Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         xcancel-ta := TouchArea { clicked => { root.export-cancel(); } }
                     }
@@ -2012,11 +2112,17 @@ export component AppWindow inherits Window {
     // silent (in the release windowed build stderr does not exist).
     if root.error-visible : Rectangle {
         background: #000000c0;
+        opacity: 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+        init => { self.opacity = 1; }
         TouchArea {}
         Rectangle {
+            property <length> rise: 14px;
+            animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
+            init => { self.rise = 0px; }
             width: 420px; height: 200px;
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: (parent.height - self.height) / 2 + self.rise;
             background: #1b1f27; border-radius: 12px;
             border-width: 1px; border-color: #4a2a30;
             VerticalLayout {
@@ -2039,6 +2145,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         width: 88px; height: 32px;
                         border-radius: 7px; background: err-ok-ta.has-hover ? #2dd4bf : #22c9b0;
+                        animate background { duration: 120ms; }
                         Text { text: "OK"; color: #08110f; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                         err-ok-ta := TouchArea { clicked => { root.error-visible = false; } }
                     }
