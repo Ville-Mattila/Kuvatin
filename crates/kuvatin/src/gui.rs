@@ -1036,8 +1036,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
                 // Vertical: move to another track (or a new bottom track). Clamp
                 // to [0, count]; count means "one past the last" = a new track.
+                // Visible label rows count too — a click-added track may not have
+                // a GES layer yet, and layer() creates any intermediates on
+                // demand, so dropping onto ANY visible row lands exactly there.
                 if delta_rows != 0 {
-                    let count = p.track_count() as i32;
+                    let count = (p.track_count() as i32).max(tracks.row_count() as i32);
                     let target = (row.track + delta_rows).clamp(0, count);
                     if target != row.track {
                         if let Some(t) = p.move_clip_to_track(&cid, target as usize) {
@@ -1111,6 +1114,22 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 } else {
                     snapped
                 }
+            });
+        }
+
+        // Click "+ New track": append an empty visual track row. The GES layer is
+        // created lazily when a clip first lands there (exactly how the built-in
+        // empty "Track 2" works), so an added-but-empty track can never be taken
+        // away by remove_clip's trailing-layer pruning. Capped so the timeline
+        // band can't grow to eat the whole viewer.
+        {
+            let tracks = video_tracks.clone();
+            ui.on_add_track(move || {
+                if tracks.row_count() >= 8 {
+                    return;
+                }
+                let n = tracks.row_count() + 1;
+                tracks.push(SharedString::from(format!("Track {n}")));
             });
         }
 

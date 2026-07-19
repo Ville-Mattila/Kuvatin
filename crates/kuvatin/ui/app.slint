@@ -553,6 +553,7 @@ export component AppWindow inherits Window {
     callback video-export();
     callback export-cancel();                  // abort a running render
     callback import-cancel();                  // abort an in-flight media import
+    callback add-track();                      // click "+ New track" → new empty row
     // App-wide error surface (a modal that stays until dismissed). Set from Rust
     // via the error-* properties; the OK button clears `error-visible`.
     in-out property <bool> error-visible: false;
@@ -1934,16 +1935,28 @@ export component AppWindow inherits Window {
                                 animate y { duration: 160ms; easing: ease-out; }
                                 x: 4px; width: parent.width - 8px; height: 26px;
                                 border-radius: 7px;
-                                background: root.clip-dragging ? (active ? #2dd4bfcc : #16342ee0) : #ffffff08;
+                                background: root.clip-dragging
+                                    ? (active ? #2dd4bfcc : #16342ee0)
+                                    : (nt-ta.has-hover ? #ffffff14 : #ffffff08);
                                 border-width: root.clip-dragging ? 2px : 1px;
-                                border-color: root.clip-dragging ? (active ? #ffffff : #2dd4bf) : #ffffff1f;
+                                border-color: root.clip-dragging
+                                    ? (active ? #ffffff : #2dd4bf)
+                                    : (nt-ta.has-hover ? #2dd4bf88 : #ffffff1f);
                                 animate background, border-color { duration: 140ms; }
                                 Text {
                                     text: root.clip-dragging ? "+  Drop here for a new track" : "+  New track";
-                                    color: root.clip-dragging ? (active ? #08110f : #8bf0e2) : #6b7585;
+                                    color: root.clip-dragging
+                                        ? (active ? #08110f : #8bf0e2)
+                                        : (nt-ta.has-hover ? #8bf0e2 : #6b7585);
                                     animate color { duration: 140ms; }
                                     font-size: 10.5px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                // Click to add an empty track row (drops still work as before).
+                                nt-ta := TouchArea {
+                                    enabled: !root.clip-dragging;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.add-track(); }
                                 }
                             }
                         }
