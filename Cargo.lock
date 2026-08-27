@@ -3064,6 +3064,8 @@ dependencies = [
  "gstreamer-editing-services",
  "gstreamer-pbutils",
  "gstreamer-video",
+ "image",
+ "rayon",
 ]
 
 [[package]]

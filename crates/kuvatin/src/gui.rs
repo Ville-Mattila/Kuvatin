@@ -158,11 +158,69 @@ fn add_to_timeline(
     }
 }
 
+/// Append an image sequence to the timeline as a clip. The `imagesequence://`
+/// URI carries an intrinsic duration (frames ÷ fps), so GES places it like a
+/// video; `kind: 2` gives it the sequence styling in the timeline.
+fn add_sequence_to_timeline(
+    spec: &kuvatin_video::SequenceSpec,
+    clip_name: &str,
+    ui_weak: &slint::Weak<AppWindow>,
+    project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
+    tl_clips: &Rc<VecModel<TimelineClip>>,
+    thumb: Image,
+) {
+    if project_slot.borrow().is_none() {
+        *project_slot.borrow_mut() = make_project(ui_weak);
+    }
+    let mut slot = project_slot.borrow_mut();
+    let Some(project) = slot.as_mut() else {
+        return;
+    };
+    let added = spec
+        .uri()
+        // Sequences are footage, not overlays: the base video track (GES
+        // composites lower layer indices on top, so videos live on 1).
+        .and_then(|uri| project.append_clip_uri(&uri, 1, None));
+    match added {
+        Ok(info) => {
+            tl_clips.push(TimelineClip {
+                id: info.id.0.clone().into(),
+                track: info.track as i32,
+                start: info.start.as_secs_f32(),
+                duration: info.duration.as_secs_f32(),
+                inpoint: 0.0,
+                name: clip_name.into(),
+                kind: 2,
+                selected: false,
+                thumb,
+            });
+            let _ = project.play();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_video_playing(true);
+                if let Some(d) = project.duration() {
+                    ui.set_timeline_duration(d.as_secs_f32());
+                }
+            }
+        }
+        Err(e) => {
+            if let Some(ui) = ui_weak.upgrade() {
+                show_error(&ui, "Could not add sequence", format!("{e:#}"));
+            }
+        }
+    }
+}
+
 pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // Self-heal the per-user Explorer context-menu registration: the MSI only
     // registers for the installing user, so other accounts (or a moved exe)
     // pick it up here on first launch. Best-effort, never blocks startup.
     crate::shell::ensure_registered();
+
+    // Sweep stale EXR→PNG sequence-conversion cache entries (best-effort;
+    // entries untouched for a week go — a reuse re-stamps its entry).
+    std::thread::spawn(|| {
+        kuvatin_video::sweep_sequence_cache(std::time::Duration::from_secs(7 * 24 * 3600));
+    });
 
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
@@ -777,6 +835,38 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // the partial file.
         let export_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
 
+        // Image-sequence import state. `pending_seq` holds the detected sequence
+        // while its confirm dialog is open; `seq_by_path` maps a media-bin entry
+        // (keyed by the sequence's FIRST frame) to its import-ready spec so a
+        // bin click re-adds the sequence, not a single still.
+        let pending_seq: Rc<RefCell<Option<kuvatin_video::SequenceSpec>>> =
+            Rc::new(RefCell::new(None));
+        let seq_by_path: Rc<RefCell<HashMap<PathBuf, kuvatin_video::SequenceSpec>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        /// Worker → UI handoff for a finished sequence import.
+        struct SeqResult {
+            /// The original sequence's first frame (identity in bin/"seen").
+            first: PathBuf,
+            /// Media-bin label (original pattern + frame count).
+            bin_name: String,
+            /// Timeline-clip label (original pattern).
+            clip_name: String,
+            /// The import-ready spec (post-EXR-conversion); None on failure.
+            spec: Option<kuvatin_video::SequenceSpec>,
+            thumb: Option<kuvatin_video::Frame>,
+            err: Option<String>,
+            /// The user cancelled mid-import — drop silently, no error dialog.
+            cancelled: bool,
+        }
+        let seq_ready: Arc<Mutex<std::collections::VecDeque<SeqResult>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        // EXR-conversion progress (done, total) — the import timer mirrors it
+        // into the import modal while a sequence import is in flight.
+        let seq_progress: Arc<(std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU32)> =
+            Arc::new(Default::default());
+        let seq_active = Rc::new(std::cell::Cell::new(false));
+        let seq_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // Open media via the file dialog → the same import queue as drag-and-drop.
         {
             let ui_weak = ui_weak.clone();
@@ -817,6 +907,135 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             });
         }
 
+        // Import an image sequence: pick its FIRST frame, detect the numbered
+        // run in the same directory, and open the confirm dialog (frame count +
+        // frame rate) — the actual import happens on seq-confirm.
+        {
+            let ui_weak = ui_weak.clone();
+            let pending_seq = pending_seq.clone();
+            ui.on_video_open_sequence(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("First frame of a sequence", &["png", "jpg", "jpeg", "exr"])
+                    .pick_file()
+                else {
+                    return;
+                };
+                match kuvatin_video::detect_sequence(&path) {
+                    Ok(spec) => {
+                        ui.set_seq_range(
+                            format!(
+                                "{} → {}",
+                                spec.frame_file_name(spec.start),
+                                spec.frame_file_name(spec.start + spec.count - 1)
+                            )
+                            .into(),
+                        );
+                        ui.set_seq_count(spec.count.min(i32::MAX as u64) as i32);
+                        *pending_seq.borrow_mut() = Some(spec);
+                        ui.set_seq_config(true);
+                    }
+                    Err(e) => show_error(&ui, "Not an image sequence", format!("{e:#}")),
+                }
+            });
+        }
+
+        // Sequence confirmed: import on a worker thread — EXR frames convert to
+        // PNG first (GStreamer has no EXR decoder; progress feeds the import
+        // modal), then the `imagesequence://` asset is discovered and thumbed.
+        // The import timer drains the result onto the bin + timeline.
+        {
+            let ui_weak = ui_weak.clone();
+            let pending_seq = pending_seq.clone();
+            let import_seen = import_seen.clone();
+            let seq_ready = seq_ready.clone();
+            let seq_progress = seq_progress.clone();
+            let seq_active = seq_active.clone();
+            let seq_cancel = seq_cancel.clone();
+            ui.on_seq_confirm(move || {
+                use std::sync::atomic::Ordering;
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                let Some(mut spec) = pending_seq.borrow_mut().take() else {
+                    return;
+                };
+                spec.fps = ui.get_seq_fps().clamp(1, 240) as u32;
+                let first = spec.first_path();
+                if import_seen.borrow().contains(&first) {
+                    show_error(
+                        &ui,
+                        "Already imported",
+                        "That sequence is already in the media bin.",
+                    );
+                    return;
+                }
+                import_seen.borrow_mut().insert(first.clone());
+                seq_cancel.store(false, Ordering::Relaxed);
+                seq_progress.0.store(0, Ordering::Relaxed);
+                seq_progress.1.store(0, Ordering::Relaxed);
+                seq_active.set(true);
+                ui.set_importing(true);
+                ui.set_import_done(0);
+                ui.set_import_total(1);
+                let bin_name = format!("{} · {}f", spec.pattern_name(), spec.count);
+                let clip_name = spec.pattern_name();
+                let seq_ready = seq_ready.clone();
+                let seq_progress = seq_progress.clone();
+                let seq_cancel = seq_cancel.clone();
+                std::thread::spawn(move || {
+                    type Ready = (kuvatin_video::SequenceSpec, Option<kuvatin_video::Frame>);
+                    let result = (|| -> std::result::Result<Ready, String> {
+                        let spec = if spec.is_exr() {
+                            kuvatin_video::convert_exr_sequence(
+                                &spec,
+                                |done, total| {
+                                    seq_progress
+                                        .0
+                                        .store(done.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                                    seq_progress
+                                        .1
+                                        .store(total.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                                },
+                                &seq_cancel,
+                            )
+                            .map_err(|e| format!("{e:#}"))?
+                        } else {
+                            spec
+                        };
+                        let uri = spec.uri().map_err(|e| format!("{e:#}"))?;
+                        kuvatin_video::warm_asset_uri(&uri).map_err(|e| format!("{e:#}"))?;
+                        let thumb = kuvatin_video::thumbnail_uri(&uri, 160);
+                        Ok((spec, thumb))
+                    })();
+                    let cancelled = seq_cancel.load(Ordering::Relaxed);
+                    let item = match result {
+                        Ok((spec, thumb)) => SeqResult {
+                            first,
+                            bin_name,
+                            clip_name,
+                            spec: Some(spec),
+                            thumb,
+                            err: None,
+                            cancelled,
+                        },
+                        Err(e) => SeqResult {
+                            first,
+                            bin_name,
+                            clip_name,
+                            spec: None,
+                            thumb: None,
+                            err: Some(e),
+                            cancelled,
+                        },
+                    };
+                    seq_ready.lock().unwrap().push_back(item);
+                });
+            });
+        }
+
         // Cancel an in-flight import: stop the modal and discard the queue. The
         // worker keeps draining in the background (results ignored); a file whose
         // discovery is mid-flight finishes that one call, then bows out.
@@ -828,11 +1047,19 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let import_done = import_done.clone();
             let import_seen = import_seen.clone();
             let bin_paths = bin_paths.clone();
+            let seq_cancel = seq_cancel.clone();
+            let seq_ready = seq_ready.clone();
+            let seq_active = seq_active.clone();
             ui.on_import_cancel(move || {
                 import_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 import_ready.lock().unwrap().clear();
                 import_total.set(0);
                 import_done.set(0);
+                // Abort a running sequence import too (the EXR conversion
+                // checks the flag per frame and cleans up its partial cache).
+                seq_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                seq_ready.lock().unwrap().clear();
+                seq_active.set(false);
                 // Re-seed "seen" from what actually made it into the bin, so the
                 // discarded-but-not-added files can be imported again later.
                 *import_seen.borrow_mut() = bin_paths.borrow().iter().cloned().collect();
@@ -854,6 +1081,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let import_total = import_total.clone();
             let import_done = import_done.clone();
             let import_seen = import_seen.clone();
+            let seq_ready = seq_ready.clone();
+            let seq_progress = seq_progress.clone();
+            let seq_active = seq_active.clone();
+            let seq_by_path = seq_by_path.clone();
             // Names of files that failed discovery this import, for one summary.
             let import_failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
             let timer = slint::Timer::default();
@@ -886,23 +1117,81 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
                         }
                     }
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_import_done(import_done.get() as i32);
-                        if import_total.get() > 0 && import_done.get() >= import_total.get() {
+                    // Finished sequence imports (at most one in flight): land the
+                    // clip on the bin + timeline, or surface the failure.
+                    loop {
+                        let item = seq_ready.lock().unwrap().pop_front();
+                        let Some(res) = item else {
+                            break;
+                        };
+                        seq_active.set(false);
+                        let Some(ui) = ui_weak.upgrade() else {
+                            continue;
+                        };
+                        // Close the modal unless a file import still drives it.
+                        if import_total.get() == 0 {
                             ui.set_importing(false);
-                            import_total.set(0);
-                            import_done.set(0);
-                            let failures = std::mem::take(&mut *import_failures.borrow_mut());
-                            if !failures.is_empty() {
+                        }
+                        match (res.spec, res.err, res.cancelled) {
+                            (_, _, true) => {
+                                // User cancelled: forget it silently, allow re-import.
+                                import_seen.borrow_mut().remove(&res.first);
+                            }
+                            (Some(spec), None, false) => {
+                                let thumb = frame_to_image(res.thumb);
+                                assets.push(VideoAsset {
+                                    name: res.bin_name.into(),
+                                    thumb: thumb.clone(),
+                                });
+                                bin_paths.borrow_mut().push(res.first.clone());
+                                seq_by_path.borrow_mut().insert(res.first, spec.clone());
+                                add_sequence_to_timeline(
+                                    &spec,
+                                    &res.clip_name,
+                                    &ui_weak,
+                                    &project_slot,
+                                    &tl_clips,
+                                    thumb,
+                                );
+                            }
+                            (_, err, false) => {
+                                import_seen.borrow_mut().remove(&res.first);
                                 show_error(
                                     &ui,
-                                    "Some files could not be imported",
-                                    format!(
-                                        "{} file(s) couldn't be read as media:\n{}",
-                                        failures.len(),
-                                        failures.join("\n")
-                                    ),
+                                    "Could not import sequence",
+                                    err.unwrap_or_else(|| "unknown error".into()),
                                 );
+                            }
+                        }
+                    }
+                    if let Some(ui) = ui_weak.upgrade() {
+                        if import_total.get() > 0 {
+                            ui.set_import_done(import_done.get() as i32);
+                            if import_done.get() >= import_total.get() {
+                                ui.set_importing(false);
+                                import_total.set(0);
+                                import_done.set(0);
+                                let failures = std::mem::take(&mut *import_failures.borrow_mut());
+                                if !failures.is_empty() {
+                                    show_error(
+                                        &ui,
+                                        "Some files could not be imported",
+                                        format!(
+                                            "{} file(s) couldn't be read as media:\n{}",
+                                            failures.len(),
+                                            failures.join("\n")
+                                        ),
+                                    );
+                                }
+                            }
+                        } else if seq_active.get() {
+                            // Mirror the EXR-conversion progress (file imports
+                            // take display precedence over it).
+                            use std::sync::atomic::Ordering;
+                            let total = seq_progress.1.load(Ordering::Relaxed);
+                            if total > 0 {
+                                ui.set_import_done(seq_progress.0.load(Ordering::Relaxed) as i32);
+                                ui.set_import_total(total as i32);
                             }
                         }
                     }
@@ -918,6 +1207,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let tl_clips = tl_clips.clone();
             let assets = assets.clone();
             let bin_paths = bin_paths.clone();
+            let seq_by_path = seq_by_path.clone();
             ui.on_video_add(move |i| {
                 let Some(path) = bin_paths.borrow().get(i as usize).cloned() else {
                     return;
@@ -926,6 +1216,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     .row_data(i as usize)
                     .map(|a| a.thumb)
                     .unwrap_or_default();
+                // A bin entry backed by an image sequence re-adds the whole
+                // sequence, not the single first-frame file.
+                if let Some(spec) = seq_by_path.borrow().get(&path).cloned() {
+                    let name = spec.pattern_name();
+                    add_sequence_to_timeline(&spec, &name, &ui_weak, &project_slot, &tl_clips, thumb);
+                    return;
+                }
                 add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
             });
         }
@@ -943,20 +1240,21 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 sel_idx.set(i);
                 let mut name = SharedString::new();
                 let mut sel_id = SharedString::new();
-                let mut is_img = false;
+                let mut sel_kind = 0;
                 for idx in 0..tl_clips.row_count() {
                     if let Some(mut c) = tl_clips.row_data(idx) {
                         c.selected = idx as i32 == i;
                         if c.selected {
                             name = c.name.clone();
                             sel_id = c.id.clone();
-                            is_img = c.kind == 1;
+                            sel_kind = c.kind;
                         }
                         tl_clips.set_row_data(idx, c);
                     }
                 }
                 ui.set_inspector_name(name);
-                ui.set_insp_has_audio(!is_img);
+                // Only real videos carry audio — stills and image sequences don't.
+                ui.set_insp_has_audio(sel_kind == 0);
                 // Give a fresh clip an aspect-correct default, then reflect its
                 // current layout into the sliders.
                 {
@@ -1466,6 +1764,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let video_assets = video_assets.clone();
             let bin_paths = bin_paths.clone();
             let import_seen = import_seen.clone();
+            let seq_by_path = seq_by_path.clone();
             ui.on_video_bin_removed(move |i| {
                 if i < 0 {
                     return;
@@ -1478,6 +1777,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 if i < bp.len() {
                     let removed = bp.remove(i);
                     import_seen.borrow_mut().remove(&removed);
+                    seq_by_path.borrow_mut().remove(&removed);
                 }
             });
         }

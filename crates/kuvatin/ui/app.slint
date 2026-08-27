@@ -17,7 +17,7 @@ export struct TimelineClip {
     duration: float,   // seconds
     inpoint: float,    // seconds into the source (trim offset)
     name: string,
-    kind: int,         // 0 = video, 1 = image
+    kind: int,         // 0 = video, 1 = image, 2 = image sequence
     selected: bool,
     thumb: image,
 }
@@ -499,6 +499,13 @@ export component AppWindow inherits Window {
     in property <[VideoAsset]> video-clips;
     callback video-open();
     callback video-add(int);               // add a media-bin item to the timeline
+    // Image-sequence import: pick the first frame, then confirm fps in a dialog.
+    callback video-open-sequence();
+    callback seq-confirm();                    // add the detected sequence
+    in-out property <bool> seq-config: false;  // sequence confirm dialog open
+    in property <string> seq-range: "";        // "frame_0001.png → frame_0172.png"
+    in property <int> seq-count: 0;            // detected frame count
+    in-out property <int> seq-fps: 30;         // one file = one frame at this rate
     callback video-playpause();
     callback video-seek(float);            // fraction 0..1
     callback video-volume-changed(float);  // 0..1
@@ -1434,6 +1441,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         SecondaryButton { text: "Open media…"; clicked => { root.video-open(); } }
+                        SecondaryButton { text: "Import sequence…"; clicked => { root.video-open-sequence(); } }
                     }
                 }
 
@@ -1802,7 +1810,9 @@ export component AppWindow inherits Window {
                                     clip: true;
                                     background: clip.kind == 0
                                         ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
-                                        : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
+                                        : clip.kind == 2
+                                            ? @linear-gradient(135deg, #8b5cf6 0%, #5b34c9 100%)
+                                            : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
                                     border-width: clip.selected ? 2px : 1px;
                                     border-color: clip.selected ? #2dd4bf : #00000055;
                                     animate border-color { duration: 130ms; }
@@ -2192,6 +2202,66 @@ export component AppWindow inherits Window {
                         animate background { duration: 120ms; }
                         Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                         xcancel-ta := TouchArea { clicked => { root.export-cancel(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // Image-sequence import dialog: shows the detected frame range and lets the
+    // user pick the frame rate (one file = one frame) before adding the clip.
+    if root.seq-config : Rectangle {
+        background: #000000b0;
+        opacity: 0;
+        animate opacity { duration: 150ms; easing: ease-out; }
+        init => { self.opacity = 1; }
+        TouchArea {}   // swallow clicks on the dim backdrop
+        Rectangle {
+            property <length> rise: 14px;
+            animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
+            init => { self.rise = 0px; }
+            width: 440px; height: 252px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 + self.rise;
+            background: #1b1f27; border-radius: 12px; border-width: 1px; border-color: #2c313b;
+            VerticalLayout {
+                padding: 22px; spacing: 11px;
+                Text { text: "Import image sequence"; color: #f2f4f8; font-size: 15px; font-weight: 700; }
+                Text { text: root.seq-range; color: #cdd3dc; font-size: 12px; overflow: elide; }
+                Text {
+                    text: root.seq-count + " frames  ·  " + Math.round(root.seq-count * 10 / Math.max(1, root.seq-fps)) / 10 + " s at " + root.seq-fps + " fps";
+                    color: #9aa3b2; font-size: 11px;
+                }
+
+                Text { text: "FRAME RATE"; color: #8b95a6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    NumberDropdown { label: ""; value: root.seq-fps; minimum: 1; maximum: 240; edited(v) => { root.seq-fps = v; } }
+                    PillButton { text: "24"; active: root.seq-fps == 24; clicked => { root.seq-fps = 24; } }
+                    PillButton { text: "25"; active: root.seq-fps == 25; clicked => { root.seq-fps = 25; } }
+                    PillButton { text: "30"; active: root.seq-fps == 30; clicked => { root.seq-fps = 30; } }
+                    PillButton { text: "60"; active: root.seq-fps == 60; clicked => { root.seq-fps = 60; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 92px; height: 32px; border-radius: 7px;
+                        background: seq-cancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
+                        animate background { duration: 120ms; }
+                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        seq-cancel-ta := TouchArea { clicked => { root.seq-config = false; } }
+                    }
+                    Rectangle {
+                        width: 132px; height: 32px; border-radius: 7px;
+                        background: seq-add-ta.has-hover ? #2dd4bf : #22c9b0;
+                        animate background { duration: 120ms; }
+                        Text { text: "Add to timeline"; color: #08110f; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                        seq-add-ta := TouchArea { clicked => { root.seq-config = false; root.seq-confirm(); } }
                     }
                 }
             }

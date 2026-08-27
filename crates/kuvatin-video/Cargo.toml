@@ -14,3 +14,7 @@ gstreamer-pbutils = { version = "0.23", features = ["v1_20"] }
 # v1_20 enables GESVideoSource::natural_size (aspect-correct scaling); SDK is 1.26.
 gstreamer-editing-services = { version = "0.23", features = ["v1_20"] }
 anyhow = { workspace = true }
+# EXR sequence support: GStreamer's Windows binaries ship no OpenEXR plugin, so
+# .exr frames are decoded in Rust (and tonemapped to sRGB PNG) before import.
+image = { workspace = true }
+rayon = { workspace = true }

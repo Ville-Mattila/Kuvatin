@@ -42,11 +42,17 @@ pub struct ClipGeom {
 /// the UI thread; a subsequent `add_clip`/`append_clip` then hits the warm cache
 /// and returns immediately instead of blocking the UI on discovery.
 pub fn warm_asset(path: &Path) -> Result<()> {
+    let uri = gst::glib::filename_to_uri(path, None)?;
+    warm_asset_uri(&uri)
+}
+
+/// URI form of [`warm_asset`], for sources that aren't a single file (image
+/// sequences use the `imagesequence://` scheme).
+pub fn warm_asset_uri(uri: &str) -> Result<()> {
     gst::init()?;
     ges::init()?;
     ensure_encoder_ranks();
-    let uri = gst::glib::filename_to_uri(path, None)?;
-    let _ = ges::UriClipAsset::request_sync(&uri)?;
+    let _ = ges::UriClipAsset::request_sync(uri)?;
     Ok(())
 }
 
@@ -104,12 +110,17 @@ fn emit_sample(
 /// natural aspect) for a media file. Safe to call off the UI thread; None on
 /// failure. Seeks a little in to skip black intro frames.
 pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
+    let uri = gst::glib::filename_to_uri(path, None).ok()?;
+    thumbnail_uri(&uri, width)
+}
+
+/// URI form of [`thumbnail`] (image sequences use `imagesequence://`).
+pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
     gst::init().ok()?;
     ensure_encoder_ranks();
-    let uri = gst::glib::filename_to_uri(path, None).ok()?;
     let pipeline = gst::Pipeline::new();
     let src = gst::ElementFactory::make("uridecodebin")
-        .property("uri", &uri)
+        .property("uri", uri)
         .build()
         .ok()?;
     let convert = gst::ElementFactory::make("videoconvert").build().ok()?;
@@ -547,7 +558,19 @@ impl Project {
         image_dur: Option<Duration>,
     ) -> Result<ClipInfo> {
         let uri = gst::glib::filename_to_uri(path, None)?;
-        let asset = ges::UriClipAsset::request_sync(&uri)?;
+        self.append_clip_uri(&uri, track, image_dur)
+    }
+
+    /// URI form of [`Self::append_clip`], for sources that aren't a single file.
+    /// An `imagesequence://` URI has an intrinsic duration (frames ÷ fps), so
+    /// sequences pass `image_dur: None` like videos do.
+    pub fn append_clip_uri(
+        &mut self,
+        uri: &str,
+        track: usize,
+        image_dur: Option<Duration>,
+    ) -> Result<ClipInfo> {
+        let asset = ges::UriClipAsset::request_sync(uri)?;
         let dur_ct = match image_dur {
             Some(d) => gst::ClockTime::from_nseconds(d.as_nanos() as u64),
             None => asset.duration().unwrap_or(gst::ClockTime::from_seconds(5)),
@@ -1304,6 +1327,83 @@ mod tests {
         eprintln!("gapped/overlay render bytes: {len}");
         assert!(len > 10_000, "render produced {len} bytes");
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// End-to-end image-sequence path: generate PNG frames (in a dir with
+    /// non-ASCII + a space, like real user paths), detect the sequence, append
+    /// it via its `imagesequence://` URI, and check the timeline duration is
+    /// frames ÷ fps, the preview produces frames, and a WebM render succeeds.
+    /// Needs GStreamer on PATH; self-skips if the pipeline can't be built.
+    #[test]
+    fn previews_and_renders_an_image_sequence() {
+        let mut project = match Project::new({
+            let count = Arc::new(AtomicU32::new(0));
+            let c2 = count.clone();
+            move |_f| {
+                c2.fetch_add(1, Ordering::SeqCst);
+            }
+        }) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skipping previews_and_renders_an_image_sequence: no GStreamer");
+                return;
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("kuvatin säq test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for i in 1..=10u32 {
+            let img = image::RgbaImage::from_pixel(
+                64,
+                36,
+                image::Rgba([(i * 20) as u8, 90, 200, 255]),
+            );
+            img.save(dir.join(format!("frame_{i:04}.png"))).expect("write frame");
+        }
+        let mut spec =
+            crate::sequence::detect_sequence(&dir.join("frame_0001.png")).expect("detect");
+        assert_eq!(spec.count, 10);
+        spec.fps = 25;
+        let uri = spec.uri().expect("uri");
+
+        let info = project.append_clip_uri(&uri, 0, None).expect("append sequence");
+        // 10 frames at 25 fps = 0.4 s, discovered as the clip's natural length.
+        assert_eq!(info.duration, Duration::from_millis(400));
+        assert_eq!(project.duration(), Some(Duration::from_millis(400)));
+        project.play().expect("play");
+        std::thread::sleep(Duration::from_millis(800));
+
+        let out = std::env::temp_dir().join("kuvatin_seq_render_test.webm");
+        let _ = std::fs::remove_file(&out);
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::Vp8,
+                    width: 64,
+                    height: 36,
+                    fps: 25,
+                    bitrate_kbps: 0,
+                },
+            )
+            .expect("begin_render");
+        let mut done = false;
+        for _ in 0..300 {
+            match project.render_status() {
+                RenderStatus::Done => {
+                    done = true;
+                    break;
+                }
+                RenderStatus::Failed(e) => panic!("sequence render failed: {e}"),
+                RenderStatus::Rendering(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        assert!(done, "sequence render did not finish in time");
+        project.end_render().expect("end_render");
+        let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        assert!(len > 500, "sequence render produced only {len} bytes");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The composited canvas size is configurable and clamped. Needs GStreamer on
