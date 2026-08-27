@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Kuvatin — batch image tools & video editor for Windows</title>
-<meta name="description" content="Kuvatin is a compact native Windows app to compress, convert, resize, crop and batch images — and, new in 2.0, edit video on a layered timeline with hardware-accelerated export. Built in Rust." />
+<meta name="description" content="Kuvatin is a compact native Windows app to compress, convert, resize, crop and batch images — and edit video on a layered timeline with image-sequence import and hardware-accelerated export. Built in Rust." />
 <link rel="canonical" href="https://ville-mattila.github.io/Kuvatin/" />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://ville-mattila.github.io/Kuvatin/" />
@@ -30,7 +30,7 @@
   "applicationCategory": "MultimediaApplication",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" },
   "downloadUrl": "https://github.com/Ville-Mattila/Kuvatin/releases/latest",
-  "softwareVersion": "2.0.1",
+  "softwareVersion": "2.3.0",
   "license": "https://www.gnu.org/licenses/gpl-3.0.html",
   "author": { "@type": "Person", "name": "Ville Mattila" },
   "description": "Compact native Windows app to compress, convert, resize, crop and batch images — and edit video on a layered timeline with hardware-accelerated export. Built in Rust."
@@ -80,11 +80,20 @@
   nav .brand img{height:28px;width:28px}
   nav .brand span{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:18px;letter-spacing:-.01em;color:var(--ink)}
   nav .links{display:flex;gap:26px;align-items:center;font-size:14px;color:var(--muted);font-weight:500}
+  nav .links a{position:relative}
+  nav .links a::after{content:"";position:absolute;left:0;right:100%;bottom:-7px;height:2px;border-radius:1px;
+    background:linear-gradient(90deg,var(--teal),var(--teal-2));transition:right .28s cubic-bezier(.4,0,.2,1)}
   nav .links a:hover{color:var(--ink)}
+  nav .links a:hover::after{right:0}
   .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-family:"Space Grotesk",sans-serif;
     padding:11px 20px;border-radius:12px;font-size:14px;border:1px solid transparent;cursor:pointer;transition:transform .15s,box-shadow .25s,background .2s}
-  .btn-primary{background:linear-gradient(135deg,var(--teal),var(--teal-2));color:#04201d;box-shadow:0 8px 30px -8px #00d4bf99}
+  .btn-primary{background:linear-gradient(135deg,var(--teal),var(--teal-2));color:#04201d;box-shadow:0 8px 30px -8px #00d4bf99;
+    position:relative;overflow:hidden}
   .btn-primary:hover{box-shadow:0 14px 44px -8px #00d4bfcc;transform:translateY(-1px)}
+  /* periodic specular sweep across the primary CTAs */
+  .btn-primary::before{content:"";position:absolute;top:0;bottom:0;left:-70%;width:42%;transform:skewX(-20deg);
+    background:linear-gradient(90deg,transparent,#ffffff55,transparent);animation:btnsheen 5s ease-in-out infinite;pointer-events:none}
+  @keyframes btnsheen{0%,58%{left:-70%}88%,100%{left:140%}}
   .btn-ghost{border-color:var(--line);color:var(--ink);background:#ffffff08}
   .btn-ghost:hover{background:#ffffff12;border-color:#38414f}
   .btn svg{width:16px;height:16px;flex:none}
@@ -280,15 +289,11 @@
   .install code .c{color:var(--teal)}
   .install code .m{color:#5d6675}
 
-  /* ============ VIDEO (new in 2.0) ============ */
-  .new-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--teal);
-    box-shadow:0 0 8px var(--teal);vertical-align:6px;margin-left:2px}
+  /* ============ VIDEO ============ */
   .video{padding:130px 0 40px;position:relative}
   .video .features-title{background:linear-gradient(135deg,#fff 10%,#3f7df5 55%,var(--teal));-webkit-background-clip:text;background-clip:text}
   .video .section-sub{color:var(--muted);font-size:17px;line-height:1.65;max-width:62ch;margin:22px auto 0;text-align:center}
   .video .section-sub b{color:var(--ink)}
-  .badge-20{display:inline-flex;align-items:center;gap:8px;font-family:"Space Grotesk";font-size:12.5px;font-weight:700;
-    letter-spacing:.14em;color:#9cc0ff;background:#3f7df51a;border:1px solid #3f7df540;padding:7px 14px;border-radius:999px;margin-bottom:18px}
 
   /* the CSS-built editor mockup */
   .vm{max-width:980px;margin:56px auto 0;border-radius:18px;overflow:hidden;position:relative;
@@ -313,6 +318,7 @@
   .th.v1{background:linear-gradient(135deg,#3f7df5,#1f4fc0)}
   .th.v2{background:linear-gradient(135deg,#7c5cff,#3b2f8f)}
   .th.i1{background:linear-gradient(135deg,#1fd3b6,#0f9d84)}
+  .th.s1{background:repeating-linear-gradient(90deg,#ffffff22 0 1.5px,transparent 1.5px 6px),linear-gradient(135deg,#8b5cf6,#5b34c9)}
   .vm-view{position:relative;background:#000;border-radius:10px;border:1px solid #222a36;overflow:hidden;display:flex;flex-direction:column}
   .vm-canvas{position:relative;flex:1;min-height:190px;overflow:hidden;
     background:radial-gradient(120% 140% at 20% 10%,#20315b 0%,#101a33 42%,#070b14 100%)}
@@ -355,6 +361,9 @@
   .vm-clip.v{background:linear-gradient(135deg,#3f7df5,#1f4fc0)}
   .vm-clip.v2{background:linear-gradient(135deg,#7c5cff,#4636ad)}
   .vm-clip.i{background:linear-gradient(135deg,#1fd3b6,#0f9d84)}
+  /* image-sequence clip: the app's violet, with denser stripes reading as frames */
+  .vm-clip.s{background:linear-gradient(135deg,#8b5cf6,#5b34c9)}
+  .vm-clip.s::before{background:repeating-linear-gradient(90deg,#ffffff1c 0 2px,transparent 2px 7px)}
   .vm-clip.snap{box-shadow:0 0 0 1.5px var(--teal),0 0 14px #00d4bf88;animation:vmsnap 8s linear infinite}
   @keyframes vmsnap{0%,40%{box-shadow:0 0 0 0 transparent}47%,58%{box-shadow:0 0 0 1.5px var(--teal),0 0 16px #00d4bfaa}66%,100%{box-shadow:0 0 0 0 transparent}}
   .vm-ph{position:absolute;top:26px;bottom:8px;width:2px;background:#ff5470;z-index:2;left:8%;
@@ -381,6 +390,31 @@
   .fade{opacity:0}
   .progress{position:fixed;top:0;left:0;height:3px;width:100%;transform:scaleX(0);transform-origin:0 50%;
     background:linear-gradient(90deg,var(--teal),var(--teal-2));z-index:70;box-shadow:0 0 14px #00d4bf}
+
+  /* ============ ambient & pointer effects ============ */
+  /* soft light that trails the cursor (desktop only; shown by JS on first move) */
+  .cursor-glow{position:fixed;left:0;top:0;width:540px;height:540px;margin:-270px 0 0 -270px;z-index:0;pointer-events:none;
+    background:radial-gradient(circle,#00d4bf14 0%,#00d4bf08 40%,transparent 70%);opacity:0;transition:opacity .6s}
+  @media (max-width:860px),(pointer:coarse){.cursor-glow{display:none}}
+  /* pointer-tracked spotlight inside cards and the app mockups (JS sets --mx/--my) */
+  .card,.vfeat,.im{position:relative}
+  .card,.vfeat,.rcard{--spot:240px}
+  .vm,.im{--spot:520px}
+  .card::after,.vfeat::after,.rcard::after,.vm::after,.im::after{content:"";position:absolute;inset:0;border-radius:inherit;
+    pointer-events:none;opacity:0;transition:opacity .4s;
+    background:radial-gradient(var(--spot) circle at var(--mx,50%) var(--my,50%),#00d4bf14,transparent 65%)}
+  .card:hover::after,.vfeat:hover::after,.rcard:hover::after,.vm:hover::after,.im:hover::after{opacity:1}
+  /* hero tagline words (JS wraps them for the staggered entrance) */
+  .hero-tag .w{display:inline-block;will-change:transform}
+  /* the context-menu mock "hovers" its presets one by one */
+  .ctxmenu .item.hl,.ctxmenu .item:nth-child(4),.ctxmenu .item:nth-child(5),.ctxmenu .item:nth-child(7){animation:ctxcyc 9s infinite}
+  .ctxmenu .item:nth-child(4){animation-delay:2.25s}
+  .ctxmenu .item:nth-child(5){animation-delay:4.5s}
+  .ctxmenu .item:nth-child(7){animation-delay:6.75s}
+  @keyframes ctxcyc{0%{background:transparent;color:#cfd6e0}3%,22%{background:#00d4bf1c;color:#fff}28%,100%{background:transparent;color:#cfd6e0}}
+  /* the final CTA icon floats gently */
+  .final .iconbig{animation:iconfloat 5.5s ease-in-out infinite}
+  @keyframes iconfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
 
   @media (max-width:860px){
     nav .links{display:none}
@@ -415,6 +449,8 @@
     .reveal,.fade{opacity:1;transform:none}
     .vm-ph,.vm-scrub i,.vm-canvas::after,.vm-clip.snap,.pill .dot,
     .im-photo::after,.im-crop rect,.im-set .pb i,.im-files .st b{animation:none}
+    .btn-primary::before,.final .iconbig,.ctxmenu .item{animation:none}
+    .cursor-glow{display:none}
     /* static state: first rows read as already converted */
     .im-files .row:nth-of-type(2) .st b,.im-files .row:nth-of-type(3) .st b{opacity:1}
     .im-set .pb i{width:38%}
@@ -453,13 +489,14 @@
 <div class="bg-fx"><div class="glow a"></div><div class="glow b"></div><div class="glow c"></div></div>
 <div class="grid-fx"></div>
 <div class="noise"></div>
+<div class="cursor-glow" id="cursorGlow" aria-hidden="true"></div>
 <div class="progress" id="progress"></div>
 
 <nav id="nav">
   <a class="brand" href="#top"><img src="assets/kuvatin-icon.svg" alt="" /><span>Kuvatin</span></a>
   <div class="links">
     <a href="#journey">Images</a>
-    <a href="#video">Video <span class="new-dot" aria-hidden="true"></span></a>
+    <a href="#video">Video</a>
     <a href="#demo">Compression</a>
     <a href="#download">Download</a>
     <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">GitHub</a>
@@ -474,7 +511,7 @@
 <section class="intro" id="top">
   <div class="intro-stage" id="introStage">
     <div class="intro-panel" id="introLogo">
-      <span class="pill"><span class="dot"></span> New in 2.0 — video editing<span class="pill-x"> · Free &amp; open source · Windows</span></span>
+      <span class="pill"><span class="dot"></span> Free &amp; open source<span class="pill-x"> · Native Windows · Built in Rust</span></span>
       <h1 style="margin:0"><img class="hero-logo" src="assets/kuvatin-logo-anim.svg" alt="Kuvatin" /></h1>
       <p class="hero-tag">Shrink images <span class="accent">and cut video</span> — without the busywork.</p>
       <p class="sub">A compact native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, conversion, resizing, cropping — and now a <b style="color:var(--ink)">layered video timeline</b> with hardware-accelerated export. Right from your Explorer right-click menu.</p>
@@ -605,12 +642,12 @@
 </section>
 
 <div id="below">
-<!-- ================= VIDEO (new in 2.0) ================= -->
+<!-- ================= VIDEO ================= -->
 <section class="video" id="video">
   <div class="features-head reveal">
-    <div class="badge-20">★ NEW IN 2.0</div>
+    <div class="eyebrow">The video editor</div>
     <h2 class="features-title">VIDEO</h2>
-    <p class="section-sub">The same no-busywork idea, pointed at footage: drop clips on a <b>layered timeline</b>, arrange them with <b>magnetic snapping</b>, overlay stills, transform anything right in the preview — then export with <b>hardware acceleration</b>.</p>
+    <p class="section-sub">The same no-busywork idea, pointed at footage: drop clips — or a rendered <b>image sequence</b> — on a <b>layered timeline</b>, arrange them with <b>magnetic snapping</b>, overlay stills, transform anything right in the preview — then export with <b>hardware acceleration</b>.</p>
   </div>
   <div class="wrap">
     <!-- CSS-built mockup of the actual editor -->
@@ -626,6 +663,7 @@
           <div class="row sel"><span class="th v1"></span><span class="nm"></span></div>
           <div class="row"><span class="th v2"></span><span class="nm"></span></div>
           <div class="row"><span class="th i1"></span><span class="nm"></span></div>
+          <div class="row"><span class="th s1"></span><span class="nm" style="max-width:68%"></span></div>
         </div>
         <div class="vm-view">
           <div class="vm-canvas">
@@ -645,7 +683,7 @@
       <div class="vm-tl">
         <div class="vm-tl-head"><span class="l">TIMELINE</span><span class="exp">Export</span></div>
         <div class="vm-ph"></div>
-        <div class="vm-track"><span class="tlab">Track 1</span><span class="vm-lane"><span class="vm-clip i" style="left:32%;width:24%"></span></span></div>
+        <div class="vm-track"><span class="tlab">Track 1</span><span class="vm-lane"><span class="vm-clip i" style="left:32%;width:24%"></span><span class="vm-clip s" style="left:60%;width:22%"></span></span></div>
         <div class="vm-track"><span class="tlab">Track 2</span><span class="vm-lane"><span class="vm-clip v" style="left:6%;width:34%"></span><span class="vm-clip v snap" style="left:40%;width:26%"></span></span></div>
         <div class="vm-track"><span class="tlab">Track 3</span><span class="vm-lane"><span class="vm-clip v2" style="left:58%;width:30%"></span></span></div>
       </div>
@@ -804,11 +842,28 @@ cargo run <span class="c">-p</span> kuvatin</code>
 
   gsap.to("#progress", { scaleX:1, ease:"none", scrollTrigger:{ start:0, end:"max", scrub:0.3 } });
 
+  /* wrap the hero tagline's words so they can stagger in individually
+     (only in animated mode — the static page keeps the plain markup) */
+  (function wrapWords(el){
+    if(!el) return;
+    Array.prototype.slice.call(el.childNodes).forEach(function(node){
+      if(node.nodeType === 3){
+        var frag = document.createDocumentFragment();
+        node.textContent.split(/(\s+)/).forEach(function(part){
+          if(part === "") return;
+          if(/^\s+$/.test(part)){ frag.appendChild(document.createTextNode(part)); }
+          else { var s = document.createElement("span"); s.className = "w"; s.textContent = part; frag.appendChild(s); }
+        });
+        el.replaceChild(frag, node);
+      } else if(node.nodeType === 1){ wrapWords(node); }
+    });
+  })(document.querySelector(".hero-tag"));
+
   /* intro content entrance (plays once on load) */
   gsap.timeline({ defaults:{ ease:"power3.out" }})
     .from(".pill", { y:20, opacity:0, duration:.6 })
     .from(".hero-logo", { y:34, opacity:0, scale:.9, duration:1.0 }, "-=.2")
-    .from(".hero-tag", { y:22, opacity:0, duration:.6 }, "-=.55")
+    .from(".hero-tag .w", { y:26, opacity:0, rotateX:-60, transformPerspective:600, duration:.7, stagger:.045 }, "-=.55")
     .from(".sub", { y:22, opacity:0, duration:.6 }, "-=.4")
     .from(".cta", { y:22, opacity:0, duration:.55 }, "-=.4")
     .from(".meta-row", { y:18, opacity:0, duration:.5 }, "-=.35")
@@ -823,6 +878,26 @@ cargo run <span class="c">-p</span> kuvatin</code>
   gsap.utils.toArray(".fade").forEach(function(el){
     gsap.to(el, { opacity:1, duration:1.0, ease:"power2.out", scrollTrigger:{ trigger:el, start:"top 90%" }});
   });
+
+  /* ---- the giant section titles focus in: blur + tracking resolve on scroll ---- */
+  gsap.utils.toArray(".features-title").forEach(function(t){
+    gsap.fromTo(t,
+      { letterSpacing:"0.14em", opacity:0, filter:"blur(14px)", scale:1.05 },
+      { letterSpacing:"-0.05em", opacity:1, filter:"blur(0px)", scale:1, ease:"none",
+        scrollTrigger:{ trigger:t, start:"top 96%", end:"top 55%", scrub:0.4 }});
+  });
+
+  /* ---- the editor mockup assembles panel by panel as it enters ---- */
+  (function(){
+    var vm = document.querySelector(".vm"); if(!vm) return;
+    gsap.timeline({ scrollTrigger:{ trigger:vm, start:"top 85%", once:true },
+        defaults:{ ease:"power3.out", duration:.8 }})
+      .from(vm.querySelector(".vm-title"), { y:-18, opacity:0, duration:.5 })
+      .from(vm.querySelector(".vm-media"), { x:-36, opacity:0 }, "-=.25")
+      .from(vm.querySelector(".vm-view"), { scale:.94, opacity:0, transformOrigin:"50% 60%" }, "-=.6")
+      .from(vm.querySelector(".vm-insp"), { x:36, opacity:0 }, "-=.7")
+      .from(vm.querySelector(".vm-tl"), { y:30, opacity:0 }, "-=.55");
+  })();
 
   /* ---- compression demo counters (mobile and desktop) ---- */
   (function(){
@@ -1040,6 +1115,63 @@ cargo run <span class="c">-p</span> kuvatin</code>
       onLeaveBack:function(){ gsap.to(card, { opacity:0, duration:.3 }); }
     });
   });
+
+  /* ============ pointer & ambience (desktop) ============ */
+  var FINE = window.matchMedia && window.matchMedia("(pointer:fine)").matches;
+
+  /* soft light trailing the cursor */
+  var glowEl = document.getElementById("cursorGlow");
+  if(FINE && glowEl){
+    var gcx = innerWidth/2, gcy = innerHeight/2, gtx = gcx, gty = gcy, gShown = false;
+    window.addEventListener("pointermove", function(e){
+      gtx = e.clientX; gty = e.clientY;
+      if(!gShown){ gShown = true; glowEl.style.opacity = 1; }
+    }, { passive:true });
+    document.documentElement.addEventListener("mouseleave", function(){ glowEl.style.opacity = 0; gShown = false; });
+    gsap.ticker.add(function(){
+      gcx += (gtx - gcx) * .09; gcy += (gty - gcy) * .09;
+      glowEl.style.transform = "translate(" + gcx.toFixed(1) + "px," + gcy.toFixed(1) + "px)";
+    });
+  }
+
+  /* magnetic buttons: drift toward the cursor, spring back on leave */
+  if(FINE){
+    gsap.utils.toArray(".btn").forEach(function(b){
+      // GSAP drives the transform now; keep the CSS transitions off it.
+      b.style.transition = "box-shadow .25s, background .2s";
+      var qx = gsap.quickTo(b, "x", { duration:.35, ease:"power3" });
+      var qy = gsap.quickTo(b, "y", { duration:.35, ease:"power3" });
+      b.addEventListener("pointermove", function(e){
+        var r = b.getBoundingClientRect();
+        qx((e.clientX - (r.left + r.width/2)) * .18);
+        qy((e.clientY - (r.top + r.height/2)) * .3);
+      });
+      b.addEventListener("pointerleave", function(){
+        gsap.to(b, { x:0, y:0, duration:.7, ease:"elastic.out(1,0.45)" });
+      });
+    });
+  }
+
+  /* pointer-tracked spotlight inside cards and mockups (drives --mx/--my) */
+  if(FINE){
+    document.addEventListener("pointermove", function(e){
+      var t = e.target.closest && e.target.closest(".card,.vfeat,.rcard,.vm,.im");
+      if(!t) return;
+      var r = t.getBoundingClientRect();
+      t.style.setProperty("--mx", ((e.clientX - r.left) / r.width * 100).toFixed(2) + "%");
+      t.style.setProperty("--my", ((e.clientY - r.top) / r.height * 100).toFixed(2) + "%");
+    }, { passive:true });
+  }
+
+  /* the background glows drift at different rates as the page scrolls */
+  gsap.to(".glow.a", { yPercent:26, ease:"none", scrollTrigger:{ start:0, end:"max", scrub:1.2 }});
+  gsap.to(".glow.b", { yPercent:-20, ease:"none", scrollTrigger:{ start:0, end:"max", scrub:1.6 }});
+  gsap.to(".glow.c", { yPercent:-30, ease:"none", scrollTrigger:{ start:0, end:"max", scrub:2 }});
+
+  /* the travelling ball emits a pulse ring while it rides the rail */
+  gsap.fromTo("#traveler circle:nth-of-type(3)",
+    { attr:{ r:22 }, opacity:.5 },
+    { attr:{ r:36 }, opacity:0, duration:1.6, repeat:-1, ease:"power1.out" });
 
   var rt;
   window.addEventListener("resize", function(){ clearTimeout(rt); rt = setTimeout(function(){
