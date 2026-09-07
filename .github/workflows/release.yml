@@ -1,7 +1,16 @@
 name: release
 
-# Build the Windows .msi. On a version tag (v2.0.0) it is attached to the GitHub
-# Release; on manual dispatch it is uploaded as a workflow artifact.
+# Build + test on every push to master; build the Windows .msi as well on a
+# version tag (v2.0.0 — attached to the GitHub Release) or on manual dispatch
+# (uploaded as a workflow artifact).
+#
+# Why master runs exist: GitHub's Actions cache is scoped by git ref — a run can
+# only restore caches saved on its own ref or on the default branch. With
+# tag-only runs, every release started from a cold cache and recompiled all
+# ~400 dependency crates (11+ minutes). Master runs save the dependency cache
+# on the default branch, tag runs restore it, and cargo's fingerprinting then
+# rebuilds only the workspace crates (and any dependency that actually changed).
+# Only master runs save (a tag-scoped cache is dead weight: nothing can read it).
 #
 # Hardening: third-party downloads (GStreamer MSIs, WiX zip) are pinned by
 # SHA-256 and the build fails on mismatch — they are executed and their DLLs are
@@ -12,9 +21,16 @@ name: release
 # sensitive on the hosted runner) and is gated locally instead.
 on:
   push:
+    branches:
+      - master
     tags:
       - "v*"
   workflow_dispatch:
+
+# Superseded master runs are cancelled; a tag run is never cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: write
@@ -35,6 +51,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Only master runs write the cache (tag runs restore from it); save
+          # even when tests fail so a red master still warms the next run.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+          cache-on-failure: true
 
       # For a tag build, the tag must match the workspace version the MSI is
       # stamped with — otherwise we'd publish e.g. v2.0.1 carrying a 2.0.0 MSI.
@@ -101,10 +122,13 @@ jobs:
           $env:GST_TEST_IMAGE = $img
           cargo test -p kuvatin-video --release -- --test-threads=1
 
+      # ---- MSI: tag pushes and manual dispatch only (master runs stop here) ----
       - name: Install cargo-wix
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         run: cargo install cargo-wix --version 0.3.9 --locked
 
       - name: Install WiX Toolset v3 (no-admin binaries), checksum-pinned
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $dest = "$env:USERPROFILE\wix3-bin"
@@ -118,6 +142,7 @@ jobs:
           "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build MSI (bundling GStreamer runtime)
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $stage = "$env:GITHUB_WORKSPACE\target\gst-staging"
@@ -126,6 +151,7 @@ jobs:
           cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           name: kuvatin-windows-msi
           path: target/wix/*.msi
