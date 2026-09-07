@@ -16,5 +16,6 @@ pub use project::{
     ExportSettings, Layout, Project, RenderStatus, VideoCodec, CANVAS_H, CANVAS_W,
 };
 pub use sequence::{
-    convert_exr_sequence, detect_sequence, sweep_sequence_cache, SequenceSpec,
+    convert_exr_sequence, detect_sequence, parse_frame_path, render_to_mp4,
+    sweep_sequence_cache, SequenceSpec,
 };

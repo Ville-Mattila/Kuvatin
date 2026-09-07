@@ -34,15 +34,26 @@ const STORE_BACKGROUND: &str = "Kuvatin.CommandStore.Background";
 
 /// Bump when the set of registry keys changes, so existing installs (whose
 /// `Icon` sentinel already matches the exe) re-register at next launch.
-/// 2 = folder + background verbs, MultiSelectModel.
-const SCHEMA: &str = "2";
+/// 2 = folder + background verbs, MultiSelectModel; 3 = sequence-to-MP4 item.
+const SCHEMA: &str = "3";
 
-/// (command id under a store, menu label, preset name or empty for GUI)
-const ITEMS: &[(&str, &str, &str)] = &[
-    ("Kuvatin.Webp", "Convert to WebP", "Convert to WebP"),
-    ("Kuvatin.1080p", "Resize to 1080p", "Resize to 1080p"),
-    ("Kuvatin.Half", "Resize to 50%", "Resize to 50%"),
-    ("Kuvatin.Open", "Open in Kuvatin…", ""),
+/// What a store item runs.
+enum Action {
+    /// A headless preset over the selection (`--preset`).
+    Preset(&'static str),
+    /// Render the selected frames' sequence(s) to MP4 (`--sequence-mp4`).
+    SequenceMp4,
+    /// Open the selection in the GUI.
+    Gui,
+}
+
+/// (command id under a store, menu label, action)
+const ITEMS: &[(&str, &str, Action)] = &[
+    ("Kuvatin.Webp", "Convert to WebP", Action::Preset("Convert to WebP")),
+    ("Kuvatin.1080p", "Resize to 1080p", Action::Preset("Resize to 1080p")),
+    ("Kuvatin.Half", "Resize to 50%", Action::Preset("Resize to 50%")),
+    ("Kuvatin.SequenceMp4", "Render image sequence to MP4", Action::SequenceMp4),
+    ("Kuvatin.Open", "Open in Kuvatin…", Action::Gui),
 ];
 
 fn wide(s: &str) -> Vec<u16> {
@@ -99,11 +110,11 @@ fn exe_path() -> Result<String> {
 
 /// The command line a store item runs. `token` is Explorer's placeholder for
 /// the clicked item: `%1` (file/folder) or `%V` (background folder).
-fn command_line(exe: &str, preset: &str, token: &str) -> String {
-    if preset.is_empty() {
-        format!("\"{exe}\" \"{token}\"")
-    } else {
-        format!("\"{exe}\" --preset \"{preset}\" \"{token}\"")
+fn command_line(exe: &str, action: &Action, token: &str) -> String {
+    match action {
+        Action::Preset(preset) => format!("\"{exe}\" --preset \"{preset}\" \"{token}\""),
+        Action::SequenceMp4 => format!("\"{exe}\" --sequence-mp4 \"{token}\""),
+        Action::Gui => format!("\"{exe}\" \"{token}\""),
     }
 }
 
@@ -114,7 +125,7 @@ fn write_store(store: &str, exe: &str, token: &str) -> Result<()> {
     unsafe {
         let _ = RegCloseKey(storeroot);
     };
-    for (id, label, preset) in ITEMS {
+    for (id, label, action) in ITEMS {
         let item_key = format!(r"{class_key}\shell\{id}");
         let k = create_key(&item_key)?;
         set_string(k, None, label)?;
@@ -124,7 +135,7 @@ fn write_store(store: &str, exe: &str, token: &str) -> Result<()> {
         };
 
         let c = create_key(&format!(r"{item_key}\command"))?;
-        set_string(c, None, &command_line(exe, preset, token))?;
+        set_string(c, None, &command_line(exe, action, token))?;
         unsafe {
             let _ = RegCloseKey(c);
         };
@@ -271,12 +282,20 @@ mod tests {
     #[test]
     fn command_lines_quote_the_exe_and_pass_the_item_token() {
         assert_eq!(
-            command_line(r"C:\Program Files\Kuvatin\kuvatin.exe", "Convert to WebP", "%1"),
+            command_line(
+                r"C:\Program Files\Kuvatin\kuvatin.exe",
+                &Action::Preset("Convert to WebP"),
+                "%1"
+            ),
             r#""C:\Program Files\Kuvatin\kuvatin.exe" --preset "Convert to WebP" "%1""#
         );
-        // The GUI item has no preset; background verbs get the folder via %V.
         assert_eq!(
-            command_line(r"C:\k\kuvatin.exe", "", "%V"),
+            command_line(r"C:\k\kuvatin.exe", &Action::SequenceMp4, "%1"),
+            r#""C:\k\kuvatin.exe" --sequence-mp4 "%1""#
+        );
+        // The GUI item has no flag; background verbs get the folder via %V.
+        assert_eq!(
+            command_line(r"C:\k\kuvatin.exe", &Action::Gui, "%V"),
             r#""C:\k\kuvatin.exe" "%V""#
         );
     }

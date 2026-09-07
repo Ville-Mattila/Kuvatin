@@ -6,6 +6,7 @@ mod gui;
 mod preview;
 mod quickrun;
 mod rendezvous;
+mod sequence_render;
 mod shell;
 
 use clap::Parser;
@@ -49,6 +50,24 @@ fn configure_bundled_gstreamer() {
     // already set that variable.
 }
 
+/// Show a headless run's per-file failures (capped at ten) and exit non-zero.
+fn fail_and_exit(title: &str, intro: String, failures: &[(PathBuf, String)]) -> ! {
+    let mut msg = intro;
+    msg.push_str("\n\n");
+    for (path, err) in failures.iter().take(10) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        msg.push_str(&format!("\u{2022} {name}: {err}\n"));
+    }
+    if failures.len() > 10 {
+        msg.push_str(&format!("\u{2026}and {} more.\n", failures.len() - 10));
+    }
+    shell::notify_error(title, &msg);
+    std::process::exit(1);
+}
+
 fn main() -> anyhow::Result<()> {
     configure_bundled_gstreamer();
     match Cli::parse().into_mode() {
@@ -60,30 +79,43 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             };
             match quickrun::run(&preset, &paths) {
-                Ok(report) if report.failure_count() > 0 => {
-                    let mut msg = format!(
-                        "{} of {} file(s) could not be processed:\n\n",
+                Ok(report) if report.failure_count() > 0 => fail_and_exit(
+                    "Kuvatin \u{2014} some files failed",
+                    format!(
+                        "{} of {} file(s) could not be processed:",
                         report.failure_count(),
                         report.total
-                    );
-                    for (path, err) in report.failures.iter().take(10) {
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.display().to_string());
-                        msg.push_str(&format!("\u{2022} {name}: {err}\n"));
-                    }
-                    if report.failures.len() > 10 {
-                        msg.push_str(&format!("\u{2026}and {} more.\n", report.failures.len() - 10));
-                    }
-                    shell::notify_error("Kuvatin \u{2014} some files failed", &msg);
-                    std::process::exit(1);
-                }
+                    ),
+                    &report.failures,
+                ),
                 Ok(_) => {}
                 Err(e) => {
                     // Windowed release build has no stderr, so the returned Err
                     // would be silent — surface it before propagating.
                     shell::notify_error("Kuvatin \u{2014} quick run failed", &e.to_string());
+                    return Err(e);
+                }
+            }
+        }
+        Mode::SequenceMp4 { paths, fps } => {
+            // Selecting several frames of one run launches one process per
+            // frame; coalesced, they resolve to that single sequence.
+            let Some(paths) = coalesce("sequence-mp4", paths) else {
+                return Ok(());
+            };
+            match sequence_render::run(&paths, fps) {
+                Ok(report) if !report.failures.is_empty() => fail_and_exit(
+                    "Kuvatin \u{2014} sequence render",
+                    format!(
+                        "{} rendered, {} could not be rendered:",
+                        report.rendered.len(),
+                        report.failures.len()
+                    ),
+                    &report.failures,
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    shell::notify_error("Kuvatin \u{2014} sequence render failed", &e.to_string());
                     return Err(e);
                 }
             }

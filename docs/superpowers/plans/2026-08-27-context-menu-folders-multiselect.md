@@ -63,6 +63,31 @@ new handling — `collect_images` already expands a directory one level deep.
 - Manual: launch the staged build once (self-heals to schema 2), then
   right-click a folder, a 20+ file selection, and inside a folder's background.
 
+## Addendum: "Render image sequence to MP4" (2026-09-07)
+
+A fifth store item, `--sequence-mp4 "%1"` (schema 3). Right-click a numbered
+frame — or a folder of frames, or a multi-selection of frames — and the run
+becomes an H.264 MP4 next to the frames.
+
+- `kuvatin-video::sequence::parse_frame_path` splits a name without touching
+  the disk (`detect_sequence` = parse + forward scan); `SequenceSpec::
+  same_sequence` matches frames of one run.
+- `kuvatin-video::sequence::render_to_mp4(spec, out, fps)`: native frame size
+  (read from the first frame, rounded to even for NV12) as the canvas AND the
+  export size, ~0.12 bit/px/frame bitrate (4–40 Mbit/s), EXR converted first,
+  blocking poll with a 60 s stall watchdog, partial file removed on failure.
+  **Gotcha found by the test:** NVENC refuses tiny frames (floor ≈145×49) with
+  an opaque "general stream error", and the encoder rank is locked at init so
+  there is no software fallback — `render_size` upscales anything below
+  160×96 (aspect kept) instead of failing.
+- `kuvatin::sequence_render`: the selection resolves to DISTINCT runs — frames
+  of one run merge and start from the lowest selected frame (so selecting all
+  240 frames renders once, from the first); a folder contributes every run in
+  it; lone frames and unnumbered files are reported. Output
+  `<dir>/<prefix-trimmed>.mp4` (folder name for bare-number runs), never
+  overwriting. Default 30 fps; `--fps` on the CLI.
+- Coalesced through the rendezvous (group `sequence-mp4`) like the presets.
+
 ## Follow-ups (not in scope)
 
 - A headless quick-run has no progress UI; a folder of hundreds of images runs

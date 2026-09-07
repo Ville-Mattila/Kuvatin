@@ -24,8 +24,11 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
   (stored in `%APPDATA%\Kuvatin\presets.toml`) — one bad file can't take down a
   run, and **EXIF orientation** is applied automatically on decode
 - **Explorer context menu**: right-click images **or folders** for quick preset
-  actions (Convert to WebP, Resize to 1080p, Resize to 50%) or "Open in Kuvatin…" —
-  a multi-selection runs as **one batch**, not one process per file
+  actions (Convert to WebP, Resize to 1080p, Resize to 50%), "Open in Kuvatin…",
+  or **Render image sequence to MP4** (right-click any `frame_0001.png`-style
+  frame — or a folder of them — and the whole numbered run becomes an H.264
+  MP4 next to it, at native resolution) — a multi-selection runs as **one
+  batch**, not one process per file
 - **Custom frameless window** with a native drag/resize titlebar and drag-and-drop
 
 Outputs are written next to the originals with a token-pattern name
@@ -101,6 +104,7 @@ Kuvatin…" opens one window with all of them.
 
 ```powershell
 kuvatin --preset "Convert to WebP" image1.png image2.jpg
+kuvatin --sequence-mp4 --fps 24 render\frame_0001.png   # → render\frame.mp4 (default 30 fps)
 ```
 
 ## Installer (.msi)

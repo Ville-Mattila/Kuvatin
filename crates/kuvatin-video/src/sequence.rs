@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use gstreamer as gst;
@@ -92,21 +92,22 @@ impl SequenceSpec {
 /// detection loop forever.
 const MAX_FRAMES: u64 = 1_000_000;
 
-/// Detect a sequence from its first file: the **last** run of ASCII digits in
-/// the file stem is the frame number (`shot2_frame_0001` → `0001`), zero-padded
-/// iff it has a leading zero; then consecutive files are counted forward from
-/// the picked index. `fps` defaults to 30 — the caller sets the real choice.
-pub fn detect_sequence(first_file: &Path) -> Result<SequenceSpec> {
-    let dir = first_file
+/// Parse a frame file's name into a spec WITHOUT touching the disk: the
+/// **last** run of ASCII digits in the stem is the frame number
+/// (`shot2_frame_0001` → `0001`), zero-padded iff it has a leading zero.
+/// `count` is 0 (unscanned) and `fps` defaults to 30. Two files belong to the
+/// same sequence iff [`SequenceSpec::same_sequence`] holds for their specs.
+pub fn parse_frame_path(file: &Path) -> Result<SequenceSpec> {
+    let dir = file
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .ok_or_else(|| anyhow!("file has no parent directory"))?
         .to_path_buf();
-    let stem = first_file
+    let stem = file
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("file name is not valid Unicode"))?;
-    let ext = first_file
+    let ext = file
         .extension()
         .and_then(|e| e.to_str())
         .ok_or_else(|| anyhow!("file has no extension"))?;
@@ -135,7 +136,7 @@ pub fn detect_sequence(first_file: &Path) -> Result<SequenceSpec> {
         0
     };
 
-    let mut spec = SequenceSpec {
+    Ok(SequenceSpec {
         dir,
         prefix: stem[..begin].to_string(),
         suffix: format!("{}.{}", &stem[end..], ext),
@@ -143,7 +144,25 @@ pub fn detect_sequence(first_file: &Path) -> Result<SequenceSpec> {
         start,
         count: 0,
         fps: 30,
-    };
+    })
+}
+
+impl SequenceSpec {
+    /// Same directory, prefix, suffix and padding — i.e. the same numbered run,
+    /// regardless of which frame was picked as the start.
+    pub fn same_sequence(&self, other: &SequenceSpec) -> bool {
+        self.dir == other.dir
+            && self.prefix == other.prefix
+            && self.suffix == other.suffix
+            && self.pad == other.pad
+    }
+}
+
+/// Detect a sequence from its first file ([`parse_frame_path`]), then count
+/// the consecutive files forward from the picked index.
+pub fn detect_sequence(first_file: &Path) -> Result<SequenceSpec> {
+    let mut spec = parse_frame_path(first_file)?;
+    let start = spec.start;
     while spec.count < MAX_FRAMES {
         let candidate = spec.dir.join(spec.frame_file_name(start + spec.count));
         if !candidate.is_file() {
@@ -281,6 +300,80 @@ pub fn convert_exr_sequence(
     }
     std::fs::write(&marker, b"ok").with_context(|| format!("write {}", marker.display()))?;
     Ok(converted)
+}
+
+/// Hardware H.264 (NVENC) refuses tiny frames (its floor is around 145×49),
+/// and the encoder rank is fixed at init so there is no software fallback —
+/// so a sequence smaller than this is scaled UP (aspect kept) rather than
+/// failing with an opaque "stream error".
+const MIN_RENDER_W: u32 = 160;
+const MIN_RENDER_H: u32 = 96;
+
+/// The MP4 frame size for a `w`×`h` source: native, except tiny sources are
+/// upscaled to the encoder floor; even dimensions (NV12) within the canvas range.
+fn render_size(w: u32, h: u32) -> (i32, i32) {
+    let (w, h) = (w.max(1) as f64, h.max(1) as f64);
+    let scale = (MIN_RENDER_W as f64 / w).max(MIN_RENDER_H as f64 / h).max(1.0);
+    let w = ((w * scale).round() as i32 & !1).clamp(16, 7680);
+    let h = ((h * scale).round() as i32 & !1).clamp(16, 4320);
+    (w, h)
+}
+
+/// Render a sequence to an H.264 MP4 at its native frame size, blocking until
+/// the encode finishes (the headless "Render image sequence to MP4" action).
+/// EXR sequences are converted first. On failure the partial file is removed.
+pub fn render_to_mp4(spec: &SequenceSpec, out: &Path, fps: u32) -> Result<()> {
+    use crate::project::{ExportSettings, Project, RenderStatus, VideoCodec};
+
+    let mut spec = if spec.is_exr() {
+        convert_exr_sequence(spec, |_, _| {}, &AtomicBool::new(false))?
+    } else {
+        spec.clone()
+    };
+    spec.fps = fps.clamp(1, 240);
+    let first = spec.first_path();
+    let (w, h) = image::image_dimensions(&first)
+        .with_context(|| format!("read the frame size of {}", first.display()))?;
+    let (w, h) = render_size(w, h);
+    // ~0.12 bit per pixel per frame: ≈7.5 Mbit/s for 1080p30, 4–40 Mbit/s overall.
+    let bitrate_kbps =
+        ((w as f64 * h as f64 * spec.fps as f64 * 0.12) / 1000.0).clamp(4000.0, 40000.0) as u32;
+
+    let mut project = Project::new(|_| {})?;
+    project.set_canvas_size(w, h);
+    project.append_clip_uri(&spec.uri()?, 0, None)?;
+    project.begin_render(
+        out,
+        ExportSettings {
+            codec: VideoCodec::H264,
+            width: w,
+            height: h,
+            fps: spec.fps,
+            bitrate_kbps,
+        },
+    )?;
+    // Poll to completion. A pipeline that stops posting progress for a minute
+    // is stuck (some stalls never post EOS/ERROR) — fail rather than hang.
+    let mut last = (-1.0f32, Instant::now());
+    let outcome = loop {
+        match project.render_status() {
+            RenderStatus::Done => break Ok(()),
+            RenderStatus::Failed(e) => break Err(anyhow!("render failed: {e}")),
+            RenderStatus::Rendering(f) => {
+                if (f - last.0).abs() > 0.0005 {
+                    last = (f, Instant::now());
+                } else if last.1.elapsed() > Duration::from_secs(60) {
+                    break Err(anyhow!("render stalled"));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+    let _ = project.end_render();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    outcome
 }
 
 /// Best-effort startup sweep of the conversion cache: remove entries whose
@@ -452,6 +545,55 @@ mod tests {
         let hit = convert_exr_sequence(&spec, |_, _| panic!("cache miss"), &cancel).unwrap();
         assert_eq!(hit.dir, conv.dir);
         let _ = std::fs::remove_dir_all(&conv.dir);
+    }
+
+    /// Frames parse without touching the disk, and frames of one run compare
+    /// equal regardless of which one was picked.
+    #[test]
+    fn parses_frame_names_and_matches_runs() {
+        let a = parse_frame_path(Path::new("C:/r/shot_0007.png")).unwrap();
+        let b = parse_frame_path(Path::new("C:/r/shot_0120.png")).unwrap();
+        let c = parse_frame_path(Path::new("C:/r/other_0007.png")).unwrap();
+        assert_eq!((a.prefix.as_str(), a.pad, a.start, a.count), ("shot_", 4, 7, 0));
+        assert!(a.same_sequence(&b));
+        assert!(!a.same_sequence(&c));
+        assert!(parse_frame_path(Path::new("C:/r/photo.png")).is_err());
+    }
+
+    /// Native sizes pass through (rounded to even); tiny sources are upscaled
+    /// to the encoder floor with their aspect kept; odd sizes become even.
+    #[test]
+    fn render_size_keeps_native_but_lifts_tiny_frames() {
+        assert_eq!(render_size(1920, 1080), (1920, 1080));
+        assert_eq!(render_size(1921, 1081), (1920, 1080));
+        // 64x36 (16:9) → scaled by 96/36 = 2.67 → 171x96 → even 170x96
+        assert_eq!(render_size(64, 36), (170, 96));
+        // 100x300 (portrait) → scaled by 160/100 = 1.6 → 160x480
+        assert_eq!(render_size(100, 300), (160, 480));
+    }
+
+    /// Headless render: generated frames → an H.264 MP4. Two sizes: a normal
+    /// one (native 320x180) and a tiny one that must be upscaled past NVENC's
+    /// floor instead of failing. Self-skips without a working GStreamer.
+    #[test]
+    fn renders_sequences_to_mp4_including_tiny_ones() {
+        if crate::project::Project::new(|_| {}).is_err() {
+            eprintln!("skipping renders_sequences_to_mp4_including_tiny_ones: no GStreamer");
+            return;
+        }
+        for (tag, w, h) in [("mp4", 320u32, 180u32), ("mp4tiny", 64, 36)] {
+            let t = TempDir::new(tag);
+            for i in 1..=8u32 {
+                image::RgbaImage::from_pixel(w, h, image::Rgba([(i * 25) as u8, 120, 200, 255]))
+                    .save(t.0.join(format!("f_{i:03}.png")))
+                    .unwrap();
+            }
+            let spec = detect_sequence(&t.0.join("f_001.png")).unwrap();
+            let out = t.0.join("f.mp4");
+            render_to_mp4(&spec, &out, 24).unwrap_or_else(|e| panic!("{w}x{h} render: {e:#}"));
+            let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            assert!(len > 1000, "{w}x{h} mp4 too small: {len} bytes");
+        }
     }
 
     #[test]

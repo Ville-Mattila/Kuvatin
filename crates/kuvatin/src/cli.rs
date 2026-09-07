@@ -8,6 +8,15 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub preset: Option<String>,
 
+    /// Render the numbered image sequence each PATH belongs to (or every
+    /// sequence in a folder PATH) to an MP4 next to it, headlessly.
+    #[arg(long)]
+    pub sequence_mp4: bool,
+
+    /// Frame rate for --sequence-mp4 (one file = one frame).
+    #[arg(long, default_value_t = 30, value_name = "FPS")]
+    pub fps: u32,
+
     /// Register the Explorer context-menu entries and exit.
     #[arg(long)]
     pub register: bool,
@@ -26,6 +35,7 @@ pub enum Mode {
     Register,
     Unregister,
     QuickRun { preset: String, paths: Vec<PathBuf> },
+    SequenceMp4 { paths: Vec<PathBuf>, fps: u32 },
     Gui { paths: Vec<PathBuf> },
 }
 
@@ -35,6 +45,8 @@ impl Cli {
             Mode::Register
         } else if self.unregister {
             Mode::Unregister
+        } else if self.sequence_mp4 {
+            Mode::SequenceMp4 { paths: self.paths, fps: self.fps }
         } else if let Some(preset) = self.preset {
             Mode::QuickRun { preset, paths: self.paths }
         } else {
@@ -75,5 +87,17 @@ mod tests {
     #[test]
     fn register_flag() {
         assert_eq!(mode_of(&["--register"]), Mode::Register);
+    }
+
+    #[test]
+    fn sequence_mp4_defaults_to_30_fps_and_takes_fps() {
+        assert_eq!(
+            mode_of(&["--sequence-mp4", "frame_0001.png"]),
+            Mode::SequenceMp4 { paths: vec!["frame_0001.png".into()], fps: 30 }
+        );
+        assert_eq!(
+            mode_of(&["--sequence-mp4", "--fps", "24", "C:/renders"]),
+            Mode::SequenceMp4 { paths: vec!["C:/renders".into()], fps: 24 }
+        );
     }
 }
