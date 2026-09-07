@@ -319,14 +319,35 @@ fn render_size(w: u32, h: u32) -> (i32, i32) {
     (w, h)
 }
 
+/// Progress of [`render_to_mp4`]: an EXR sequence converts first, then encodes.
+#[derive(Clone, Copy, Debug)]
+pub enum RenderProgress {
+    Converting { done: u64, total: u64 },
+    /// Encode progress, 0..1.
+    Rendering(f32),
+}
+
 /// Render a sequence to an H.264 MP4 at its native frame size, blocking until
 /// the encode finishes (the headless "Render image sequence to MP4" action).
-/// EXR sequences are converted first. On failure the partial file is removed.
-pub fn render_to_mp4(spec: &SequenceSpec, out: &Path, fps: u32) -> Result<()> {
+/// EXR sequences are converted first. `progress` is called from worker
+/// threads; setting `cancel` aborts (the conversion between frames, the encode
+/// at the next poll) with an error containing "cancelled". On any failure the
+/// partial file is removed.
+pub fn render_to_mp4(
+    spec: &SequenceSpec,
+    out: &Path,
+    fps: u32,
+    progress: impl Fn(RenderProgress) + Send + Sync,
+    cancel: &AtomicBool,
+) -> Result<()> {
     use crate::project::{ExportSettings, Project, RenderStatus, VideoCodec};
 
     let mut spec = if spec.is_exr() {
-        convert_exr_sequence(spec, |_, _| {}, &AtomicBool::new(false))?
+        convert_exr_sequence(
+            spec,
+            |done, total| progress(RenderProgress::Converting { done, total }),
+            cancel,
+        )?
     } else {
         spec.clone()
     };
@@ -356,10 +377,16 @@ pub fn render_to_mp4(spec: &SequenceSpec, out: &Path, fps: u32) -> Result<()> {
     // is stuck (some stalls never post EOS/ERROR) — fail rather than hang.
     let mut last = (-1.0f32, Instant::now());
     let outcome = loop {
+        if cancel.load(Ordering::Relaxed) {
+            // Graceful teardown (EOS so the muxer finalizes) + partial file removed.
+            let _ = project.cancel_render(out, true);
+            return Err(anyhow!("cancelled"));
+        }
         match project.render_status() {
             RenderStatus::Done => break Ok(()),
             RenderStatus::Failed(e) => break Err(anyhow!("render failed: {e}")),
             RenderStatus::Rendering(f) => {
+                progress(RenderProgress::Rendering(f));
                 if (f - last.0).abs() > 0.0005 {
                     last = (f, Instant::now());
                 } else if last.1.elapsed() > Duration::from_secs(60) {
@@ -590,10 +617,46 @@ mod tests {
             }
             let spec = detect_sequence(&t.0.join("f_001.png")).unwrap();
             let out = t.0.join("f.mp4");
-            render_to_mp4(&spec, &out, 24).unwrap_or_else(|e| panic!("{w}x{h} render: {e:#}"));
+            let reported = AtomicBool::new(false);
+            render_to_mp4(
+                &spec,
+                &out,
+                24,
+                |p| {
+                    if let RenderProgress::Rendering(f) = p {
+                        assert!((0.0..=1.0).contains(&f));
+                        reported.store(true, Ordering::Relaxed);
+                    }
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap_or_else(|e| panic!("{w}x{h} render: {e:#}"));
             let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
             assert!(len > 1000, "{w}x{h} mp4 too small: {len} bytes");
+            assert!(reported.load(Ordering::Relaxed), "encode progress was reported");
         }
+    }
+
+    /// A cancelled render tears down cleanly and leaves no partial MP4.
+    /// Self-skips without a working GStreamer.
+    #[test]
+    fn cancelling_a_render_leaves_no_partial_file() {
+        if crate::project::Project::new(|_| {}).is_err() {
+            eprintln!("skipping cancelling_a_render_leaves_no_partial_file: no GStreamer");
+            return;
+        }
+        let t = TempDir::new("mp4cancel");
+        for i in 1..=8u32 {
+            image::RgbaImage::from_pixel(320, 180, image::Rgba([0, (i * 30) as u8, 90, 255]))
+                .save(t.0.join(format!("f_{i:03}.png")))
+                .unwrap();
+        }
+        let spec = detect_sequence(&t.0.join("f_001.png")).unwrap();
+        let out = t.0.join("f.mp4");
+        // Cancelled before the first poll: the render is torn down immediately.
+        let err = render_to_mp4(&spec, &out, 24, |_| {}, &AtomicBool::new(true)).unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err:#}");
+        assert!(!out.exists(), "partial output removed");
     }
 
     #[test]

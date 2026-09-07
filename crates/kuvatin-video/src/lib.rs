@@ -17,5 +17,5 @@ pub use project::{
 };
 pub use sequence::{
     convert_exr_sequence, detect_sequence, parse_frame_path, render_to_mp4,
-    sweep_sequence_cache, SequenceSpec,
+    sweep_sequence_cache, RenderProgress, SequenceSpec,
 };

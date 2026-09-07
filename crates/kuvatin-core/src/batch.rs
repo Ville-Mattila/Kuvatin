@@ -40,6 +40,9 @@ impl Progress {
     }
 }
 
+/// Outcome message of inputs skipped because the batch was cancelled.
+pub const CANCELLED: &str = "cancelled";
+
 /// Run `job` over every input in parallel. `on_progress` is called once per
 /// finished file (from worker threads — it must be `Sync`). A single failing
 /// file never aborts the batch; its error is captured in the returned results.
@@ -47,8 +50,25 @@ pub fn run_batch<F>(inputs: &[PathBuf], job: &Job, preset_name: &str, on_progres
 where
     F: Fn(Progress) + Sync,
 {
+    run_batch_until(inputs, job, preset_name, on_progress, || false)
+}
+
+/// Like [`run_batch`], but stops picking up inputs once `cancelled()` returns
+/// true: files already in flight finish normally, the rest come back with
+/// `Err(CANCELLED)` and no progress call.
+pub fn run_batch_until<F, C>(
+    inputs: &[PathBuf],
+    job: &Job,
+    preset_name: &str,
+    on_progress: F,
+    cancelled: C,
+) -> Vec<FileResult>
+where
+    F: Fn(Progress) + Sync,
+    C: Fn() -> bool + Sync,
+{
     let items: Vec<(PathBuf, Job)> = inputs.iter().map(|p| (p.clone(), job.clone())).collect();
-    run_jobs(&items, preset_name, on_progress)
+    run_jobs_until(&items, preset_name, on_progress, cancelled)
 }
 
 /// Like `run_batch`, but each input carries its own `Job` (e.g. a per-image
@@ -58,11 +78,28 @@ pub fn run_jobs<F>(items: &[(PathBuf, Job)], preset_name: &str, on_progress: F) 
 where
     F: Fn(Progress) + Sync,
 {
+    run_jobs_until(items, preset_name, on_progress, || false)
+}
+
+/// [`run_jobs`] with the cancellation semantics of [`run_batch_until`].
+pub fn run_jobs_until<F, C>(
+    items: &[(PathBuf, Job)],
+    preset_name: &str,
+    on_progress: F,
+    cancelled: C,
+) -> Vec<FileResult>
+where
+    F: Fn(Progress) + Sync,
+    C: Fn() -> bool + Sync,
+{
     let total = items.len();
     let done = AtomicUsize::new(0);
     items
         .par_iter()
         .map(|(input, job)| {
+            if cancelled() {
+                return FileResult { input: input.clone(), outcome: Err(CANCELLED.into()) };
+            }
             let outcome =
                 isolate(|| process_file(input, job, preset_name).map_err(|e| e.to_string()));
             let result = FileResult { input: input.clone(), outcome };
@@ -122,6 +159,45 @@ mod tests {
         let bad_res = results.iter().find(|r| r.input == bad).unwrap();
         assert!(good_res.outcome.is_ok());
         assert!(bad_res.outcome.is_err());
+    }
+
+    /// Once cancelled, no further input is started: the rest come back as
+    /// `CANCELLED` with no progress call. A 2-thread pool bounds how many are
+    /// already in flight when the flag flips.
+    #[test]
+    fn cancellation_skips_the_remaining_inputs() {
+        use std::sync::atomic::AtomicBool;
+        let dir = tempfile::tempdir().unwrap();
+        let inputs: Vec<PathBuf> = (0..8)
+            .map(|i| {
+                let p = dir.path().join(format!("{i}.png"));
+                RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255])).save(&p).unwrap();
+                p
+            })
+            .collect();
+        let job = Job { format: OutputFormat::Jpeg, ..Job::default() };
+        let stop = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let results = pool.install(|| {
+            run_batch_until(
+                &inputs,
+                &job,
+                "t",
+                |_p| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    stop.store(true, Ordering::SeqCst); // cancel after the first finish
+                },
+                || stop.load(Ordering::SeqCst),
+            )
+        });
+        assert_eq!(results.len(), 8);
+        let skipped = results
+            .iter()
+            .filter(|r| r.outcome.as_ref().err().map(String::as_str) == Some(CANCELLED))
+            .count();
+        assert!(skipped >= 4, "most inputs skipped after cancel, got {skipped}");
+        assert_eq!(calls.load(Ordering::SeqCst), 8 - skipped, "no progress for skipped inputs");
     }
 
     /// A panicking worker becomes an Err result — it must not unwind the batch

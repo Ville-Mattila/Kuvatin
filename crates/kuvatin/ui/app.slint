@@ -460,6 +460,66 @@ component InspSlider inherits Rectangle {
     }
 }
 
+// Progress window for the headless right-click runs (preset quick-runs and
+// sequence renders). Rust shows it only once a run outlives a short grace
+// period, mirrors progress into it, and keeps it open after Cancel until the
+// work has actually stopped.
+export component ProgressWindow inherits Window {
+    title: "Kuvatin";
+    icon: @image-url("../assets/kuvatin-icon.png");
+    always-on-top: true;
+    width: 440px;
+    height: 148px;
+    background: #16181d;
+
+    in property <string> heading: "Working…";
+    in property <float> progress: 0.0;      // 0..1
+    in property <string> status: "";
+    in-out property <bool> cancelling: false;
+    callback cancel();
+
+    VerticalLayout {
+        padding: 22px; spacing: 12px;
+        HorizontalLayout {
+            spacing: 10px;
+            Image { source: @image-url("../assets/kuvatin-icon.png"); width: 22px; height: 22px; }
+            Text {
+                text: root.heading; color: #f2f4f8; font-size: 14px; font-weight: 700;
+                vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+            }
+        }
+        Rectangle {
+            height: 8px; border-radius: 4px; background: #2c313b;
+            Rectangle {
+                x: 0; height: parent.height; border-radius: 4px;
+                width: parent.width * Math.clamp(root.progress, 0, 1);
+                animate width { duration: 180ms; easing: ease-out; }
+                background: @linear-gradient(90deg, #3f7df5 0%, #2dd4bf 100%);
+            }
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            Text {
+                text: root.cancelling ? "Cancelling…" : root.status;
+                color: #9aa3b2; font-size: 11px; vertical-alignment: center;
+                overflow: elide; horizontal-stretch: 1;
+            }
+            Rectangle {
+                width: 84px; height: 28px; border-radius: 7px;
+                background: root.cancelling ? #191d24 : (cancel-ta.has-hover ? #2b313c : #20242c);
+                animate background { duration: 120ms; }
+                border-width: 1px; border-color: #343b46;
+                Text {
+                    text: "Cancel"; color: root.cancelling ? #5b6472 : #cdd3dc;
+                    font-size: 11px; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                cancel-ta := TouchArea { enabled: !root.cancelling; clicked => { root.cancel(); } }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Kuvatin";
     icon: @image-url("../assets/kuvatin-icon.png");

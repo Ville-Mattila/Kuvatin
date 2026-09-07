@@ -4,6 +4,7 @@ mod cli;
 mod collect;
 mod gui;
 mod preview;
+mod progress_ui;
 mod quickrun;
 mod rendezvous;
 mod sequence_render;
@@ -78,7 +79,14 @@ fn main() -> anyhow::Result<()> {
             let Some(paths) = coalesce(&format!("preset:{preset}"), paths) else {
                 return Ok(());
             };
-            match quickrun::run(&preset, &paths) {
+            let heading = preset.clone();
+            let outcome = progress_ui::run_with_progress(&heading, move |sink| {
+                quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| sink.cancelled())
+            })?;
+            match outcome {
+                // The user cancelled — no dialog, even if some files had
+                // already failed before that.
+                Ok(report) if report.cancelled > 0 => {}
                 Ok(report) if report.failure_count() > 0 => fail_and_exit(
                     "Kuvatin \u{2014} some files failed",
                     format!(
@@ -103,7 +111,12 @@ fn main() -> anyhow::Result<()> {
             let Some(paths) = coalesce("sequence-mp4", paths) else {
                 return Ok(());
             };
-            match sequence_render::run(&paths, fps) {
+            let outcome = progress_ui::run_with_progress("Render image sequence to MP4", move |sink| {
+                sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
+            })?;
+            match outcome {
+                // A cancelled run is the user's choice — no dialog.
+                Ok(report) if report.cancelled => {}
                 Ok(report) if !report.failures.is_empty() => fail_and_exit(
                     "Kuvatin \u{2014} sequence render",
                     format!(

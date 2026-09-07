@@ -28,7 +28,8 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
   or **Render image sequence to MP4** (right-click any `frame_0001.png`-style
   frame — or a folder of them — and the whole numbered run becomes an H.264
   MP4 next to it, at native resolution) — a multi-selection runs as **one
-  batch**, not one process per file
+  batch**, not one process per file, with a small **progress window** (and
+  Cancel) for anything longer than an instant
 - **Custom frameless window** with a native drag/resize titlebar and drag-and-drop
 
 Outputs are written next to the originals with a token-pattern name

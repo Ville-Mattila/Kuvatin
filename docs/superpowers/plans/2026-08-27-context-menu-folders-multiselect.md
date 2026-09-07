@@ -88,8 +88,26 @@ becomes an H.264 MP4 next to the frames.
   overwriting. Default 30 fps; `--fps` on the CLI.
 - Coalesced through the rendezvous (group `sequence-mp4`) like the presets.
 
+## Addendum: progress window for headless runs (2026-09-07)
+
+`kuvatin::progress_ui::run_with_progress(heading, work)` runs `work` on a
+worker thread while the Slint event loop owns a small always-on-top
+`ProgressWindow` (heading · bar · status · Cancel):
+
+- The window is only **shown after a 350 ms grace period** if the work is
+  still running — an instant one-file job never flashes a dialog.
+- The worker publishes `(fraction, status)` into a plain `Mutex` (`ProgressSink`
+  is `Send + Sync` with no UI handles, so rayon workers can call it); a 50 ms UI
+  timer mirrors the latest value into the window (coalesced).
+- Cancel (button or close box) only **raises a flag** and shows "Cancelling…";
+  the window stays until the work returns, so partial output is cleaned up.
+  `kuvatin-core::batch::run_batch_until` stops starting new inputs (in-flight
+  ones finish; the rest come back `CANCELLED`, not as failures);
+  `render_to_mp4` polls the flag and tears the render down via `cancel_render`
+  (partial MP4 deleted). Cancelled runs exit silently (no error dialog).
+- A panicking worker still releases the event loop (`catch_unwind`) and
+  surfaces as an error instead of a hung window.
+
 ## Follow-ups (not in scope)
 
-- A headless quick-run has no progress UI; a folder of hundreds of images runs
-  silently until done. A small progress window would help.
 - Folders are scanned one level deep (no recursion), as before.

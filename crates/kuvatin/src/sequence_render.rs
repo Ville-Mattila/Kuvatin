@@ -4,8 +4,11 @@
 
 use anyhow::{anyhow, Result};
 use kuvatin_core::naming::ensure_unique;
-use kuvatin_video::{detect_sequence, parse_frame_path, render_to_mp4, SequenceSpec};
+use kuvatin_video::{
+    detect_sequence, parse_frame_path, render_to_mp4, RenderProgress, SequenceSpec,
+};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 /// Frame formats the sequence engine accepts.
 const FRAME_EXTS: &[&str] = &["png", "jpg", "jpeg", "exr"];
@@ -16,6 +19,8 @@ pub struct SequenceReport {
     pub rendered: Vec<PathBuf>,
     /// `(selected path or first frame, error)` for everything that didn't render.
     pub failures: Vec<(PathBuf, String)>,
+    /// The user cancelled; `rendered` holds what finished before that.
+    pub cancelled: bool,
 }
 
 fn is_frame_file(p: &Path) -> bool {
@@ -99,21 +104,51 @@ pub fn output_path(spec: &SequenceSpec) -> PathBuf {
     ensure_unique(spec.dir.join(format!("{stem}.mp4")))
 }
 
-/// Render every sequence in the selection at `fps`.
-pub fn run(paths: &[PathBuf], fps: u32) -> Result<SequenceReport> {
+/// Render every sequence in the selection at `fps`. `progress(fraction,
+/// status)` covers the whole selection (an EXR run spends its first 30 % on
+/// conversion); `cancel` stops after the current frame / next encode poll.
+pub fn run(
+    paths: &[PathBuf],
+    fps: u32,
+    progress: &(dyn Fn(f32, &str) + Sync),
+    cancel: &AtomicBool,
+) -> Result<SequenceReport> {
     let (specs, mut failures) = resolve_sequences(paths);
     if specs.is_empty() && failures.is_empty() {
         return Err(anyhow!("no image sequence in selection"));
     }
+    let n = specs.len();
     let mut rendered = Vec::new();
-    for spec in &specs {
+    for (i, spec) in specs.iter().enumerate() {
+        let label = if n > 1 {
+            format!("{} ({} of {n})", spec.pattern_name(), i + 1)
+        } else {
+            spec.pattern_name()
+        };
+        let is_exr = spec.is_exr();
         let out = output_path(spec);
-        match render_to_mp4(spec, &out, fps) {
+        let report = |p: RenderProgress| {
+            let (local, status) = match p {
+                RenderProgress::Converting { done, total } => (
+                    0.3 * done as f32 / total.max(1) as f32,
+                    format!("{label}  ·  converting EXR {done} / {total}"),
+                ),
+                RenderProgress::Rendering(f) => (
+                    if is_exr { 0.3 + 0.7 * f } else { f },
+                    format!("{label}  ·  rendering {:.0}%", f * 100.0),
+                ),
+            };
+            progress((i as f32 + local) / n as f32, &status);
+        };
+        match render_to_mp4(spec, &out, fps, report, cancel) {
             Ok(()) => rendered.push(out),
+            Err(e) if e.to_string().contains("cancelled") => {
+                return Ok(SequenceReport { rendered, failures, cancelled: true });
+            }
             Err(e) => failures.push((spec.first_path(), format!("{e:#}"))),
         }
     }
-    Ok(SequenceReport { rendered, failures })
+    Ok(SequenceReport { rendered, failures, cancelled: false })
 }
 
 #[cfg(test)]
