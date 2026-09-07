@@ -5,10 +5,24 @@ mod collect;
 mod gui;
 mod preview;
 mod quickrun;
+mod rendezvous;
 mod shell;
 
 use clap::Parser;
 use cli::{Cli, Mode};
+use std::path::PathBuf;
+
+/// Fold the processes Explorer launches for a multi-item selection (one per
+/// item) into a single batch: the leader gets every path, followers get
+/// `None` and should exit silently. `None` also when another leader already
+/// claimed this process' paths.
+fn coalesce(group: &str, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    match rendezvous::gather(group, &paths, rendezvous::QUIET) {
+        rendezvous::Role::Follower => None,
+        rendezvous::Role::Leader(all) if all.is_empty() => None,
+        rendezvous::Role::Leader(all) => Some(all),
+    }
+}
 
 /// In an installed build the GStreamer **plugins** are bundled next to the exe
 /// (the core DLLs sit alongside the exe so the loader finds them at startup;
@@ -41,6 +55,10 @@ fn main() -> anyhow::Result<()> {
         Mode::Register => shell::register()?,
         Mode::Unregister => shell::unregister()?,
         Mode::QuickRun { preset, paths } => {
+            // One group per preset, so two different presets never merge.
+            let Some(paths) = coalesce(&format!("preset:{preset}"), paths) else {
+                return Ok(());
+            };
             match quickrun::run(&preset, &paths) {
                 Ok(report) if report.failure_count() > 0 => {
                     let mut msg = format!(
@@ -70,7 +88,19 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Mode::Gui { paths } => gui::run(paths)?,
+        Mode::Gui { paths } => {
+            // "Open in Kuvatin…" on N items must open ONE window with all of
+            // them, not N windows. A plain launch (no paths) skips the wait.
+            let paths = if paths.is_empty() {
+                paths
+            } else {
+                match coalesce("open", paths) {
+                    Some(all) => all,
+                    None => return Ok(()),
+                }
+            };
+            gui::run(paths)?
+        }
     }
     Ok(())
 }

@@ -1,4 +1,9 @@
-//! Classic per-user Explorer context-menu registration for image files.
+//! Classic per-user Explorer context-menu registration: a cascading "Kuvatin"
+//! verb on image files, on folders, and on a folder's background.
+//!
+//! Static verbs are invoked once per selected item; the app folds those
+//! processes into one batch at runtime (see `crate::rendezvous`), so a
+//! multi-selection — or a folder, or a mix — converts as a single run.
 
 use anyhow::{Context, Result};
 use std::env;
@@ -13,10 +18,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
 };
 
+/// The cascading verb on image files. Also carries the registration sentinels
+/// (`Icon` = exe path, `Schema`) that `ensure_registered` checks.
 const ROOT: &str = r"Software\Classes\SystemFileAssociations\image\shell\Kuvatin";
-const STORE: &str = r"Software\Classes\Kuvatin.CommandStore\shell";
+/// The same verb on folders (right-click a folder → converts its images).
+const FOLDER_ROOT: &str = r"Software\Classes\Directory\shell\Kuvatin";
+/// …and on a folder's background (right-click inside an open folder).
+const BACKGROUND_ROOT: &str = r"Software\Classes\Directory\Background\shell\Kuvatin";
 
-/// (command id under CommandStore, menu label, preset name or empty for GUI)
+/// Command stores the cascading verbs point at (`ExtendedSubCommandsKey`).
+/// Two stores because the item token differs: `%1` is the selected file or
+/// folder, while a background verb only has `%V`, the folder itself.
+const STORE_ITEM: &str = "Kuvatin.CommandStore";
+const STORE_BACKGROUND: &str = "Kuvatin.CommandStore.Background";
+
+/// Bump when the set of registry keys changes, so existing installs (whose
+/// `Icon` sentinel already matches the exe) re-register at next launch.
+/// 2 = folder + background verbs, MultiSelectModel.
+const SCHEMA: &str = "2";
+
+/// (command id under a store, menu label, preset name or empty for GUI)
 const ITEMS: &[(&str, &str, &str)] = &[
     ("Kuvatin.Webp", "Convert to WebP", "Convert to WebP"),
     ("Kuvatin.1080p", "Resize to 1080p", "Resize to 1080p"),
@@ -76,42 +97,67 @@ fn exe_path() -> Result<String> {
         .into_owned())
 }
 
-pub fn register() -> Result<()> {
-    let exe = exe_path()?;
+/// The command line a store item runs. `token` is Explorer's placeholder for
+/// the clicked item: `%1` (file/folder) or `%V` (background folder).
+fn command_line(exe: &str, preset: &str, token: &str) -> String {
+    if preset.is_empty() {
+        format!("\"{exe}\" \"{token}\"")
+    } else {
+        format!("\"{exe}\" --preset \"{preset}\" \"{token}\"")
+    }
+}
 
-    let root = create_key(ROOT)?;
-    set_string(root, Some("MUIVerb"), "Kuvatin")?;
-    set_string(root, Some("ExtendedSubCommandsKey"), r"Kuvatin.CommandStore")?;
-    set_string(root, Some("Icon"), &exe)?;
-    unsafe {
-        let _ = RegCloseKey(root);
-    };
-
-    let storeroot = create_key(r"Software\Classes\Kuvatin.CommandStore")?;
+/// Write one command store (`Software\Classes\<store>\shell\<item>\command`).
+fn write_store(store: &str, exe: &str, token: &str) -> Result<()> {
+    let class_key = format!(r"Software\Classes\{store}");
+    let storeroot = create_key(&class_key)?;
     unsafe {
         let _ = RegCloseKey(storeroot);
     };
-
     for (id, label, preset) in ITEMS {
-        let item_key = format!(r"{STORE}\{id}");
+        let item_key = format!(r"{class_key}\shell\{id}");
         let k = create_key(&item_key)?;
         set_string(k, None, label)?;
+        set_string(k, Some("MultiSelectModel"), "Player")?;
         unsafe {
             let _ = RegCloseKey(k);
         };
 
-        let cmd_key = format!(r"{item_key}\command");
-        let c = create_key(&cmd_key)?;
-        let command = if preset.is_empty() {
-            format!("\"{exe}\" \"%1\"")
-        } else {
-            format!("\"{exe}\" --preset \"{preset}\" \"%1\"")
-        };
-        set_string(c, None, &command)?;
+        let c = create_key(&format!(r"{item_key}\command"))?;
+        set_string(c, None, &command_line(exe, preset, token))?;
         unsafe {
             let _ = RegCloseKey(c);
         };
     }
+    Ok(())
+}
+
+pub fn register() -> Result<()> {
+    let exe = exe_path()?;
+
+    // The cascading "Kuvatin" verb, attached in three places.
+    for (root, store) in [
+        (ROOT, STORE_ITEM),
+        (FOLDER_ROOT, STORE_ITEM),
+        (BACKGROUND_ROOT, STORE_BACKGROUND),
+    ] {
+        let k = create_key(root)?;
+        set_string(k, Some("MUIVerb"), "Kuvatin")?;
+        set_string(k, Some("ExtendedSubCommandsKey"), store)?;
+        set_string(k, Some("Icon"), &exe)?;
+        // Without this Explorer hides the verb once more than 15 items are
+        // selected ("Player" = any number of items).
+        set_string(k, Some("MultiSelectModel"), "Player")?;
+        if root == ROOT {
+            set_string(k, Some("Schema"), SCHEMA)?;
+        }
+        unsafe {
+            let _ = RegCloseKey(k);
+        };
+    }
+
+    write_store(STORE_ITEM, &exe, "%1")?;
+    write_store(STORE_BACKGROUND, &exe, "%V")?;
 
     println!("Kuvatin context menu registered.");
     Ok(())
@@ -133,17 +179,20 @@ pub fn register() -> Result<()> {
 /// (re)register must never block app startup, so errors are swallowed.
 pub fn ensure_registered() {
     let Ok(exe) = exe_path() else { return };
-    if registered_exe_path().as_deref() == Some(exe.as_str()) {
-        return; // already registered for this user and pointing at us
+    if read_root_value("Icon").as_deref() == Some(exe.as_str())
+        && read_root_value("Schema").as_deref() == Some(SCHEMA)
+    {
+        return; // registered for this user, pointing at us, with the current key set
     }
     let _ = register();
 }
 
-/// Read back the `Icon` value under ROOT that `register()` writes (it is set
-/// to the absolute exe path). `None` when unregistered or unreadable.
-fn registered_exe_path() -> Option<String> {
+/// Read back a string value under ROOT that `register()` writes (`Icon` holds
+/// the absolute exe path, `Schema` the key-set version). `None` when
+/// unregistered or unreadable.
+fn read_root_value(name: &str) -> Option<String> {
     let wpath = wide(ROOT);
-    let wname = wide("Icon");
+    let wname = wide(name);
     // MAX_PATH-with-headroom; a long-path exe simply fails the read and takes
     // the (idempotent) re-register path.
     let mut buf = [0u16; 1024];
@@ -198,7 +247,14 @@ pub fn notify_error(title: &str, text: &str) {
 }
 
 pub fn unregister() -> Result<()> {
-    for path in [ROOT, r"Software\Classes\Kuvatin.CommandStore"] {
+    let stores = [
+        format!(r"Software\Classes\{STORE_ITEM}"),
+        format!(r"Software\Classes\{STORE_BACKGROUND}"),
+    ];
+    for path in [ROOT, FOLDER_ROOT, BACKGROUND_ROOT]
+        .into_iter()
+        .chain(stores.iter().map(String::as_str))
+    {
         let wpath = wide(path);
         unsafe {
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wpath.as_ptr()));
@@ -206,4 +262,22 @@ pub fn unregister() -> Result<()> {
     }
     println!("Kuvatin context menu removed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_lines_quote_the_exe_and_pass_the_item_token() {
+        assert_eq!(
+            command_line(r"C:\Program Files\Kuvatin\kuvatin.exe", "Convert to WebP", "%1"),
+            r#""C:\Program Files\Kuvatin\kuvatin.exe" --preset "Convert to WebP" "%1""#
+        );
+        // The GUI item has no preset; background verbs get the folder via %V.
+        assert_eq!(
+            command_line(r"C:\k\kuvatin.exe", "", "%V"),
+            r#""C:\k\kuvatin.exe" "%V""#
+        );
+    }
 }

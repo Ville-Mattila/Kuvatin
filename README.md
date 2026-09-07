@@ -23,8 +23,9 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
 - **Batch** whole folders / multi-selections in parallel, with reusable **presets**
   (stored in `%APPDATA%\Kuvatin\presets.toml`) — one bad file can't take down a
   run, and **EXIF orientation** is applied automatically on decode
-- **Explorer context menu**: right-click images for quick preset actions
-  (Convert to WebP, Resize to 1080p, Resize to 50%) or "Open in Kuvatin…"
+- **Explorer context menu**: right-click images **or folders** for quick preset
+  actions (Convert to WebP, Resize to 1080p, Resize to 50%) or "Open in Kuvatin…" —
+  a multi-selection runs as **one batch**, not one process per file
 - **Custom frameless window** with a native drag/resize titlebar and drag-and-drop
 
 Outputs are written next to the originals with a token-pattern name
@@ -89,7 +90,12 @@ cargo run -p kuvatin -- --unregister   # remove it
 ```
 
 On Windows 11 the entries appear under "Show more options"; on Windows 10 directly in
-the context menu.
+the context menu. The submenu is attached to image files, to folders, and to a
+folder's background (right-click inside an open folder). Explorer launches a
+classic verb once per selected item; Kuvatin folds those launches into a single
+batch at startup (a short rendezvous in `%TEMP%\kuvatin\rendezvous`), so
+selecting fifty files runs one conversion with one summary — and "Open in
+Kuvatin…" opens one window with all of them.
 
 ## Headless quick conversion (used by the context menu)
 
