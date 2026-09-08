@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kuvatin — Codebase Review · 2026-09-08 (v2.6.0)</title>
+<style>
+  :root{
+    --teal:#00d4bf; --blue:#3f7df5; --bg:#0a0c10; --panel:#13171f; --panel2:#181d27;
+    --ink:#eef2f7; --muted:#8b95a6; --line:#222a36;
+    --crit:#ff4d6a; --high:#ff9f43; --med:#ffd93d; --low:#6bc5f8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:0 0 80px}
+  ::selection{background:var(--teal);color:#04201d}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 28px}
+  a{color:var(--teal);text-decoration:none} a:hover{text-decoration:underline}
+  code{font:12.5px/1.5 Consolas,monospace;background:#ffffff0d;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cdd5e0}
+  h1,h2,h3{line-height:1.15;letter-spacing:-.02em}
+
+  header{padding:56px 0 34px;border-bottom:1px solid var(--line);
+    background:radial-gradient(900px 340px at 20% -10%, #00d4bf14, transparent 65%),
+               radial-gradient(700px 300px at 85% 0%, #3f7df512, transparent 60%)}
+  .kicker{color:var(--teal);font-weight:700;font-size:12px;letter-spacing:.2em;text-transform:uppercase;margin-bottom:14px}
+  header h1{font-size:clamp(30px,5vw,44px);margin-bottom:12px}
+  header p.lead{color:var(--muted);max-width:74ch}
+  .meta{display:flex;gap:20px;flex-wrap:wrap;margin-top:20px;font-size:13px;color:var(--muted)}
+  .meta b{color:var(--ink)}
+
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:34px 0 8px}
+  .stat{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+  .stat .n{font-size:34px;font-weight:800;letter-spacing:-.03em}
+  .stat .l{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;margin-top:2px}
+  .stat.c .n{color:var(--crit)} .stat.h .n{color:var(--high)} .stat.m .n{color:var(--med)} .stat.lo .n{color:var(--low)}
+
+  section{margin-top:52px}
+  section>h2{font-size:24px;margin-bottom:6px}
+  section>p.sub{color:var(--muted);margin-bottom:22px;max-width:78ch}
+
+  .score{width:100%;border-collapse:collapse;font-size:13.5px}
+  .score th{color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.12em;text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+  .score td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .score td:first-child{white-space:nowrap;font-weight:700}
+  .grade{display:inline-block;width:34px;height:34px;border-radius:9px;text-align:center;line-height:34px;font-weight:800;font-size:15px}
+  .gB{background:#00d4bf22;color:var(--teal);border:1px solid #00d4bf44}
+  .gC{background:#ffd93d1e;color:var(--med);border:1px solid #ffd93d3d}
+  .gD{background:#ff9f4320;color:var(--high);border:1px solid #ff9f4340}
+
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:18px}
+  .metric{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;font-size:13px}
+  .metric b{display:block;font-size:22px;font-weight:800;letter-spacing:-.02em;color:var(--ink)}
+  .metric span{color:var(--muted)}
+
+  .sevhead{display:flex;align-items:center;gap:12px;margin:34px 0 14px}
+  .sevhead .dot{width:12px;height:12px;border-radius:50%}
+  .sevhead h3{font-size:18px}
+  .sevhead .count{color:var(--muted);font-size:13px}
+  .find{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-left-width:3px;border-radius:12px;padding:16px 18px;margin-bottom:10px}
+  .find .top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:6px}
+  .find .id{font:700 12px Consolas,monospace;color:var(--muted)}
+  .find .title{font-weight:700;font-size:15px}
+  .chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:2px 9px;border-radius:999px;text-transform:uppercase}
+  .a-core{background:#00d4bf18;color:var(--teal);border:1px solid #00d4bf33}
+  .a-video{background:#3f7df51a;color:#8fb4ff;border:1px solid #3f7df538}
+  .a-gui{background:#ffd93d14;color:#ffd93d;border:1px solid #ffd93d30}
+  .a-shell{background:#c084fc1a;color:#d8b4fe;border:1px solid #c084fc38}
+  .a-ship{background:#ff9f4316;color:var(--high);border:1px solid #ff9f4333}
+  .a-x2{background:#ffffff0c;color:var(--muted);border:1px solid var(--line)}
+  .find p{color:#b9c2d0;font-size:13.5px}
+  .find .fix{margin-top:7px;color:var(--muted);font-size:13px}
+  .find .fix b{color:var(--teal);font-weight:700}
+  .find .loc{margin-top:7px;font-size:12px;color:var(--muted)}
+  .find .plan{float:right;font:700 11.5px Consolas,monospace;color:#8fb4ff;background:#3f7df512;border:1px solid #3f7df530;border-radius:6px;padding:2px 8px;margin-left:10px}
+  .sev-c{border-left-color:var(--crit)} .sev-h{border-left-color:var(--high)}
+  .sev-m{border-left-color:var(--med)} .sev-l{border-left-color:var(--low)}
+
+  .themes{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+  .theme{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;font-size:13.5px;color:#b9c2d0}
+  .theme h4{color:var(--ink);font-size:14.5px;margin-bottom:6px}
+
+  .phases{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px}
+  .phases th{color:var(--muted);text-transform:uppercase;font-size:11px;letter-spacing:.12em;text-align:left;padding:8px 12px;border-bottom:1px solid var(--line)}
+  .phases td{padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .phases td:first-child{white-space:nowrap;font-weight:700;color:var(--teal)}
+  .good{background:linear-gradient(135deg,#0f1a18,#101319);border:1px solid #00d4bf33;border-radius:14px;padding:22px 24px;margin-top:22px}
+  .good h3{color:var(--teal);font-size:16px;margin-bottom:8px}
+  .good ul{padding-left:20px;color:#b9c2d0;font-size:13.5px}
+  .good li{margin-bottom:5px}
+  .note{font-size:12.5px;color:var(--muted);margin-top:10px}
+  footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px;text-align:center}
+  @media(max-width:760px){ .stats{grid-template-columns:repeat(2,1fr)} .metrics,.themes{grid-template-columns:1fr} .find .plan{float:none;display:inline-block;margin:6px 0 0} }
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <div class="kicker">Kuvatin · Codebase Review</div>
+  <h1>66 findings at v2.6.0 — one compliance gap, then craftsmanship.</h1>
+  <p class="lead">Second full review of the Kuvatin workspace, at <b>v2.6.0</b> (tag <code>fe65388</code>; master at <code>cfeecbf</code>). Five parallel reviewers — image engine, video engine, GUI, Explorer/CLI/headless paths, and installer/CI/site/licensing — each verifying claims in source before reporting; the top findings were re-verified by hand and are marked where two reviewers converged independently. The previous audit (<a href="2026-07-02-kuvatin-audit.html">2026-07-02, 56 findings</a>) shipped as v2.0.1; this one covers everything added since — image-sequence import, the folder/multi-select context menu, sequence→MP4, the progress window, the CI overhaul — and re-examines the rest.</p>
+  <div class="meta">
+    <span>Date <b>2026-09-08</b></span>
+    <span>Scope <b>kuvatin-core · kuvatin-video · kuvatin (GUI/CLI/shell) · app.slint · WiX · CI · site · licensing</b></span>
+    <span>Tests <b>96</b> (core 49 · video 26 · gui 21)</span>
+  </div>
+  <div class="stats">
+    <div class="stat c"><div class="n">1</div><div class="l">Critical</div></div>
+    <div class="stat h"><div class="n">13</div><div class="l">High</div></div>
+    <div class="stat m"><div class="n">35</div><div class="l">Medium</div></div>
+    <div class="stat lo"><div class="n">17</div><div class="l">Low</div></div>
+  </div>
+</div></header>
+
+<div class="wrap">
+
+<section>
+  <h2>Health scorecard</h2>
+  <p class="sub">Kuvatin has grown from an image batch tool into a small video editor in three months, and it shows in the good way — the hard GStreamer lessons are pinned by regression tests, the headless paths finally have feedback and cancellation, and releases are pinned and (now) cache-warm. It also shows in the predictable way: the GUI file is twice the size the last audit flagged, five copies of the "what is an image" list disagree, and the installer has quietly become a redistributor of 390 third-party binaries without carrying their licenses.</p>
+  <table class="score">
+    <tr><th>Area</th><th></th><th>Assessment</th></tr>
+    <tr><td>kuvatin-core (images)</td><td><span class="grade gB">B</span></td><td>Careful arithmetic, panic isolation, atomic output reservation — all tested. Two shipped-path bugs undercut its two promises: folder-mode Convert can <b>silently overwrite</b> same-named inputs from different folders, and a crop drawn on an EXIF-rotated photo <b>lands on the wrong region</b>. The default preset can hard-fail on noisy photos.</td></tr>
+    <tr><td>kuvatin-video (engine)</td><td><span class="grade gB">B</span></td><td>Mature where it hurt before (commit deadlocks, NVENC caps, stride). Missing: a state guard around render mode (transport keys reach the rendering pipeline), <code>%</code>-escaping in image-sequence patterns (a printf-format injection), and any hygiene for the EXR conversion cache on the right-click path.</td></tr>
+    <tr><td>kuvatin (GUI)</td><td><span class="grade gC">C+</span></td><td>Disciplined wiring and the hardening plan landed — but export start blocks the UI for seconds, a failed video-engine init is a silent no-op forever, an unreadable file leaves Crop aimed at the previous image, there is zero accessibility, and <code>run()</code> is ~1,650 lines with 35 closures.</td></tr>
+    <tr><td>Explorer / CLI / headless</td><td><span class="grade gB">B−</span></td><td>The rendezvous and progress window are sound and tested. But every GUI launch re-points the installed menu at whatever exe is running, the menu cannot show user presets while the website says it does, <code>.jfif</code> gets the menu and then "no image files", and errors before the progress window exist stay silent.</td></tr>
+    <tr><td>Installer / CI / site / legal</td><td><span class="grade gD">D+</span></td><td>SHA-pinned downloads, a tag-version guard, and a fixed cache scope are genuinely good. The MSI, however, ships ~390 LGPL/GPL/BSD DLLs with <b>no license texts or notices</b>, ~60 MB of unused and patent-encumbered codecs, is unsigned, and the video engine still never gates a release.</td></tr>
+  </table>
+  <div class="metrics">
+    <div class="metric"><b>2,377 · 2,334</b><span>lines in <code>app.slint</code> and <code>gui.rs</code> — 45 of the last 60 commits touch one of them</span></div>
+    <div class="metric"><b>1,528</b><span>lines in <code>project.rs</code>; the video crate carries 26 tests, most gated on a local GStreamer</span></div>
+    <div class="metric"><b>5</b><span>independent extension lists for "image / frame" across collect, gui (×2), sequence_render and the shell association</span></div>
+  </div>
+</section>
+
+<section>
+  <h2>Findings</h2>
+  <p class="sub">Each card: what breaks, where, how to fix, and the phase <span class="plan" style="float:none">§n</span> in the plan below. Areas: <span class="chip a-core">core</span> <span class="chip a-video">video</span> <span class="chip a-gui">gui</span> <span class="chip a-shell">shell</span> <span class="chip a-ship">ship</span> (installer/CI/site/legal). <span class="chip a-x2">×2</span> marks a finding two reviewers reached independently.</p>
+
+  <div class="sevhead"><span class="dot" style="background:var(--crit)"></span><h3>Critical</h3><span class="count">1 finding — fix before the next release</span></div>
+
+  <div class="find sev-c"><span class="plan">§0</span><div class="top"><span class="id">C1</span><span class="chip a-ship">ship</span><span class="title">The MSI redistributes ~390 third-party DLLs with no license texts, notices or source offer</span></div>
+    <p>The harvest copies <code>bin\*.dll</code> (130) and <code>lib\gstreamer-1.0\*.dll</code> (261) and nothing else; the only license the installer places is Kuvatin's own <code>License.rtf</code>. Those DLLs include LGPL-2.1 (GStreamer, the FFmpeg build), GPL-2.0-or-later (x264, x265, a52dec, libdca) and BSD/MPL/Apache components whose licenses require the text and copyright notices to accompany the binaries — and, for the (L)GPL ones, an offer of corresponding source. Upstream already provides all of it: <code>share\licenses\</code> holds 82 component directories (verified: <code>x264\GPL-2.0-or-later.txt</code>, <code>ffmpeg\README-LICENSE-INFO.txt</code>). Kuvatin being GPL-3 makes the combination <i>compatible</i>; it does not remove the notice obligations.</p>
+    <div class="fix"><b>Fix:</b> harvest <code>share\licenses\</code> into <code>[APPLICATIONFOLDER]\licenses</code> in <code>bundle-gstreamer.ps1</code>; add a THIRD-PARTY-NOTICES file; state the GStreamer 1.26.11 source URLs in README and the release template. <code>cargo deny</code> (M28) then keeps the Rust side honest too.</div>
+    <div class="loc">crates/kuvatin/wix/bundle-gstreamer.ps1:35–37 · wix/main.wxs:104–109 · C:\Program Files\gstreamer\1.0\msvc_x86_64\share\licenses (82 dirs, none harvested)</div></div>
+
+  <div class="sevhead"><span class="dot" style="background:var(--high)"></span><h3>High</h3><span class="count">13 findings</span></div>
+
+  <div class="find sev-h"><span class="plan">§1</span><div class="top"><span class="id">H1</span><span class="chip a-core">core</span><span class="chip a-gui">gui</span><span class="chip a-x2">×2</span><span class="title">Folder-mode Convert silently overwrites same-named inputs from different folders</span></div>
+    <p>Outputs are planned with <code>ensure_unique</code>, which only asks the <i>filesystem</i> whether a name is taken — not the other targets in the same batch. Drop <code>A\IMG_0001.jpg</code> and <code>B\IMG_0001.jpg</code> with an output folder chosen and both plan <code>IMG_0001-kuvatin.webp</code>; <code>process_file_to</code> then writes with plain <code>fs::write</code>, so one result vanishes while both rows read "done". <code>plan_unique_outputs</code> was written for exactly this and is referenced only by its own test.</p>
+    <div class="fix"><b>Fix:</b> route the GUI's folder mode through <code>plan_unique_outputs</code> (or <code>write_unique</code>'s <code>create_new</code> reservation); delete <code>ensure_unique</code> as an output planner.</div>
+    <div class="loc">kuvatin/src/gui.rs:772–778 · kuvatin-core/src/naming.rs:79 · pipeline.rs:339, 351</div></div>
+
+  <div class="find sev-h"><span class="plan">§1</span><div class="top"><span class="id">H2</span><span class="chip a-core">core</span><span class="chip a-gui">gui</span><span class="title">Crop rectangles ignore EXIF orientation — the preview and the pipeline see different pixels</span></div>
+    <p>The viewer and thumbnails decode with plain <code>image::open</code> (no rotation) and store the crop in that pixel space; <code>process_file</code> decodes via the private <code>decode_oriented</code>, rotates, and then clamps the same rectangle against swapped dimensions. On a portrait phone photo the user crops one region and gets another.</p>
+    <div class="fix"><b>Fix:</b> make <code>decode_oriented</code> public and use it for the preview and thumbnails, so what you crop is what gets cropped.</div>
+    <div class="loc">kuvatin/src/gui.rs:587, 1988 · kuvatin-core/src/pipeline.rs:230, 305 · crop.rs:59–64</div></div>
+
+  <div class="find sev-h"><span class="plan">§2</span><div class="top"><span class="id">H3</span><span class="chip a-video">video</span><span class="chip a-gui">gui</span><span class="title">No render-mode guard: Space or Delete during an export hits the rendering pipeline</span></div>
+    <p><code>Project</code> has no notion of "rendering"; <code>play/pause/seek/remove_clip</code> go straight to the pipeline. The export modal swallows clicks, but the keyboard <code>FocusScope</code> is gated only on Videos mode — Space calls <code>pause()</code> on the render pipeline (the export freezes until the watchdog says "stuck"), Delete removes a clip and commits mid-render.</p>
+    <div class="fix"><b>Fix:</b> a <code>rendering</code> flag set in <code>begin_render</code>/cleared in <code>end_render</code> that turns transport/edit methods into no-ops; gate the FocusScope on <code>!exporting</code> as well.</div>
+    <div class="loc">kuvatin-video/src/project.rs:835–843, 682 · kuvatin/ui/app.slint:703–706 · gui.rs:1494–1509</div></div>
+
+  <div class="find sev-h"><span class="plan">§2</span><div class="top"><span class="id">H4</span><span class="chip a-video">video</span><span class="title"><code>%</code> in a frame file name is printf-format-injected into <code>imagesequencesrc</code></span></div>
+    <p><code>pattern_name()</code> copies prefix and suffix verbatim into the printf pattern GStreamer feeds <code>g_strdup_printf</code>. <code>50%_off_0001.png</code> becomes <code>50%_off_%04d.png</code> (wrong file names); <code>take%s_0001.png</code> hands <code>%s</code> an integer — undefined behaviour in native code. Detection succeeds (Rust <code>format!</code> is literal), so the failure only surfaces inside GStreamer.</p>
+    <div class="fix"><b>Fix:</b> escape <code>%</code> → <code>%%</code> in prefix and suffix inside <code>pattern_name()</code>; add the unit test.</div>
+    <div class="loc">kuvatin-video/src/sequence.rs:53–59, 76–83</div></div>
+
+  <div class="find sev-h"><span class="plan">§4</span><div class="top"><span class="id">H5</span><span class="chip a-gui">gui</span><span class="title">A video-engine init failure is invisible — clicking media does nothing, forever</span></div>
+    <p><code>make_project</code> only <code>eprintln!</code>s (no stderr in the windowed build) and <code>add_to_timeline</code> returns silently when the project slot is empty. A missing or broken GStreamer plugin turns every bin click into a no-op with no message.</p>
+    <div class="fix"><b>Fix:</b> <code>show_error(&amp;ui, "Video engine unavailable", e)</code> in the <code>Err</code> arm; disable the Videos mode toggle's actions while the engine is down.</div>
+    <div class="loc">kuvatin/src/gui.rs:74–77, 115–117</div></div>
+
+  <div class="find sev-h"><span class="plan">§4</span><div class="top"><span class="id">H6</span><span class="chip a-gui">gui</span><span class="chip a-video">video</span><span class="title">Export start blocks the UI for up to 3 s before the modal appears; Cancel blocks up to 2 s for a file that is deleted anyway</span></div>
+    <p><code>begin_render</code> waits for the preview to reach NULL (3 s cap) on the UI thread and is called <i>before</i> <code>set_exporting(true)</code>, so the window hangs with no feedback; <code>cancel_render</code> does a 2 s <code>timed_pop_filtered</code> to finalise a moov atom for a partial file both callers immediately delete.</p>
+    <div class="fix"><b>Fix:</b> set <code>exporting</code> first and start the render on the next timer tick (or a worker); skip the EOS wait when <code>delete_partial</code> is set.</div>
+    <div class="loc">kuvatin/src/gui.rs:1632–1643, 1666 · kuvatin-video/src/project.rs:934–935, 958–972</div></div>
+
+  <div class="find sev-h"><span class="plan">§1</span><div class="top"><span class="id">H7</span><span class="chip a-gui">gui</span><span class="title">Selecting an unreadable image leaves Crop aimed at the previous file</span></div>
+    <p>On decode failure the select handler returns without touching the UI: <code>selected-index</code> moves, but <code>viewer-image</code> and the <code>edit</code> path (used by Apply Crop) still belong to the old file. Apply crops and badges the wrong row. <code>spawn_thumbnails</code> hides the same failures.</p>
+    <div class="fix"><b>Fix:</b> on <code>Err</code>, clear the viewer, set <code>edit = None</code> and mark the row "unreadable".</div>
+    <div class="loc">kuvatin/src/gui.rs:587, 640–668, 1988</div></div>
+
+  <div class="find sev-h"><span class="plan">§3</span><div class="top"><span class="id">H8</span><span class="chip a-shell">shell</span><span class="title">Every GUI launch re-points the installed Explorer menu at whatever exe is running</span></div>
+    <p><code>ensure_registered()</code> runs in every build and re-registers whenever the stored exe path differs — so <code>cargo run</code>, a portable copy or a test build silently rewrites the user's HKCU command stores to point at <code>target\debug\kuvatin.exe</code>; deleting <code>target</code> leaves dead verbs. (This review's own test runs did exactly that on the author's machine.)</p>
+    <div class="fix"><b>Fix:</b> only heal when the registered exe no longer exists or when running from the MSI install location; skip in <code>debug_assertions</code> builds.</div>
+    <div class="loc">kuvatin/src/gui.rs:217 · shell/windows.rs:191–199</div></div>
+
+  <div class="find sev-h"><span class="plan">§3</span><div class="top"><span class="id">H9</span><span class="chip a-shell">shell</span><span class="chip a-ship">ship</span><span class="chip a-x2">×2</span><span class="title">Menu items are hardcoded — user presets never appear, the site says they do, and deleting a built-in breaks the menu</span></div>
+    <p><code>ITEMS</code> is three fixed preset names plus two actions. Presets the user saves are never registered; the default "Compress PNG" is absent; and deleting "Convert to WebP" in the GUI (allowed) leaves a menu entry that fails with "unknown preset". The landing page promises "Reusable presets live in the Windows Explorer menu."</p>
+    <div class="fix"><b>Fix:</b> regenerate the command store from <code>PresetStore</code> on every save/delete (the store already knows the names); reword the site until then.</div>
+    <div class="loc">kuvatin/src/shell/windows.rs:51–57 · quickrun.rs:42–44 · gui.rs:483–558 · docs/index.html:639</div></div>
+
+  <div class="find sev-h"><span class="plan">§3</span><div class="top"><span class="id">H10</span><span class="chip a-shell">shell</span><span class="title">The shell association and the engine's extension gate disagree</span></div>
+    <p>The verb sits on <code>SystemFileAssociations\image</code> — Windows' PerceivedType set, which includes <code>.jfif/.jpe/.dib/.ico/.wmf/.emf</code> (and <code>.webp/.heic/.avif</code> when codec packs are present) — yet <code>IMAGE_EXTS</code> rejects <code>.jfif</code>, so the menu appears and then reports "no image files in selection". Conversely <code>.exr</code> has no PerceivedType, so "Render image sequence to MP4" never appears on an EXR frame — only via its folder.</p>
+    <div class="fix"><b>Fix:</b> register per extension (<code>SystemFileAssociations\.exr\shell\…</code>) for the supported set, and accept <code>.jfif/.jpe</code>; see M34 for the single source of truth.</div>
+    <div class="loc">kuvatin/src/shell/windows.rs:23 · collect.rs:3 · sequence_render.rs:14</div></div>
+
+  <div class="find sev-h"><span class="plan">§0</span><div class="top"><span class="id">H11</span><span class="chip a-ship">ship</span><span class="title">The bundle ships patent-encumbered and unused codecs — roughly 60 MB of dead weight</span></div>
+    <p>The app needs NVENC/x264, voaacenc, vp8/vp9/opus, decoders and GES. The MSI ships everything: x265, a52dec, dtsdec, amrnb/wb, siren, openh264 (Cisco's patent grant covers only Cisco-distributed binaries), plus gstpython, gstaws, gstelevenlabs, gstndi, gstdecklink, gstrswebrtc (17.9 MB), libsrt (16.5 MB), libstdc++-6 (25 MB), SvtAv1Enc (12.7 MB).</p>
+    <div class="fix"><b>Fix:</b> an allow-list of plugin DLLs, then prune flat DLLs by walking imports; expect ~106 MB → ~40 MB and a much smaller patent and license surface (which also shrinks C1).</div>
+    <div class="loc">crates/kuvatin/wix/bundle-gstreamer.ps1:37 · kuvatin-video/src/project.rs:282–319</div></div>
+
+  <div class="find sev-h"><span class="plan">§5</span><div class="top"><span class="id">H12</span><span class="chip a-ship">ship</span><span class="title">Unsigned installer</span></div>
+    <p>No signing step exists; every download triggers SmartScreen's "unknown publisher" wall and the release notes don't warn about it.</p>
+    <div class="fix"><b>Fix:</b> a tag-only signing step (Azure Trusted Signing, or SignPath.io which is free for OSS); until then document the SmartScreen prompt in the release template.</div>
+    <div class="loc">.github/workflows/release.yml:144–163</div></div>
+
+  <div class="find sev-h"><span class="plan">§5</span><div class="top"><span class="id">H13</span><span class="chip a-ship">ship</span><span class="chip a-video">video</span><span class="title">The video engine never gates a release</span></div>
+    <p>The video suite runs with <code>continue-on-error: true</code>, every GES test self-skips without a local GStreamer, fixture output names aren't per-process (concurrent runs collide), and the cancel test cancels before the pipeline starts so the graceful-EOS path is never exercised. A regression in the headline export path ships silently.</p>
+    <div class="fix"><b>Fix:</b> make fixture generation plus one headless smoke render (<code>--sequence-mp4</code> on generated PNGs) blocking; mark only the flaky asset-URI tests <code>#[ignore]</code>; per-PID temp names; a mid-render cancel test.</div>
+    <div class="loc">.github/workflows/release.yml:106–108 · kuvatin-video/src/project.rs:1177, 1225 · sequence.rs:657</div></div>
+
+  <div class="sevhead"><span class="dot" style="background:var(--med)"></span><h3>Medium</h3><span class="count">35 findings</span></div>
+
+  <div class="find sev-m"><span class="plan">§1</span><div class="top"><span class="id">M1</span><span class="chip a-core">core</span><span class="title">The default "Compress PNG" preset hard-fails on noisy images</span></div>
+    <p><code>qmin = quality − 20</code>; libimagequant returns <code>QualityTooLow</code> when the palette can't reach that floor, so a grainy photo at quality 100 yields "failed to encode image: QUALITY_TOO_LOW" and no output.</p>
+    <div class="fix"><b>Fix:</b> on <code>QualityTooLow</code> retry with <code>set_quality(0, qmax)</code> or fall back to lossless.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:173–176</div></div>
+
+  <div class="find sev-m"><span class="plan">§1</span><div class="top"><span class="id">M2</span><span class="chip a-core">core</span><span class="title"><code>load_or_init</code> still aborts GUI startup on read errors</span></div>
+    <p>The doc says it "NEVER fails on a bad file", but <code>read_to_string</code> uses <code>?</code>; a presets.toml re-saved as UTF-16 by Notepad, or a permission error, propagates and the windowed build exits with nothing visible — the exact failure mode the last audit's C1 fixed for parse errors.</p>
+    <div class="fix"><b>Fix:</b> route read errors into the same backup-and-builtins branch as parse errors.</div>
+    <div class="loc">kuvatin-core/src/preset.rs:105–108 · kuvatin/src/gui.rs:226</div></div>
+
+  <div class="find sev-m"><span class="plan">§1</span><div class="top"><span class="id">M3</span><span class="chip a-core">core</span><span class="title"><code>migrate()</code> runs after typed parsing — it can never migrate anything</span></div>
+    <p>Migration operates on the already-deserialised <code>PresetStore</code>; any future <code>Job</code> field without <code>#[serde(default)]</code> makes every entry fail typed parsing first, hits "all N preset entries were invalid", and shelves the user's presets to <code>.bad</code>.</p>
+    <div class="fix"><b>Fix:</b> version-keyed transforms on the <code>toml::Value</code> before typed parsing; <code>#[serde(default)]</code> on <code>Job</code> fields.</div>
+    <div class="loc">kuvatin-core/src/preset.rs:109–118, 138–163</div></div>
+
+  <div class="find sev-m"><span class="plan">§1</span><div class="top"><span class="id">M4</span><span class="chip a-core">core</span><span class="chip a-gui">gui</span><span class="title">The GUI bypasses suffix sanitization</span></div>
+    <p><code>sanitize_component</code> exists because a suffix "would otherwise write outside the intended directory" — but the GUI interpolates the raw <code>{suffix}</code>; <code>..\x</code> escapes the folder, <code>a:b</code> fails.</p>
+    <div class="fix"><b>Fix:</b> build names via <code>output_file_name</code> everywhere; make it the only public constructor.</div>
+    <div class="loc">kuvatin/src/gui.rs:749, 775 · kuvatin-core/src/naming.rs:35–39, 56</div></div>
+
+  <div class="find sev-m"><span class="plan">§6</span><div class="top"><span class="id">M5</span><span class="chip a-core">core</span><span class="title">Four full-size copies on the no-op path</span></div>
+    <p>With no crop or resize (the default preset) <code>apply_crop</code> clones, <code>resample</code> clones, <code>to_rgba8</code> allocates again and the <code>Vec&lt;RGBA&gt;</code> copies once more — ~5× image memory per rayon worker. <code>flatten_onto_white</code> claims "no extra cost" for opaque images but always copies.</p>
+    <div class="fix"><b>Fix:</b> pass <code>DynamicImage</code> by value / <code>Cow</code>; reinterpret the buffer for libimagequant; fast-path <code>ImageRgb8</code>.</div>
+    <div class="loc">kuvatin-core/src/crop.rs:89 · resize.rs:83 · pipeline.rs:159, 163, 214</div></div>
+
+  <div class="find sev-m"><span class="plan">§6</span><div class="top"><span class="id">M6</span><span class="chip a-core">core</span><span class="title">Resize fringes transparent edges</span></div>
+    <p><code>resize_exact</code> samples straight alpha while the sampler documents that it "assumes alpha pre-multiplication" — logos with soft edges get dark halos.</p>
+    <div class="fix"><b>Fix:</b> premultiply before resampling and un-premultiply after.</div>
+    <div class="loc">kuvatin-core/src/resize.rs:85</div></div>
+
+  <div class="find sev-m"><span class="plan">§2</span><div class="top"><span class="id">M7</span><span class="chip a-video">video</span><span class="chip a-gui">gui</span><span class="title">Export size normalisation exists only on the headless path</span></div>
+    <p><code>render_size</code> fixes NVENC's ~145×49 floor and NV12's even-dimension requirement for sequence renders, but the GUI export passes W/H 16..7680 unrounded through an <code>encoding_profile</code> that only clamps to <code>.max(2)</code>. W=17 or 1281 with H.264 hits the same opaque "stream error" the sequence path already learned to avoid.</p>
+    <div class="fix"><b>Fix:</b> move the normalisation into <code>ExportSettings::normalized()</code> so both callers share it.</div>
+    <div class="loc">kuvatin-video/src/project.rs:335–336 · sequence.rs:305–320 · kuvatin/src/gui.rs:1617–1618</div></div>
+
+  <div class="find sev-m"><span class="plan">§2</span><div class="top"><span class="id">M8</span><span class="chip a-video">video</span><span class="title">The EXR cache key ignores changes to middle frames</span></div>
+    <p>Only the first and last frames' mtimes are hashed. Re-render frames 50–100 of a 200-frame sequence in Blender and the stale PNGs are served as a cache hit.</p>
+    <div class="fix"><b>Fix:</b> hash <code>(mtime, len)</code> for every frame — N stats are cheap next to N decodes.</div>
+    <div class="loc">kuvatin-video/src/sequence.rs:200–208</div></div>
+
+  <div class="find sev-m"><span class="plan">§2</span><div class="top"><span class="id">M9</span><span class="chip a-video">video</span><span class="chip a-shell">shell</span><span class="chip a-ship">ship</span><span class="chip a-x2">×2</span><span class="title">EXR cache: unbounded, never swept on the right-click path, racy across processes, survives uninstall</span></div>
+    <p>Every EXR render writes full-resolution PNGs to <code>%TEMP%\kuvatin\seq-cache\&lt;hash&gt;</code>. The sweep runs only at GUI startup, so a right-click-only user accumulates gigabytes indefinitely (no byte cap). Two processes converting the same sequence each <code>remove_dir_all</code> the shared directory and write into it — one finishes with frames the other deleted and still writes <code>.complete</code>. Nothing removes the directory on uninstall.</p>
+    <div class="fix"><b>Fix:</b> convert into <code>&lt;key&gt;.tmp-&lt;pid&gt;</code> and rename into place; sweep with a size cap from both entry points; <code>RemoveFolderEx</code> in the MSI or clear it from <code>--unregister</code>.</div>
+    <div class="loc">kuvatin-video/src/sequence.rs:180–182, 256–303 · kuvatin/src/gui.rs:221–223 · main.rs:108–116 · wix/main.wxs</div></div>
+
+  <div class="find sev-m"><span class="plan">§2</span><div class="top"><span class="id">M10</span><span class="chip a-video">video</span><span class="title"><code>thumbnail_uri</code> can block the import worker without bound</span></div>
+    <p><code>pipeline.state(5s)</code> returns <code>Ok(Async)</code> on timeout rather than <code>Err</code>, so the code proceeds to <code>pull_preroll()</code>, which has no timeout (same after the seek). Imports are serialised on one worker, so one stalled file blocks the whole batch and Cancel can't interrupt it.</p>
+    <div class="fix"><b>Fix:</b> treat <code>Async</code> as failure; use <code>try_pull_preroll(Some(timeout))</code>.</div>
+    <div class="loc">kuvatin-video/src/project.rs:163–177 · kuvatin/src/gui.rs:342–358</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M11</span><span class="chip a-gui">gui</span><span class="title">The export stall watchdog false-positives on long or slow renders</span></div>
+    <p>The comparison baseline is overwritten every 200 ms tick, so "no progress" really means "less than 0.05 % per tick". A timeline longer than ~400 s rendering near real time (software x264 at 1080p often is) trips "Export appears stuck" after 20 s while perfectly healthy. The headless renderer got this right (compares against the last <i>recorded</i> value).</p>
+    <div class="fix"><b>Fix:</b> mirror <code>render_to_mp4</code>'s watchdog: update the baseline only when the fraction actually changes.</div>
+    <div class="loc">kuvatin/src/gui.rs:1699–1704 · kuvatin-video/src/sequence.rs:390–393</div></div>
+
+  <div class="find sev-m"><span class="plan">§3</span><div class="top"><span class="id">M12</span><span class="chip a-shell">shell</span><span class="title"><code>?</code> on <code>run_with_progress</code> bypasses the error dialog</span></div>
+    <p>If <code>ProgressWindow::new()</code> fails (no display, disconnected RDP) or the worker panics, the outer <code>Err</code> propagates before the <code>match</code> that calls <code>notify_error</code> — a silent exit 1 in the windowed build, contradicting the plan's "surfaces as an error".</p>
+    <div class="fix"><b>Fix:</b> match the outer result and route it through <code>shell::notify_error</code>.</div>
+    <div class="loc">kuvatin/src/main.rs:83, 114 · progress_ui.rs:48, 135</div></div>
+
+  <div class="find sev-m"><span class="plan">§3</span><div class="top"><span class="id">M13</span><span class="chip a-shell">shell</span><span class="title">A trailing backslash breaks <code>"%V"</code> on drive roots</span></div>
+    <p>Right-clicking the background of <code>C:\</code> yields <code>"…exe" "C:\"</code>, which MSVC/Rust argv rules parse as <code>C:"</code>.</p>
+    <div class="fix"><b>Fix:</b> use <code>"%V\."</code> in the background store, or repair arguments ending in <code>"</code> at startup.</div>
+    <div class="loc">kuvatin/src/shell/windows.rs:115–117</div></div>
+
+  <div class="find sev-m"><span class="plan">§2</span><div class="top"><span class="id">M14</span><span class="chip a-shell">shell</span><span class="chip a-video">video</span><span class="title">Cancellation is detected by the substring "cancelled"</span></div>
+    <p>Any GStreamer/GIO error message containing "cancelled" is treated as a user cancel → silent exit, no dialog, no diagnosis.</p>
+    <div class="fix"><b>Fix:</b> a typed <code>Cancelled</code> error variant, or check the cancel flag itself.</div>
+    <div class="loc">kuvatin/src/sequence_render.rs:145 · kuvatin-video/src/sequence.rs:285, 383</div></div>
+
+  <div class="find sev-m"><span class="plan">§3</span><div class="top"><span class="id">M15</span><span class="chip a-shell">shell</span><span class="title">Stale-lock takeover can produce two leaders</span></div>
+    <p>Two arrivals both judge a 30-second-old lock stale; A removes and recreates it, then B removes A's <i>fresh</i> lock and creates its own — two leaders, two progress windows, one selection split in two (rename atomicity still prevents duplicate work).</p>
+    <div class="fix"><b>Fix:</b> retire a stale lock by <code>rename(lock, unique)</code> so only one process can claim it.</div>
+    <div class="loc">kuvatin/src/rendezvous.rs:139–160</div></div>
+
+  <div class="find sev-m"><span class="plan">§3</span><div class="top"><span class="id">M16</span><span class="chip a-shell">shell</span><span class="title">The CLI silently accepts nonsense</span></div>
+    <p>No PATH with <code>--preset</code> spools an empty entry and exits 0 silently; <code>--fps</code> without <code>--sequence-mp4</code> is ignored; <code>--preset X --sequence-mp4</code> and <code>--register --unregister</code> resolve by argument order; there is no <code>--version</code>, <code>--out</code> or <code>--recursive</code>.</p>
+    <div class="fix"><b>Fix:</b> <code>#[command(version)]</code>, an exclusive <code>ArgGroup</code> for modes, <code>requires = "sequence_mp4"</code> on fps, <code>required_unless_present_any</code> for paths.</div>
+    <div class="loc">kuvatin/src/cli.rs:5, 17, 44–55 · main.rs:24, 79</div></div>
+
+  <div class="find sev-m"><span class="plan">§3</span><div class="top"><span class="id">M17</span><span class="chip a-shell">shell</span><span class="chip a-ship">ship</span><span class="title"><code>--register</code> outcomes are invisible in release; the installer ignores its result</span></div>
+    <p><code>register()?</code> reaches <code>main</code> without <code>notify_error</code>, its <code>println!</code> goes nowhere in a windowed exe (even from PowerShell), and the MSI custom action uses <code>Return='ignore'</code> — a policy-locked <code>HKCU\Software\Classes</code> installs "successfully" with no menu and no clue.</p>
+    <div class="fix"><b>Fix:</b> <code>notify_error</code> on failure and <code>AttachConsole(ATTACH_PARENT_PROCESS)</code> for terminal runs; log the CA exit code.</div>
+    <div class="loc">kuvatin/src/main.rs:75–76 · shell/windows.rs:173 · wix/main.wxs:198–213</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M18</span><span class="chip a-gui">gui</span><span class="title">Import cancel leaves stragglers that corrupt counters and dedup</span></div>
+    <p>The worker checks <code>cancel</code> per item, so a new drop that resets the flag revives every still-queued cancelled path; the file mid-discovery at cancel is pushed anyway and the drain adds it to the bin without a cancel check — after <code>import_seen</code> was re-seeded, so it becomes duplicable and <code>import_done</code> overshoots.</p>
+    <div class="fix"><b>Fix:</b> tag queued items with a batch generation; worker and drain discard stale generations.</div>
+    <div class="loc">kuvatin/src/gui.rs:344–358, 1055–1065, 1095–1113</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M19</span><span class="chip a-gui">gui</span><span class="title">Playback and timeline state drift</span></div>
+    <p>Reaching the end of the timeline without repeat is never detected, so <code>video-playing</code> stays true and the pause icon sticks; <code>remove_timeline_clip</code> never updates <code>timeline-duration</code>, so after deleting the last clip the lane and scrollbar keep the old length.</p>
+    <div class="fix"><b>Fix:</b> at end without repeat → <code>pause()</code> + <code>set_video_playing(false)</code>; recompute the duration after removal.</div>
+    <div class="loc">kuvatin/src/gui.rs:1843–1849, 28–54</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M20</span><span class="chip a-gui">gui</span><span class="title">Scrubbing seeks on every pointer event and never lands accurately</span></div>
+    <p>Every <code>moved</code> calls <code>project.seek</code> (KEY_UNIT) on the UI thread — the very per-event pipeline work the hardening gotchas warn about — and <code>seek_accurate</code> exists but is never called, so on long-GOP media the paused frame can sit seconds from the shown playhead.</p>
+    <div class="fix"><b>Fix:</b> stash the target like <code>pending_xform</code> and apply on the 100 ms tick; <code>seek_accurate</code> on pointer-up.</div>
+    <div class="loc">kuvatin/ui/app.slint:1815 · kuvatin/src/gui.rs:1519, 1536 · kuvatin-video/src/project.rs:858</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M21</span><span class="chip a-gui">gui</span><span class="title">The resolution override is not saved with presets and survives preset switches</span></div>
+    <p>Convert applies <code>res-w/res-h</code>, but <code>current_job</code> ignores them when saving a preset and <code>on_preset_changed</code> never resets them — a stale 1920 px override silently applies to "Original size".</p>
+    <div class="fix"><b>Fix:</b> fold the fields into <code>job.resize</code> on save; sync them on preset change.</div>
+    <div class="loc">kuvatin/src/gui.rs:710–718, 1891–1904, 270–280</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M22</span><span class="chip a-gui">gui</span><span class="title">Adding files re-sorts the list but keeps <code>selected-index</code>; refresh rebuilds every row</span></div>
+    <p>After sort/dedup the highlighted row can be a different file than the viewer and crop state; <code>refresh</code> removes and re-pushes all rows (fade-in flicker, statuses reset to "queued"). There is still no per-row remove.</p>
+    <div class="fix"><b>Fix:</b> remember the selected <i>path</i> and re-resolve it; diff rows by path; add a row "×".</div>
+    <div class="loc">kuvatin/src/gui.rs:2054–2067, 2081–2084</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M23</span><span class="chip a-gui">gui</span><span class="title">The error dialog is a fixed 200 px and overflows</span></div>
+    <p>The import summary joins every failed file name; twenty names render ~300 px of text over the OK button with no clipping or scrolling (the headless path already caps at 10 + "…and K more").</p>
+    <div class="fix"><b>Fix:</b> content-sized card with a max height and <code>ScrollView</code>; reuse the 10-item cap.</div>
+    <div class="loc">kuvatin/ui/app.slint:2343, 2358–2362 · kuvatin/src/gui.rs:1176–1184</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M24</span><span class="chip a-gui">gui</span><span class="title">The crop editor is confined to a 560×420 box regardless of window size</span></div>
+    <p>On a maximised 4K window the crop surface is a small island; small images never upscale. The math is already normalised, so nothing but the box size stands in the way.</p>
+    <div class="fix"><b>Fix:</b> derive <code>crop-box-w/h</code> in Slint from the crop surface's size and the image aspect.</div>
+    <div class="loc">kuvatin/src/gui.rs:610 · kuvatin/ui/app.slint:1156–1157</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M25</span><span class="chip a-gui">gui</span><span class="title">Modal edge cases</span></div>
+    <p>The import modal closes when file imports finish even while a sequence import is still running; Esc closes only the error and export dialogs, not the sequence-confirm or import modals; Export… with no project closes the dialog and silently no-ops.</p>
+    <div class="fix"><b>Fix:</b> gate the close on <code>!seq_active</code>; Esc → <code>seq-config = false</code> / <code>import-cancel()</code>; disable Export when the timeline is empty.</div>
+    <div class="loc">kuvatin/src/gui.rs:1170–1173, 1603 · kuvatin/ui/app.slint:700–708</div></div>
+
+  <div class="find sev-m"><span class="plan">§4</span><div class="top"><span class="id">M26</span><span class="chip a-gui">gui</span><span class="title">No accessibility or keyboard reachability</span></div>
+    <p>Zero <code>accessible-*</code> properties; every button is a <code>TouchArea</code> rectangle with no role, no focus and no Enter; hit targets of 18 px (bin ×), 15 px (clip ×) and 8 px (trim grips).</p>
+    <div class="fix"><b>Fix:</b> <code>accessible-role: button</code> + labels in the shared button components, <code>FocusScope</code> with Enter/Space, ≥24 px targets.</div>
+    <div class="loc">kuvatin/ui/app.slint (1486, 1889, 1932, 1949)</div></div>
+
+  <div class="find sev-m"><span class="plan">§6</span><div class="top"><span class="id">M27</span><span class="chip a-video">video</span><span class="chip a-gui">gui</span><span class="chip a-x2">×2</span><span class="title">Two full RGBA copies per preview frame, one of them on the UI thread</span></div>
+    <p><code>sample_to_frame</code> copies the mapped plane into a <code>Vec</code>, then <code>clone_from_slice</code> copies again into a <code>SharedPixelBuffer</code> on the UI thread — ≈7.4 MB per frame at 720p, 33 MB at a 4K canvas — plus a boxed closure per frame.</p>
+    <div class="fix"><b>Fix:</b> build the <code>SharedPixelBuffer</code> directly from the mapped plane in the GStreamer callback (its <code>SharedVector</code> is <code>Send</code>; only <code>Image</code> is not) and hand it over once.</div>
+    <div class="loc">kuvatin-video/src/project.rs:87–95 · kuvatin/src/gui.rs:62–70</div></div>
+
+  <div class="find sev-m"><span class="plan">§5</span><div class="top"><span class="id">M28</span><span class="chip a-ship">ship</span><span class="title">Floating toolchain; no fmt, clippy, audit, SBOM or Dependabot</span></div>
+    <p>The action SHA is pinned but resolves "stable" at run time, so master and tag builds can use different compilers; RUSTSEC advisories across ~400 crates go unnoticed; no <code>rust-toolchain.toml</code>, <code>deny.toml</code> or <code>dependabot.yml</code>.</p>
+    <div class="fix"><b>Fix:</b> <code>rust-toolchain.toml</code>; <code>cargo fmt --check</code>, <code>clippy -D warnings</code>, <code>cargo deny check</code> (licenses + advisories — also helps C1) on master; attach a CycloneDX SBOM to releases.</div>
+    <div class="loc">.github/workflows/release.yml:51, 128</div></div>
+
+  <div class="find sev-m"><span class="plan">§5</span><div class="top"><span class="id">M29</span><span class="chip a-ship">ship</span><span class="title"><code>contents: write</code> on every run</span></div>
+    <p>Master pushes and manual dispatches — which execute third-party MSIs and a freshly compiled <code>cargo-wix</code> — run with repository write permission; only the release-attach step needs it.</p>
+    <div class="fix"><b>Fix:</b> default to <code>contents: read</code>; a separate job with <code>contents: write</code> for the attach step.</div>
+    <div class="loc">.github/workflows/release.yml:35–36, 159–163</div></div>
+
+  <div class="find sev-m"><span class="plan">§5</span><div class="top"><span class="id">M30</span><span class="chip a-ship">ship</span><span class="title">The built MSI is never exercised</span></div>
+    <p>Nothing installs the artifact and runs the installed exe; a plugin missing from the bundle surfaces only on a user's machine (the installed exe blanks <code>GST_PLUGIN_SYSTEM_PATH</code>, so the runner's GStreamer would not mask it — which is exactly why an install test would catch it).</p>
+    <div class="fix"><b>Fix:</b> on tag runs <code>msiexec /i /qn</code>, a headless <code>--preset</code> conversion from the install dir, then <code>msiexec /x</code>.</div>
+    <div class="loc">.github/workflows/release.yml:144–157 · kuvatin/src/main.rs:45</div></div>
+
+  <div class="find sev-m"><span class="plan">§5</span><div class="top"><span class="id">M31</span><span class="chip a-ship">ship</span><span class="title">Landing page: stale JSON-LD, a GitHub API call per visitor, third-party fonts</span></div>
+    <p><code>softwareVersion</code> is hardcoded to 2.3.0 (three releases behind); download buttons depend on an unauthenticated <code>api.github.com</code> request per visitor (shared 60/hour limit, visitor IP disclosed); fonts load from Google's servers (EU consent exposure).</p>
+    <div class="fix"><b>Fix:</b> upload a fixed-name asset so static <code>/releases/latest/download/…</code> links work; stamp the version from the tag in CI; self-host the two woff2 families.</div>
+    <div class="loc">docs/index.html:33, 39–41, 1189</div></div>
+
+  <div class="find sev-m"><span class="plan">§5</span><div class="top"><span class="id">M32</span><span class="chip a-ship">ship</span><span class="title">Landing page: headings vanish in High Contrast; low-contrast code text</span></div>
+    <p><code>color: transparent; background-clip: text</code> with no <code>forced-colors</code> rule makes "IMAGES", "VIDEO" and "80%" invisible in Windows High Contrast; the install snippet's comment colour is ~3.3:1 (AA needs 4.5:1); the release note is 11 px.</p>
+    <div class="fix"><b>Fix:</b> <code>@media (forced-colors: active)</code> fallbacks; lift the comment colour; 13 px minimum.</div>
+    <div class="loc">docs/index.html:209–210, 257–258, 281, 290, 294</div></div>
+
+  <div class="find sev-m"><span class="plan">§5</span><div class="top"><span class="id">M33</span><span class="chip a-ship">ship</span><span class="title">Landing page: mobile loses navigation; heavy fixed layers</span></div>
+    <p>Under 860 px the nav links are hidden with no replacement (GitHub and section links unreachable). Three fixed <code>blur(110px)</code> glows, a masked grid and a blend-mode noise layer recomposite every frame while the ticker calls <code>getBoundingClientRect</code> on every card and node per frame.</p>
+    <div class="fix"><b>Fix:</b> keep at least the GitHub link on mobile; gate glows/noise behind <code>(min-width: 860px)</code>; drive the tilt loop from scroll events.</div>
+    <div class="loc">docs/index.html:61–70, 421, 1082–1104</div></div>
+
+  <div class="find sev-m"><span class="plan">§3</span><div class="top"><span class="id">M34</span><span class="chip a-core">core</span><span class="chip a-gui">gui</span><span class="chip a-shell">shell</span><span class="chip a-x2">×2</span><span class="title">Five divergent "what is an image" lists</span></div>
+    <p><code>collect.rs</code> (png jpg jpeg webp bmp tiff tif gif), the Images file dialog (no <code>tif</code>), the video-mode still classifier (no tiff/tif), <code>sequence_render</code> + the sequence dialog (png jpg jpeg exr), and the shell association (PerceivedType). Consequences: <code>.tif</code> converts via right-click but can't be added through the dialog; selected frames bypass <code>is_frame_file</code>, so <code>frame_0001.tif</code> fails late inside GStreamer.</p>
+    <div class="fix"><b>Fix:</b> one <code>kuvatin_core::INPUT_EXTENSIONS</code> and one frame list, used by every dialog, filter and registry writer.</div>
+    <div class="loc">kuvatin/src/collect.rs:3 · gui.rs:122, 296, 882, 921 · sequence_render.rs:14 · shell/windows.rs:23</div></div>
+
+  <div class="find sev-m"><span class="plan">§6</span><div class="top"><span class="id">M35</span><span class="chip a-gui">gui</span><span class="title"><code>gui.rs</code> monolith — the last plan's split (§6.1) never happened and the file grew from 1,300 to 2,335 lines</span></div>
+    <p><code>run()</code> is ~1,650 lines with ~35 closures capturing 25+ <code>Rc</code>/<code>Arc</code> handles; every feature since has been another closure. Delete-preset has no confirmation.</p>
+    <div class="fix"><b>Fix:</b> <code>gui/mod.rs</code> (build, wire, timer bag), <code>gui/image_mode.rs</code> (<code>ImageState</code>), <code>gui/presets.rs</code>, <code>gui/video/{mod,import,timeline,export}.rs</code> (<code>VideoState</code>, <code>ImportQueue</code>), <code>gui/win_drop.rs</code>.</div>
+    <div class="loc">kuvatin/src/gui.rs:213–1870</div></div>
+
+  <div class="sevhead"><span class="dot" style="background:var(--low)"></span><h3>Low</h3><span class="count">17 findings</span></div>
+
+  <div class="find sev-l"><span class="plan">§1</span><div class="top"><span class="id">L1</span><span class="chip a-core">core</span><span class="title"><code>write_unique</code> leaves truncated outputs behind</span></div>
+    <p>Bytes go straight into the final name; a disk-full mid-<code>write_all</code> returns <code>Err</code> but leaves a half-written file that looks finished.</p>
+    <div class="fix"><b>Fix:</b> <code>remove_file(candidate)</code> on write error.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:285–291</div></div>
+
+  <div class="find sev-l"><span class="plan">§6</span><div class="top"><span class="id">L2</span><span class="chip a-core">core</span><span class="title"><code>MAX_TARGET_DIM</code> distorts aspect</span></div>
+    <p>Sides are clamped independently; a 4:1 panorama at factor 10 becomes 32768×10000 (3.3:1).</p>
+    <div class="fix"><b>Fix:</b> scale both by <code>min(MAX/w, MAX/h)</code>.</div>
+    <div class="loc">kuvatin-core/src/resize.rs:31</div></div>
+
+  <div class="find sev-l"><span class="plan">§1</span><div class="top"><span class="id">L3</span><span class="chip a-core">core</span><span class="title">Preset <code>save()</code> deletes before rename and uses a fixed temp name</span></div>
+    <p>The comment is wrong — <code>fs::rename</code> replaces on Windows — so the <code>remove_file</code> opens a window with no presets.toml at all; a crash there makes the next launch write built-ins while the user's data sits in <code>.toml.tmp</code>, a name shared by concurrent processes.</p>
+    <div class="fix"><b>Fix:</b> drop the <code>remove_file</code>; unique temp name.</div>
+    <div class="loc">kuvatin-core/src/preset.rs:190–199</div></div>
+
+  <div class="find sev-l"><span class="plan">§6</span><div class="top"><span class="id">L4</span><span class="chip a-core">core</span><span class="title">GIF encodes at NeuQuant speed 1 and decodes input twice</span></div>
+    <p><code>GifEncoder::new</code> means speed 1 ("at any cost"); the animated-GIF refusal opens and decodes frames, then the pipeline decodes again.</p>
+    <div class="fix"><b>Fix:</b> <code>new_with_speed(10)</code>; reuse the first decoder.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:125, 247–259</div></div>
+
+  <div class="find sev-l"><span class="plan">§6</span><div class="top"><span class="id">L5</span><span class="chip a-core">core</span><span class="title">Dead <code>preset_name</code> parameter threaded through the public API</span></div>
+    <p>Accepted by every batch entry point and <code>process_file</code> (<code>_preset_name</code>), used nowhere.</p>
+    <div class="fix"><b>Fix:</b> remove it.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:304 · batch.rs:49–85 · kuvatin/src/quickrun.rs:54</div></div>
+
+  <div class="find sev-l"><span class="plan">§6</span><div class="top"><span class="id">L6</span><span class="chip a-core">core</span><span class="title">Test gaps on the GUI's real path</span></div>
+    <p><code>process_file_to</code> and <code>run_jobs_to</code> have zero tests; no rotated-EXIF fixture (the orientation test is passthrough only); the portrait aspect-ratio crop branch, height-only/no-aspect resize, BMP/TIFF/GIF encode and <code>QualityTooLow</code> are untested.</p>
+    <div class="fix"><b>Fix:</b> a round-trip test per branch; an EXIF-rotated fixture guards H2.</div>
+    <div class="loc">kuvatin-core/src/pipeline.rs:327, 594 · batch.rs:116 · crop.rs:55 · resize.rs:60–66</div></div>
+
+  <div class="find sev-l"><span class="plan">§3</span><div class="top"><span class="id">L7</span><span class="chip a-shell">shell</span><span class="title">About a second passes before anything is visible on a single-file right-click</span></div>
+    <p>The 600 ms rendezvous quiet window and the 350 ms progress grace period run in sequence; "Open in Kuvatin…" also waits the full 600 ms.</p>
+    <div class="fix"><b>Fix:</b> start the quiet window at ~150 ms and extend it only once a second arrival lands.</div>
+    <div class="loc">kuvatin/src/rendezvous.rs:33 · progress_ui.rs:18 · main.rs:79–83</div></div>
+
+  <div class="find sev-l"><span class="plan">§3</span><div class="top"><span class="id">L8</span><span class="chip a-shell">shell</span><span class="title">Topmost, focus-stealing dialogs</span></div>
+    <p><code>always-on-top</code> on the progress window plus <code>MB_TOPMOST | MB_SETFOREGROUND</code> on error boxes pop over full-screen apps minutes after the click.</p>
+    <div class="fix"><b>Fix:</b> drop <code>MB_SETFOREGROUND</code>; keep topmost only for the progress window.</div>
+    <div class="loc">kuvatin/ui/app.slint:470 · kuvatin/src/shell/windows.rs:255</div></div>
+
+  <div class="find sev-l"><span class="plan">§3</span><div class="top"><span class="id">L9</span><span class="chip a-shell">shell</span><span class="title">Claimed paths are deleted before the run; spool encoding is lossy</span></div>
+    <p>A leader dying between claiming and running loses the followers' paths silently; names that aren't valid UTF-16 round-trip via <code>to_string_lossy</code> and later "not found".</p>
+    <div class="fix"><b>Fix:</b> delete entries after the run completes; spool <code>encode_wide</code> bytes.</div>
+    <div class="loc">kuvatin/src/rendezvous.rs:115, 185–188</div></div>
+
+  <div class="find sev-l"><span class="plan">§3</span><div class="top"><span class="id">L10</span><span class="chip a-shell">shell</span><span class="title">Folder scans include hidden and system files</span></div>
+    <p><code>._foo.png</code> AppleDouble sidecars and thumbnail-cache images get converted alongside the real ones.</p>
+    <div class="fix"><b>Fix:</b> skip <code>FILE_ATTRIBUTE_HIDDEN | SYSTEM</code>.</div>
+    <div class="loc">kuvatin/src/collect.rs:17–28</div></div>
+
+  <div class="find sev-l"><span class="plan">§4</span><div class="top"><span class="id">L11</span><span class="chip a-gui">gui</span><span class="title">Videos-mode drop does no folder expansion or extension filtering; dedup is case-sensitive</span></div>
+    <p>Unlike <code>collect_images</code>, dropped folders, <code>.txt</code> files and <code>.exr</code> stills all go through slow GES discovery and end in a generic "couldn't be read" list with no "use Import sequence…" hint; <code>C:\x.mp4</code> and <code>c:\x.mp4</code> both import.</p>
+    <div class="fix"><b>Fix:</b> a shared <code>collect_media</code> expander with a media extension list; canonicalised <code>import_seen</code> keys.</div>
+    <div class="loc">kuvatin/src/gui.rs:406–413</div></div>
+
+  <div class="find sev-l"><span class="plan">§6</span><div class="top"><span class="id">L12</span><span class="chip a-gui">gui</span><span class="chip a-video">video</span><span class="chip a-x2">×2</span><span class="title">Timer lifecycle: five <code>mem::forget</code>s, and the video <code>Project</code> is never dropped at exit</span></div>
+    <p>Forgotten timers leak closures holding the <code>Rc&lt;RefCell&lt;Option&lt;Project&gt;&gt;&gt;</code>, so <code>Drop</code> (<code>set_state(Null)</code>) never runs and GStreamer threads are alive at process exit; the 60 ms import timer locks two mutexes forever while idle.</p>
+    <div class="fix"><b>Fix:</b> keep timers in a <code>Vec&lt;Timer&gt;</code> owned by <code>run()</code>; drop the project explicitly after <code>ui.run()</code>; start/stop the import timers around activity.</div>
+    <div class="loc">kuvatin/src/gui.rs:384, 431, 1200, 1738, 1864 · kuvatin-video/src/project.rs:1016–1020</div></div>
+
+  <div class="find sev-l"><span class="plan">§6</span><div class="top"><span class="id">L13</span><span class="chip a-gui">gui</span><span class="title">Slint hygiene</span></div>
+    <p>Five modals duplicate backdrop/rise/card/Cancel; <code>kind</code>, <code>dmode</code>, <code>eta.mode</code>, <code>export-codec</code>, <code>png-mode</code> are <code>int</code> enums; the palette exists only as a comment beside ~100 hard-coded hexes; no <code>@tr</code>; contradictory comments ("0 = bottom" vs "0 = top"; a "placeholder" note about a mode that shipped a year of features ago); 44 px row magic ×3.</p>
+    <div class="fix"><b>Fix:</b> <code>Modal</code>/<code>DialogButton</code> components, a <code>global Theme</code>, Slint <code>enum</code>s, split into <code>widgets / image_mode / video_mode / timeline / modals</code>.</div>
+    <div class="loc">kuvatin/ui/app.slint:15, 31–36, 543, 852–860, 1832, 2075–2333</div></div>
+
+  <div class="find sev-l"><span class="plan">§2</span><div class="top"><span class="id">L14</span><span class="chip a-video">video</span><span class="title">The headless render builds a full preview pipeline and re-enters it on <code>end_render</code></span></div>
+    <p><code>render_to_mp4</code> constructs a FULL_PREVIEW project (appsink, playsink), and <code>end_render()</code> re-attaches the sink and sets Paused — opening the audio device and prerolling the timeline — on a <code>Project</code> dropped one line later, per sequence in a batch.</p>
+    <div class="fix"><b>Fix:</b> drop the project instead (Drop already NULLs), or add a headless constructor.</div>
+    <div class="loc">kuvatin-video/src/sequence.rs:363, 399 · project.rs:473, 1005–1010</div></div>
+
+  <div class="find sev-l"><span class="plan">§2</span><div class="top"><span class="id">L15</span><span class="chip a-video">video</span><span class="chip a-gui">gui</span><span class="title"><code>end_render</code> failures are swallowed</span></div>
+    <p>If <code>set_mode(FULL_PREVIEW)</code> or <code>set_state(Paused)</code> fails, the preview is dead with no message; <code>poll_preview_error</code> only sees bus errors, not these return values.</p>
+    <div class="fix"><b>Fix:</b> surface the <code>Err</code> via <code>show_error</code>.</div>
+    <div class="loc">kuvatin/src/gui.rs:1712, 1722 · kuvatin-video/src/sequence.rs:399</div></div>
+
+  <div class="find sev-l"><span class="plan">§5</span><div class="top"><span class="id">L16</span><span class="chip a-ship">ship</span><span class="title">Add/Remove Programs entry incomplete; shortcut model inconsistent</span></div>
+    <p>Apps &amp; Features shows lower-case "kuvatin"; <code>ARPHELPLINK</code> is still the template comment and <code>ARPURLINFOABOUT</code>/<code>ARPNOMODIFY</code> are absent; the shortcut component says "all users" in one comment and "per-user" in the next while a <code>perMachine</code> package uses an HKCU keypath; <code>WixUI_FeatureTree</code> with one <code>Absent='disallow'</code> feature is pointless.</p>
+    <div class="fix"><b>Fix:</b> <code>Name='Kuvatin'</code>, ARP URLs, <code>WixUI_InstallDir</code>, an HKLM keypath (or an advertised shortcut).</div>
+    <div class="loc">crates/kuvatin/wix/main.wxs:63, 130, 142–154, 236, 239</div></div>
+
+  <div class="find sev-l"><span class="plan">§5</span><div class="top"><span class="id">L17</span><span class="chip a-ship">ship</span><span class="title">Documentation drift</span></div>
+    <p>README quotes ~110 MB (actual 106.8), still headlines "2.0.1 is a hardening release" at 2.6.0, and the video crate is described as "video playback"; the bundle script's header says to pass <code>--include wix\gstreamer.wxs</code> while README and CI rely on cargo-wix's auto-glob (doing both would double-compile); the workspace lacks <code>repository</code>/<code>homepage</code> metadata; "Uninstalling cleans it back up" is true only for the uninstalling user.</p>
+    <div class="fix"><b>Fix:</b> point Status at Releases, align the numbers, delete the stale <code>--include</code> line, add the metadata.</div>
+    <div class="loc">README.md:38, 125, 156–160 · wix/README.md:63 · bundle-gstreamer.ps1:16 · kuvatin-video/Cargo.toml:6 · docs/index.html:756</div></div>
+</section>
+
+<section>
+  <h2>Systemic themes</h2>
+  <p class="sub">Four patterns account for most of the list. Fixing the pattern is cheaper than fixing the instances.</p>
+  <div class="themes">
+    <div class="theme"><h4>Two paths, one lesson learned</h4>The headless path learned things the GUI path didn't (size normalisation, the stall watchdog baseline, the 10-item error cap) and vice versa (error dialogs, cancellation types). H6, M7, M11, M12, M23 are all "port the fix to the other side". A shared <code>ExportSettings::normalized()</code> and one failure-summary helper close most of it.</div>
+    <div class="theme"><h4>Silence is still the default failure mode</h4>The last audit's headline was "errors are invisible"; the shipped build is far better, but new silent paths appeared with each feature: engine init (H5), <code>run_with_progress</code> errors (M12), <code>--register</code> (M17), <code>end_render</code> (L15), unreadable selections (H7). A rule of thumb worth enforcing in review: every <code>let _ =</code> and every <code>eprintln!</code> in the GUI crate needs a justification comment.</div>
+    <div class="theme"><h4>%TEMP% is a database now</h4>Rendezvous spool, EXR cache, render fixtures — all live under <code>%TEMP%\kuvatin</code> with different lifetimes and no owner (M9, L9). Give it one module with create/claim/sweep semantics and a byte budget, and call sweep from every entry point.</div>
+    <div class="theme"><h4>Growth without structure</h4><code>gui.rs</code> and <code>app.slint</code> absorb every feature as another closure and another modal (M35, L13, L12), and five extension lists (M34) exist because there is no obvious home for the concept. The split proposed in M35 is the single highest-leverage refactor: it makes the next ten features cheaper and most GUI findings testable.</div>
+  </div>
+</section>
+
+<section>
+  <h2>Suggested plan</h2>
+  <p class="sub">Ordered by risk to users and to the project, not by effort. §0 is a compliance fix and should ship in the next release regardless of anything else; §1 protects users' files; the rest can flow release by release.</p>
+  <table class="phases">
+    <tr><th>Phase</th><th>Theme</th><th>Findings</th><th>Effort</th></tr>
+    <tr><td>§0 Comply &amp; slim</td><td>Ship third-party license texts + notices + source URLs; trim the GStreamer bundle to an allow-list</td><td>C1, H11</td><td>1–2 days</td></tr>
+    <tr><td>§1 Data safety</td><td>Never lose or mis-crop a user's file; never abort startup silently</td><td>H1, H2, H7, M1–M4, L1, L3</td><td>2 days</td></tr>
+    <tr><td>§2 Engine guards</td><td>Render-mode state, <code>%</code>-escaping, shared size normalisation, cache hygiene, typed cancel</td><td>H3, H4, M7–M10, M14, L14, L15</td><td>2 days</td></tr>
+    <tr><td>§3 Explorer &amp; CLI</td><td>Registration that can't be hijacked, presets in the menu, one extension list, visible errors</td><td>H8–H10, M12, M13, M15–M17, M34, L7–L10</td><td>2–3 days</td></tr>
+    <tr><td>§4 Editor UX</td><td>Non-blocking export, coalesced scrubbing, honest playback state, dialogs that fit, accessibility</td><td>H5, H6, M11, M18–M26, L11</td><td>3–4 days</td></tr>
+    <tr><td>§5 Ship pipeline</td><td>Signing, gating video tests, toolchain pin + fmt/clippy/deny/SBOM, least-privilege CI, MSI smoke test, site fixes</td><td>H12, H13, M28–M33, L16, L17</td><td>2 days</td></tr>
+    <tr><td>§6 Structure</td><td>Split <code>gui.rs</code> and <code>app.slint</code>, own the timers, cut the frame copies, core cleanups</td><td>M5, M6, M27, M35, L2, L4–L6, L12, L13</td><td>ongoing</td></tr>
+  </table>
+
+  <div class="good">
+    <h3>What's good — and worth protecting</h3>
+    <ul>
+      <li><b>The engine learned from its scars.</b> Async commits (the deadlock), fully pinned encode caps (the NVENC renegotiation death), the <code>mfaacenc</code> derank with its root-cause note, stride-aware frame extraction, <code>i128</code> trim math with the wrap regression pinned — each a real production bug turned into a test.</li>
+      <li><b>Data safety primitives exist and are tested.</b> <code>write_unique</code>'s <code>create_new</code> reservation is verified by an actual racing test; panicking codecs are isolated per file; quality is clamped at one choke point; the preset store degrades to built-ins with a <code>.bad</code> backup.</li>
+      <li><b>The headless work is careful.</b> The rendezvous (create-new lock, atomic-rename claims, release-then-sweep) has an eight-thread burst test; the progress window has a grace period, coalesced updates, a panic-isolated worker and a cancel that waits for real completion.</li>
+      <li><b>Releases are pinned and honest.</b> Every third-party download and every action is SHA-pinned with fail-on-mismatch; the tag-vs-Cargo guard prevents mislabeled installers; the license metadata agrees end to end; and the cache-scope fix took the release run from ~18 to ~9½ minutes.</li>
+      <li><b>The Slint work is disciplined.</b> Model-pinned hit areas with a separate moving visual, pointer-cancel resets, a window-level drop banner, one <code>track-h</code> source of truth, and honest reduced-motion / no-JS fallbacks on the site.</li>
+    </ul>
+  </div>
+  <p class="note">Method: five parallel read-only reviewers (image engine, video engine, GUI, Explorer/CLI/headless, packaging/CI/site/licensing), each required to quote <code>file:line</code> and to drop anything it could not confirm in code. Hand re-verified before publication: <code>plan_unique_outputs</code> is referenced only by its own test; <code>decode_oriented</code> is private and both GUI decode sites use <code>image::open</code>; <code>qmin = qmax − 20</code>; upstream ships 82 component license directories and the bundle script harvests only <code>*.dll</code> while <code>main.wxs</code> installs only Kuvatin's <code>License.rtf</code>; <code>ensure_registered()</code> has a single call site in <code>gui::run</code>; <code>run_with_progress(…)?</code> precedes the <code>notify_error</code> match. Line numbers refer to <code>cfeecbf</code>.</p>
+</section>
+
+</div>
+
+<footer>Kuvatin codebase review · 2026-09-08 · v2.6.0 (<code>fe65388</code>), master <code>cfeecbf</code> · 66 findings · previous audit: <a href="2026-07-02-kuvatin-audit.html">2026-07-02</a></footer>
+</body>
+</html>
