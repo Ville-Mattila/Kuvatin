@@ -157,7 +157,111 @@
   legacy root, `--unregister` removes everything, `--version` prints.
 
 ## §4 Editor UX — H5, H6, M11, M18–M26, L11
+
+- **H5** A video-engine init failure shows "Video engine unavailable" with
+  the cause and sets `video-engine-down`, which disables Open media / Import
+  sequence / Export instead of leaving every click a silent no-op.
+- **H6** "Export…" shows the progress modal first and starts `begin_render`
+  (which waits for the preview to reach NULL, up to 3 s, on the UI thread)
+  one tick later; `export_pending` blocks the preview tick and re-entrancy
+  meanwhile and lets Cancel abort before the start. `cancel_render` skips the
+  2 s EOS wait when the partial file is deleted anyway.
+- **M11** The stall watchdog's baseline is the last fraction that actually
+  advanced, so a slow-but-healthy render (software x264 at 1080p on a long
+  timeline) is no longer called stuck after 20 s.
+- **M18** Imports are stamped with a generation; Cancel bumps it, and the
+  worker and the drain discard older items — the file mid-discovery at
+  cancel no longer lands in the bin, counters no longer overshoot, and a
+  fresh drop no longer revives the cancelled queue.
+- **M19** End of timeline without repeat pauses and clears `video-playing`
+  (Play from the end restarts); deleting a clip recomputes
+  `timeline-duration`.
+- **M20** Scrubbing stashes the target and the UI tick issues one keyframe
+  seek per tick; releasing the scrubber (transport or lane) lands with
+  `seek_accurate`, so the paused picture matches the playhead.
+- **M21** `current_job` is the ONE recipe for Convert and Save preset and
+  folds the resolution fields into `job.resize`; `sync_controls` mirrors a
+  preset (incl. its pixel resize, or 0/0 for percent/fit) into the controls
+  on selection, save and delete.
+- **M22** `sync_rows` diffs the file list by path (insert/remove only what
+  changed — kept rows keep status, thumbnail and dimensions, no fade replay),
+  the selection follows its file across the re-sort, and every row has a
+  hover-revealed × (`remove-file`) that also drops its crop.
+- **M23** The error dialog sizes to its content up to most of the window and
+  scrolls beyond that; the import summary is capped at 10 names + "…and K
+  more" like the headless path. `preview_box`/`preview.rs` are gone.
+- **M24** The crop box is computed in Slint from the crop surface and the
+  image aspect (largest fitting box, small images scale up), so a maximised
+  window gets a full-size editor.
+- **M25** File imports finishing no longer close the modal while a sequence
+  import still runs; Esc closes the sequence dialog and cancels an import;
+  Export is disabled on an empty timeline (toolbar and dialog).
+- **M26** Shared button components (`SecondaryButton`, new `DialogButton`,
+  `RemoveButton`) carry `accessible-role`/label/enabled and a `FocusScope`
+  (Tab focus ring, Enter/Space); sliders, scrubbers, toggles, list rows and
+  the window buttons are labelled; hit targets: row/bin × 24 px, clip × 24×22
+  px, trim grips 12 px, Export 22 px. Every modal button is a `DialogButton`.
+- **L11** `collect_media` expands folders and keeps videos + image inputs
+  (junk dropped silently); explicitly dropped `.exr` frames get a pointer at
+  "Import sequence…"; `SeenSet` keys by canonical path, so `C:\x.mp4` and
+  `c:\x.mp4` are one file. `VIDEO_EXTENSIONS` lives in `kuvatin-video`.
+- Tests: media collection (folders, filtering, EXR flag); `SeenSet`
+  canonicalisation (case, `..`); dialog name cap. The debug GUI was
+  smoke-started; the Slint changes compiled cleanly on the first build.
+
 ## §5 Ship pipeline — H12, H13, M28–M33, L16, L17
+
+- **H12** No certificate exists, so signing is documented rather than done:
+  the README's Install section and the landing page explain the SmartScreen
+  prompt, and every release now carries a `.sha256` next to the `.msi`.
+  Signing (Azure Trusted Signing / SignPath) stays a follow-up that needs an
+  account the maintainer must create.
+- **H13** The video engine gates the release: the self-contained video tests
+  (generated frames, real pipelines — incl. a new mid-render cancel test that
+  tears down a LIVE render, 600 frames so it outlives the first poll) run
+  blocking, and a headless smoke render (`--sequence-mp4 --quiet`, 48
+  generated PNGs → H.264, verified with gst-discoverer) runs with the release
+  exe on every push. Test scratch files moved from `%TEMP%` (an 8.3 short
+  path on the runner) to `target/test-tmp/<tag>-<pid>`, so parallel runs
+  don't collide. The live-media (fixture webm) tests stay advisory.
+- **M28** `rust-toolchain.toml` pins 1.96.0 with rustfmt + clippy; CI runs
+  `cargo fmt --check`, `clippy --all-targets -D warnings` (the 8 findings
+  fixed; the workspace was rustfmt'ed — 161 hunks, one style commit) and
+  `cargo deny` (pinned action) on every push; a CycloneDX SBOM is generated
+  and attached to releases; Dependabot watches Cargo and the pinned actions.
+- **M29** The workflow runs with `contents: read`; only a separate `publish`
+  job (tags, Ubuntu, downloads the artifact) has `contents: write`.
+- **M30** On tags/dispatch the built MSI is installed with `msiexec /qn`, the
+  runner's GStreamer is removed from PATH, and the INSTALLED exe converts an
+  image (`--preset`) and renders a sequence (`--sequence-mp4`) from the bundled
+  runtime alone, then uninstalls. A plugin missing from the allow-list fails
+  the release.
+- **M31** Every release ships a fixed-name `kuvatin-x86_64.msi` (also added to
+  the existing 2.6.0 release), so the landing page's download links are
+  static; the per-visitor GitHub API call is gone (the version label comes
+  from the JSON-LD stamp, which CI checks against the tag); Inter and Space
+  Grotesk are self-hosted (`docs/fonts/`, variable latin subsets, OFL texts).
+- **M32** `forced-colors` fallbacks paint the gradient headings in
+  `CanvasText`; the install snippet's comment colour is ≥4.5:1; the release
+  note is 13 px.
+- **M33** The GitHub link stays in the nav on phones; the blurred glows, grid
+  and noise layers are off under 860 px; the card-tilt loops and the cursor
+  glow run only while scrolling/moving (plus a settle tail) instead of every
+  frame.
+- **L16** Product name "Kuvatin", ARP about/help/update links, `ARPNOMODIFY`,
+  `WixUI_InstallDir` instead of a one-box feature tree, an HKLM keypath for
+  the per-machine shortcut component. Built locally (ICE-clean).
+- **L17** README: Status points at the releases page and describes the CI
+  gates; the exe's four modes; the video crate's description; workspace
+  `repository`/`homepage`/`authors` metadata; the landing page's "cleans it
+  back up" is qualified. `--quiet` now also skips the progress window
+  (`run_headless`), which the smoke and install tests rely on.
+- Tests: `cancelling_mid_render_stops_and_removes_the_partial` (video 32);
+  the stale-lock rendezvous test exposed a real race (a fresh lock deleted by
+  a second retirer, or a delete-pending `PermissionDenied` taken as "lead
+  alone") — fixed with an exclusive `takeover.lock` and a brief retry; 6/6
+  stable now.
+
 ## §6 Structure — M5, M6, M27, M35, L2, L4–L6, L12, L13
 
 (Phases §1–§6 are filled in as they are executed.)

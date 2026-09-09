@@ -60,7 +60,7 @@
 
     <Product
         Id='*'
-        Name='kuvatin'
+        Name='Kuvatin'
         UpgradeCode='6CE48F37-33A2-4C50-99F4-F6982CCA934C'
         Manufacturer='Ville Mattila'
         Language='1033'
@@ -89,7 +89,7 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='kuvatin Installation'/>
+        <Property Id='DiskPrompt' Value='Kuvatin Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
@@ -127,25 +127,24 @@
                 </Directory>
             </Directory>
 
-            <!-- Start menu shortcut (all users). -->
+            <!-- Start menu shortcut. The package is per-machine (so this lands in
+                 the all-users Start menu), but WiX's validators treat any
+                 ProgramMenuFolder shortcut as user-profile data: ICE38/ICE43
+                 REQUIRE a non-advertised shortcut component's keypath to be an
+                 HKCU value, and an HKLM or HKMU keypath fails ICE57. So the
+                 keypath is HKCU by rule, not by choice (verified: the HKLM
+                 variant the review suggested fails the build). -->
             <Directory Id='ProgramMenuFolder'>
                 <Directory Id='ApplicationProgramsFolder' Name='Kuvatin'>
                     <Component Id='StartMenuShortcut' Guid='*'>
                         <Shortcut Id='AppStartMenuShortcut'
                                   Name='Kuvatin'
-                                  Description='Batch image converter / resizer / cropper'
+                                  Description='Batch image converter / resizer / cropper and video editor'
                                   Target='[Bin]kuvatin.exe'
                                   WorkingDirectory='Bin'
                                   Icon='ProductICO'/>
                         <RemoveFolder Id='RemoveApplicationProgramsFolder'
                                       On='uninstall'/>
-                        <!-- Per-user keypath for the per-user Start-menu shortcut.
-                             An ambiguous HKMU root here trips ICE57 ("per-user
-                             data with a keypath that can be per-user or
-                             per-machine"); HKCU makes the whole component
-                             unambiguously per-user, which is what a
-                             ProgramMenuFolder shortcut is. This is the form that
-                             shipped in 2.0.0. -->
                         <RegistryValue Root='HKCU'
                                        Key='Software\Ville Mattila\Kuvatin'
                                        Name='installed'
@@ -186,6 +185,10 @@
         </Feature>
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+        <!-- Apps & Features entry links (WixUI_InstallDir already sets ARPNOMODIFY). -->
+        <Property Id='ARPURLINFOABOUT' Value='https://ville-mattila.github.io/Kuvatin/'/>
+        <Property Id='ARPHELPLINK' Value='https://github.com/Ville-Mattila/Kuvatin/issues'/>
+        <Property Id='ARPURLUPDATEINFO' Value='https://github.com/Ville-Mattila/Kuvatin/releases'/>
 
         <!--
           Register / unregister the Windows Explorer context-menu entries by
@@ -236,20 +239,11 @@
           2. Change the value for `Value` attribute of the following
              `Property` tag to a valid URL.
         -->
-        <!--<Property Id='ARPHELPLINK' Value='ChangeMe'/>-->
-
+        <!-- One mandatory feature: a feature tree would show a single box that
+             can't be unticked, so the UI asks only for the install folder. -->
+        <Property Id='WIXUI_INSTALLDIR' Value='APPLICATIONFOLDER'/>
         <UI>
-            <UIRef Id='WixUI_FeatureTree'/>
-            <!--
-              Disabling the EULA dialog in the installer is a two step process:
-
-                 1. Uncomment the following two `Publish` tags
-                 2. Comment out or remove the `<WiXVariable Id='WixUILicenseRtf'...` tag further down
-
-            -->
-            <!--<Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>-->
-            <!--<Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>-->
-            
+            <UIRef Id='WixUI_InstallDir'/>
         </UI>
 
         <!--

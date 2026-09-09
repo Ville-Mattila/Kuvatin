@@ -44,9 +44,16 @@ impl PresetStore {
             quality: 80,
             ..Job::default()
         };
-        let webp = Job { format: OutputFormat::Webp, quality: 80, ..Job::default() };
+        let webp = Job {
+            format: OutputFormat::Webp,
+            quality: 80,
+            ..Job::default()
+        };
         let p1080 = Job {
-            resize: ResizeMode::FitBox { width: 1920, height: 1080 },
+            resize: ResizeMode::FitBox {
+                width: 1920,
+                height: 1080,
+            },
             format: OutputFormat::Jpeg,
             quality: 85,
             ..Job::default()
@@ -58,10 +65,22 @@ impl PresetStore {
         PresetStore {
             version: Self::CURRENT_VERSION,
             presets: vec![
-                Preset { name: "Compress PNG".into(), job: compress_png },
-                Preset { name: "Convert to WebP".into(), job: webp },
-                Preset { name: "Resize to 1080p".into(), job: p1080 },
-                Preset { name: "Resize to 50%".into(), job: half },
+                Preset {
+                    name: "Compress PNG".into(),
+                    job: compress_png,
+                },
+                Preset {
+                    name: "Convert to WebP".into(),
+                    job: webp,
+                },
+                Preset {
+                    name: "Resize to 1080p".into(),
+                    job: p1080,
+                },
+                Preset {
+                    name: "Resize to 50%".into(),
+                    job: half,
+                },
             ],
             last_load_warning: None,
         }
@@ -83,8 +102,7 @@ impl PresetStore {
     /// Default on-disk location: %APPDATA%\Kuvatin\presets.toml (or platform equiv,
     /// e.g. ~/.config/Kuvatin/presets.toml on Linux).
     pub fn default_path() -> Option<PathBuf> {
-        directories::BaseDirs::new()
-            .map(|d| d.config_dir().join("Kuvatin").join("presets.toml"))
+        directories::BaseDirs::new().map(|d| d.config_dir().join("Kuvatin").join("presets.toml"))
     }
 
     /// Load from `path`, or return built-ins (and write them) if absent.
@@ -184,7 +202,14 @@ impl PresetStore {
         }
         let warning = (skipped > 0)
             .then(|| format!("{skipped} invalid preset(s) in presets.toml were skipped."));
-        Ok((PresetStore { version, presets, last_load_warning: None }, warning))
+        Ok((
+            PresetStore {
+                version,
+                presets,
+                last_load_warning: None,
+            },
+            warning,
+        ))
     }
 
     /// Save atomically: write to a sibling temp file, then rename over the
@@ -210,7 +235,10 @@ impl PresetStore {
         // presets.toml on disk — no delete-first window for a crash to hit.
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            CoreError::Io { path: path.to_path_buf(), source: e }
+            CoreError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            }
         })
     }
 }
@@ -238,7 +266,10 @@ mod tests {
     fn missing_job_fields_take_defaults() {
         let text = "[[presets]]\nname = \"Old\"\n[presets.job]\nformat = \"webp\"\n";
         let (store, warning) = PresetStore::parse_tolerant(text).unwrap();
-        assert!(warning.is_none(), "entry must parse cleanly, got {warning:?}");
+        assert!(
+            warning.is_none(),
+            "entry must parse cleanly, got {warning:?}"
+        );
         let job = &store.find("Old").unwrap().job;
         assert_eq!(job.format, OutputFormat::Webp);
         assert_eq!(job.quality, Job::default().quality);
@@ -258,7 +289,11 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["presets.toml".to_string()], "no temp files: {names:?}");
+        assert_eq!(
+            names,
+            vec!["presets.toml".to_string()],
+            "no temp files: {names:?}"
+        );
     }
 
     #[test]
@@ -302,7 +337,10 @@ mod tests {
         let store = PresetStore::load_or_init(&path).unwrap();
         assert_eq!(store.presets.len(), PresetStore::builtin().presets.len());
         assert!(store.last_load_warning.is_some());
-        assert!(path.with_extension("toml.bad").exists(), "bad file preserved");
+        assert!(
+            path.with_extension("toml.bad").exists(),
+            "bad file preserved"
+        );
     }
 
     /// One invalid preset entry is skipped; the rest of the file survives.

@@ -3,7 +3,6 @@
 mod cli;
 mod collect;
 mod gui;
-mod preview;
 mod progress_ui;
 mod quickrun;
 mod rendezvous;
@@ -87,15 +86,32 @@ fn or_fail<T>(title: &str, result: anyhow::Result<T>) -> T {
     }
 }
 
+/// Run a headless job under the progress window — or with no window under
+/// `--quiet`, where nobody is watching and a window may not be creatable.
+fn run_job<T: Send + 'static>(
+    quiet: bool,
+    heading: &str,
+    work: impl FnOnce(&progress_ui::ProgressSink) -> T + Send + 'static,
+) -> T {
+    let outcome = if quiet {
+        progress_ui::run_headless(work)
+    } else {
+        progress_ui::run_with_progress(heading, work)
+    };
+    or_fail("Kuvatin \u{2014} could not start", outcome)
+}
+
 fn main() {
     // A windowed exe run from a terminal joins that terminal's console, so
     // `--register` / errors print where the user is looking.
     shell::attach_parent_console();
     configure_bundled_gstreamer();
-    let args: Vec<std::ffi::OsString> =
-        std::env::args_os().map(|a| cli::repair_drive_root(&a)).collect();
+    let args: Vec<std::ffi::OsString> = std::env::args_os()
+        .map(|a| cli::repair_drive_root(&a))
+        .collect();
     let cli = Cli::parse_from(args);
-    if cli.quiet {
+    let quiet = cli.quiet;
+    if quiet {
         shell::set_quiet(true);
     }
     match cli.into_mode() {
@@ -114,12 +130,11 @@ fn main() {
                 return;
             };
             let heading = preset.clone();
-            let outcome = or_fail(
-                "Kuvatin \u{2014} could not start",
-                progress_ui::run_with_progress(&heading, move |sink| {
-                    quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| sink.cancelled())
-                }),
-            );
+            let outcome = run_job(quiet, &heading, move |sink| {
+                quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| {
+                    sink.cancelled()
+                })
+            });
             match outcome {
                 // The user cancelled — no dialog, even if some files had
                 // already failed before that.
@@ -143,12 +158,9 @@ fn main() {
             let Some(paths) = coalesce("sequence-mp4", paths) else {
                 return;
             };
-            let outcome = or_fail(
-                "Kuvatin \u{2014} could not start",
-                progress_ui::run_with_progress("Render image sequence to MP4", move |sink| {
-                    sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
-                }),
-            );
+            let outcome = run_job(quiet, "Render image sequence to MP4", move |sink| {
+                sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
+            });
             // The EXR→PNG cache must be swept from this path too — a
             // right-click-only user never starts the GUI, whose startup sweep
             // used to be the only one.

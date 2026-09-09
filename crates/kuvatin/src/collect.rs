@@ -1,10 +1,35 @@
 use kuvatin_core::format::is_input_extension;
 use std::path::{Path, PathBuf};
 
-fn is_image(path: &Path) -> bool {
+fn ext_of(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(is_input_extension)
+        .map(|e| e.to_ascii_lowercase())
+}
+
+fn is_image(path: &Path) -> bool {
+    ext_of(path)
+        .map(|e| is_input_extension(&e))
+        .unwrap_or(false)
+}
+
+/// A file the video editor can import directly: a video container or an
+/// image input (stills become overlays).
+fn is_media(path: &Path) -> bool {
+    ext_of(path)
+        .map(|e| kuvatin_video::VIDEO_EXTENSIONS.contains(&e.as_str()) || is_input_extension(&e))
+        .unwrap_or(false)
+}
+
+/// A sequence-only frame format (`.exr`): not importable as a still, but the
+/// user probably meant "Import sequence…".
+fn is_frame_only(path: &Path) -> bool {
+    ext_of(path)
+        .map(|e| {
+            kuvatin_video::FRAME_EXTENSIONS.contains(&e.as_str())
+                && !is_input_extension(&e)
+                && !kuvatin_video::VIDEO_EXTENSIONS.contains(&e.as_str())
+        })
         .unwrap_or(false)
 }
 
@@ -31,10 +56,10 @@ fn is_dotfile(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Expand a mix of files and folders into a flat, de-duplicated list of image
-/// files. Folders are scanned one level deep (non-recursive for v1); hidden,
-/// system and dot-files inside them are skipped.
-pub fn collect_images(paths: &[PathBuf]) -> Vec<PathBuf> {
+/// Expand a mix of files and folders into a flat, de-duplicated list of the
+/// files `keep` accepts. Folders are scanned one level deep (non-recursive);
+/// hidden, system and dot-files inside them are skipped.
+fn collect(paths: &[PathBuf], keep: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for p in paths {
         if p.is_dir() {
@@ -42,18 +67,37 @@ pub fn collect_images(paths: &[PathBuf]) -> Vec<PathBuf> {
                 for e in entries.flatten() {
                     let path = e.path();
                     let hidden = e.metadata().map(|m| is_hidden(&m)).unwrap_or(false);
-                    if path.is_file() && is_image(&path) && !hidden && !is_dotfile(&path) {
+                    if path.is_file() && keep(&path) && !hidden && !is_dotfile(&path) {
                         out.push(path);
                     }
                 }
             }
-        } else if p.is_file() && is_image(p) {
+        } else if p.is_file() && keep(p) {
             out.push(p.clone());
         }
     }
     out.sort();
     out.dedup();
     out
+}
+
+/// Image files for the Images mode (see [`collect`]).
+pub fn collect_images(paths: &[PathBuf]) -> Vec<PathBuf> {
+    collect(paths, is_image)
+}
+
+/// Media files for the Videos mode: `(importable, frame-only)`. The second
+/// list holds explicitly selected `.exr` frames, so the caller can point the
+/// user at "Import sequence…" instead of letting GStreamer fail on them; the
+/// rest (`.txt`, project files) is dropped silently, like the image mode does.
+pub fn collect_media(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let media = collect(paths, is_media);
+    let frames: Vec<PathBuf> = paths
+        .iter()
+        .filter(|p| p.is_file() && is_frame_only(p))
+        .cloned()
+        .collect();
+    (media, frames)
 }
 
 #[cfg(test)]
@@ -106,13 +150,37 @@ mod tests {
         let hidden = {
             let h = dir.path().join("thumb.png");
             std::fs::write(&h, b"x").unwrap();
-            let status = std::process::Command::new("attrib").arg("+h").arg(&h).status().unwrap();
+            let status = std::process::Command::new("attrib")
+                .arg("+h")
+                .arg(&h)
+                .status()
+                .unwrap();
             assert!(status.success(), "attrib +h");
             h
         };
         let got = collect_images(&[dir.path().to_path_buf()]);
         assert_eq!(got, vec![shown.clone()], "only the visible file: {got:?}");
         #[cfg(windows)]
-        assert_eq!(collect_images(&[hidden.clone()]), vec![hidden], "explicit selection wins");
+        assert_eq!(
+            collect_images(std::slice::from_ref(&hidden)),
+            vec![hidden],
+            "explicit selection wins"
+        );
+    }
+
+    /// A Videos-mode drop expands folders, keeps videos + stills, drops junk
+    /// silently and reports EXR frames separately (for the sequence hint).
+    #[test]
+    fn media_collection_expands_filters_and_flags_exr() {
+        let dir = tempfile::tempdir().unwrap();
+        let mp4 = dir.path().join("clip.MP4");
+        let png = dir.path().join("logo.png");
+        let exr = dir.path().join("frame_0001.exr");
+        for p in [&mp4, &png, &exr, &dir.path().join("notes.txt")] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let (media, frames) = collect_media(&[dir.path().to_path_buf(), exr.clone()]);
+        assert_eq!(media, vec![mp4, png]);
+        assert_eq!(frames, vec![exr], "an explicitly dropped EXR is flagged");
     }
 }

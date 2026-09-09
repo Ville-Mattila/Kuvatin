@@ -62,7 +62,11 @@ fn extension_roots() -> Vec<(String, &'static str)> {
     INPUT_EXTENSIONS
         .iter()
         .map(|e| (root(e), STORE_ITEM))
-        .chain(FRAME_ONLY_EXTENSIONS.iter().map(|e| (root(e), STORE_FRAMES)))
+        .chain(
+            FRAME_ONLY_EXTENSIONS
+                .iter()
+                .map(|e| (root(e), STORE_FRAMES)),
+        )
         .collect()
 }
 
@@ -165,7 +169,9 @@ fn set_string(hkey: HKEY, name: Option<&str>, value: &str) -> Result<()> {
     let status = unsafe {
         RegSetValueExW(
             hkey,
-            wname.as_ref().map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr())),
+            wname
+                .as_ref()
+                .map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr())),
             0,
             REG_SZ,
             Some(bytes),

@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "landing",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "5173", "--directory", "docs"],
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "http-server", "docs", "-p", "5173", "-c-1", "-s"],
       "port": 5173
     }
   ]

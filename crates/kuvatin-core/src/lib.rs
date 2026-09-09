@@ -1,21 +1,27 @@
-pub mod format;
-pub mod resize;
+pub mod batch;
 pub mod crop;
+pub mod format;
 pub mod naming;
 pub mod pipeline;
 pub mod preset;
-pub mod batch;
+pub mod resize;
 
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error("failed to read image {path}: {source}")]
-    Decode { path: PathBuf, source: image::ImageError },
+    Decode {
+        path: PathBuf,
+        source: image::ImageError,
+    },
     #[error("failed to encode image: {0}")]
     Encode(String),
     #[error("io error for {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("invalid job: {0}")]
     InvalidJob(String),
 }

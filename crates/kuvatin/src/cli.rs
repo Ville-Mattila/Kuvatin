@@ -3,7 +3,11 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "kuvatin", version, about = "Batch image converter / resizer / cropper")]
+#[command(
+    name = "kuvatin",
+    version,
+    about = "Batch image converter / resizer / cropper"
+)]
 pub struct Cli {
     /// Run a named preset headlessly over the given files.
     #[arg(long, value_name = "NAME", conflicts_with_all = ["sequence_mp4", "register", "unregister"])]
@@ -15,7 +19,12 @@ pub struct Cli {
     pub sequence_mp4: bool,
 
     /// Frame rate for --sequence-mp4 (one file = one frame).
-    #[arg(long, default_value_t = 30, value_name = "FPS", requires = "sequence_mp4")]
+    #[arg(
+        long,
+        default_value_t = 30,
+        value_name = "FPS",
+        requires = "sequence_mp4"
+    )]
     pub fps: u32,
 
     /// Register the Explorer context-menu entries and exit.
@@ -39,9 +48,17 @@ pub struct Cli {
 pub enum Mode {
     Register,
     Unregister,
-    QuickRun { preset: String, paths: Vec<PathBuf> },
-    SequenceMp4 { paths: Vec<PathBuf>, fps: u32 },
-    Gui { paths: Vec<PathBuf> },
+    QuickRun {
+        preset: String,
+        paths: Vec<PathBuf>,
+    },
+    SequenceMp4 {
+        paths: Vec<PathBuf>,
+        fps: u32,
+    },
+    Gui {
+        paths: Vec<PathBuf>,
+    },
     /// A flag combination clap can't express: a headless mode with no PATH.
     Invalid(&'static str),
 }
@@ -56,13 +73,19 @@ impl Cli {
             if self.paths.is_empty() {
                 Mode::Invalid("--sequence-mp4 needs at least one frame or folder PATH")
             } else {
-                Mode::SequenceMp4 { paths: self.paths, fps: self.fps }
+                Mode::SequenceMp4 {
+                    paths: self.paths,
+                    fps: self.fps,
+                }
             }
         } else if let Some(preset) = self.preset {
             if self.paths.is_empty() {
                 Mode::Invalid("--preset needs at least one file or folder PATH")
             } else {
-                Mode::QuickRun { preset, paths: self.paths }
+                Mode::QuickRun {
+                    preset,
+                    paths: self.paths,
+                }
             }
         } else {
             Mode::Gui { paths: self.paths }
@@ -105,7 +128,9 @@ mod tests {
     fn files_only_is_gui_with_paths() {
         assert_eq!(
             mode_of(&["a.png", "b.jpg"]),
-            Mode::Gui { paths: vec!["a.png".into(), "b.jpg".into()] }
+            Mode::Gui {
+                paths: vec!["a.png".into(), "b.jpg".into()]
+            }
         );
     }
 
@@ -113,7 +138,10 @@ mod tests {
     fn preset_is_quickrun() {
         assert_eq!(
             mode_of(&["--preset", "Convert to WebP", "a.png"]),
-            Mode::QuickRun { preset: "Convert to WebP".into(), paths: vec!["a.png".into()] }
+            Mode::QuickRun {
+                preset: "Convert to WebP".into(),
+                paths: vec!["a.png".into()]
+            }
         );
     }
 
@@ -127,11 +155,17 @@ mod tests {
     fn sequence_mp4_defaults_to_30_fps_and_takes_fps() {
         assert_eq!(
             mode_of(&["--sequence-mp4", "frame_0001.png"]),
-            Mode::SequenceMp4 { paths: vec!["frame_0001.png".into()], fps: 30 }
+            Mode::SequenceMp4 {
+                paths: vec!["frame_0001.png".into()],
+                fps: 30
+            }
         );
         assert_eq!(
             mode_of(&["--sequence-mp4", "--fps", "24", "C:/renders"]),
-            Mode::SequenceMp4 { paths: vec!["C:/renders".into()], fps: 24 }
+            Mode::SequenceMp4 {
+                paths: vec!["C:/renders".into()],
+                fps: 24
+            }
         );
     }
 
@@ -154,11 +188,26 @@ mod tests {
 
     #[test]
     fn repairs_the_drive_root_quote_artifact() {
-        assert_eq!(repair_drive_root(OsStr::new("C:\"")), OsString::from("C:\\"));
-        assert_eq!(repair_drive_root(OsStr::new("d:\"")), OsString::from("d:\\"));
+        assert_eq!(
+            repair_drive_root(OsStr::new("C:\"")),
+            OsString::from("C:\\")
+        );
+        assert_eq!(
+            repair_drive_root(OsStr::new("d:\"")),
+            OsString::from("d:\\")
+        );
         // Anything else is untouched — including a genuine three-char argument.
-        assert_eq!(repair_drive_root(OsStr::new("C:\\")), OsString::from("C:\\"));
-        assert_eq!(repair_drive_root(OsStr::new("ab\"")), OsString::from("ab\""));
-        assert_eq!(repair_drive_root(OsStr::new("C:\\dir\"")), OsString::from("C:\\dir\""));
+        assert_eq!(
+            repair_drive_root(OsStr::new("C:\\")),
+            OsString::from("C:\\")
+        );
+        assert_eq!(
+            repair_drive_root(OsStr::new("ab\"")),
+            OsString::from("ab\"")
+        );
+        assert_eq!(
+            repair_drive_root(OsStr::new("C:\\dir\"")),
+            OsString::from("C:\\dir\"")
+        );
     }
 }

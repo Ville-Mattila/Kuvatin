@@ -38,6 +38,7 @@ const FIRST_ARRIVAL_GRACE: Duration = Duration::from_millis(250);
 /// A lock or spool entry older than this is debris from a crashed run.
 const STALE: Duration = Duration::from_secs(30);
 const LOCK: &str = "leader.lock";
+const TAKEOVER: &str = "takeover.lock";
 const SPOOL_EXT: &str = "paths";
 
 /// Distinguishes spool entries written by the same process (threads in tests).
@@ -116,12 +117,20 @@ fn group_dir(group: &str) -> String {
 /// `U+FFFD` look-alike that doesn't exist.
 fn encode_path(p: &Path) -> String {
     if let Some(s) = p.to_str() {
-        return if s.starts_with('#') { format!("#u:{s}") } else { s.to_string() };
+        return if s.starts_with('#') {
+            format!("#u:{s}")
+        } else {
+            s.to_string()
+        };
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        let hex: String = p.as_os_str().encode_wide().map(|u| format!("{u:04x}")).collect();
+        let hex: String = p
+            .as_os_str()
+            .encode_wide()
+            .map(|u| format!("{u:04x}"))
+            .collect();
         return format!("#w:{hex}");
     }
     #[allow(unreachable_code)]
@@ -156,7 +165,11 @@ fn spool(dir: &Path, paths: &[PathBuf]) -> std::io::Result<()> {
             .unwrap_or(0)
     );
     let tmp = dir.join(format!("{stem}.tmp"));
-    let body: String = paths.iter().map(|p| encode_path(p)).collect::<Vec<_>>().join("\n");
+    let body: String = paths
+        .iter()
+        .map(|p| encode_path(p))
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, dir.join(format!("{stem}.{SPOOL_EXT}")))
 }
@@ -176,17 +189,21 @@ fn age_of(p: &Path) -> Option<Duration> {
     SystemTime::now().duration_since(modified).ok()
 }
 
+fn is_stale(p: &Path) -> bool {
+    age_of(p).is_some_and(|a| a > STALE)
+}
+
 /// Try to become the leader. A lock left by a crashed leader (older than
-/// [`STALE`]) is retired and the race re-run once.
+/// [`STALE`]) is retired — once — and the race re-run.
 ///
-/// Retirement is an atomic RENAME to a unique name, not a delete: with a
-/// delete, two arrivals that both judged the lock stale could each remove
-/// and recreate it — the second `remove_file` deleted the first's FRESH lock
-/// and produced two leaders. Only one process can win the rename; the other
-/// finds a fresh lock on its retry and follows.
+/// A transient `PermissionDenied` (Windows reports it for a file that is
+/// delete-pending under a concurrent `remove_file`) is retried briefly
+/// instead of being taken as "can't coordinate": treating it as a licence to
+/// run alone produced a second leader.
 fn acquire_lock(dir: &Path) -> bool {
     let lock = dir.join(LOCK);
-    for attempt in 0..2 {
+    let mut retired = false;
+    for _ in 0..8 {
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -194,25 +211,47 @@ fn acquire_lock(dir: &Path) -> bool {
         {
             Ok(_) => return true,
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                let stale = age_of(&lock).map(|a| a > STALE).unwrap_or(false);
-                if !stale || attempt == 1 {
+                if retired || !is_stale(&lock) {
                     return false;
                 }
-                let retired = dir.join(format!(
-                    "stale-{}-{}",
-                    std::process::id(),
-                    SEQ.fetch_add(1, Ordering::Relaxed)
-                ));
-                if std::fs::rename(&lock, &retired).is_ok() {
-                    let _ = std::fs::remove_file(&retired);
-                }
-                // Whether or not we won the rename, retry create_new once.
+                retire_stale_lock(dir, &lock);
+                retired = true;
+            }
+            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+                std::thread::sleep(Duration::from_millis(10));
             }
             // Can't coordinate at all — better to run alone than to drop the action.
             Err(_) => return true,
         }
     }
     false
+}
+
+/// Retire a lock judged stale, EXCLUSIVELY: `takeover.lock` (`create_new`)
+/// admits one retirer at a time, and it re-checks staleness while holding it.
+/// Without that, two arrivals that both judged the lock stale could each
+/// delete-and-recreate it — the second deletion took the first's FRESH lock
+/// and both led. A takeover lock left by a crashed retirer is itself retired
+/// by age.
+fn retire_stale_lock(dir: &Path, lock: &Path) {
+    let takeover = dir.join(TAKEOVER);
+    if is_stale(&takeover) {
+        let _ = std::fs::remove_file(&takeover);
+    }
+    let Ok(_guard) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&takeover)
+    else {
+        // Someone else is retiring it; our retry sees the outcome.
+        std::thread::sleep(Duration::from_millis(10));
+        return;
+    };
+    if is_stale(lock) {
+        let _ = std::fs::remove_file(lock);
+    }
+    drop(_guard);
+    let _ = std::fs::remove_file(&takeover);
 }
 
 /// Move every spool entry into `claim_dir` (atomic rename — whoever renames
@@ -227,7 +266,7 @@ fn claim(dir: &Path, claim_dir: &Path, out: &mut Vec<PathBuf>) {
         if !is_spool_entry(&src) {
             continue;
         }
-        if age_of(&src).map(|a| a > STALE).unwrap_or(false) {
+        if is_stale(&src) {
             let _ = std::fs::remove_file(&src);
             continue;
         }
@@ -282,12 +321,20 @@ mod tests {
             .collect();
         let roles: Vec<Role> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        let mut union: Vec<PathBuf> = roles.iter().filter_map(leader_paths).flatten().cloned().collect();
+        let mut union: Vec<PathBuf> = roles
+            .iter()
+            .filter_map(leader_paths)
+            .flatten()
+            .cloned()
+            .collect();
         union.sort();
         let mut expect: Vec<PathBuf> = (0..8).map(|i| p(&format!("C:/img/{i}.png"))).collect();
         expect.sort();
         assert_eq!(union, expect, "every path exactly once: {roles:?}");
-        let busy_leaders = roles.iter().filter(|r| leader_paths(r).map_or(false, |v| !v.is_empty())).count();
+        let busy_leaders = roles
+            .iter()
+            .filter(|r| leader_paths(r).is_some_and(|v| !v.is_empty()))
+            .count();
         assert_eq!(busy_leaders, 1, "one batch, not several: {roles:?}");
 
         let dir = root.path().join(group_dir("preset:test"));
@@ -301,34 +348,53 @@ mod tests {
     fn a_lone_arrival_does_not_wait_the_full_quiet_window() {
         let root = tempfile::tempdir().unwrap();
         let t0 = Instant::now();
-        let role = gather_in(root.path(), "g", &[p("only.png")], Duration::from_millis(1500));
+        let role = gather_in(
+            root.path(),
+            "g",
+            &[p("only.png")],
+            Duration::from_millis(1500),
+        );
         let took = t0.elapsed();
         assert_eq!(role, Role::Leader(vec![p("only.png")]));
-        assert!(took < Duration::from_millis(900), "waited {took:?} for a lone arrival");
+        assert!(
+            took < Duration::from_millis(900),
+            "waited {took:?} for a lone arrival"
+        );
     }
 
     /// Two processes that both judge a lock stale must not both lead: only
-    /// the rename winner retires it, the other follows.
+    /// the rename winner retires it, the other follows. The threads start
+    /// through a barrier so they really race (a thread scheduled only after
+    /// the first batch closed would legitimately lead a second one).
     #[test]
     fn a_stale_lock_is_retired_by_exactly_one_process() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(group_dir("g"));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = std::fs::File::create(dir.join(LOCK)).unwrap();
-        lock.set_modified(SystemTime::now() - Duration::from_secs(120)).unwrap();
+        lock.set_modified(SystemTime::now() - Duration::from_secs(120))
+            .unwrap();
         drop(lock);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let handles: Vec<_> = (0..4)
             .map(|i| {
                 let root = root.path().to_path_buf();
+                let barrier = barrier.clone();
                 std::thread::spawn(move || {
-                    gather_in(&root, "g", &[p(&format!("{i}.png"))], Duration::from_millis(200))
+                    barrier.wait();
+                    gather_in(
+                        &root,
+                        "g",
+                        &[p(&format!("{i}.png"))],
+                        Duration::from_millis(400),
+                    )
                 })
             })
             .collect();
         let roles: Vec<Role> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         let leaders = roles
             .iter()
-            .filter(|r| leader_paths(r).map_or(false, |v| !v.is_empty()))
+            .filter(|r| leader_paths(r).is_some_and(|v| !v.is_empty()))
             .count();
         assert_eq!(leaders, 1, "one leader despite the stale lock: {roles:?}");
     }
@@ -338,8 +404,14 @@ mod tests {
     fn a_later_run_starts_its_own_batch() {
         let root = tempfile::tempdir().unwrap();
         let q = Duration::from_millis(50);
-        assert_eq!(gather_in(root.path(), "g", &[p("a.png")], q), Role::Leader(vec![p("a.png")]));
-        assert_eq!(gather_in(root.path(), "g", &[p("b.png")], q), Role::Leader(vec![p("b.png")]));
+        assert_eq!(
+            gather_in(root.path(), "g", &[p("a.png")], q),
+            Role::Leader(vec![p("a.png")])
+        );
+        assert_eq!(
+            gather_in(root.path(), "g", &[p("b.png")], q),
+            Role::Leader(vec![p("b.png")])
+        );
     }
 
     /// Different groups (presets) never merge, even when concurrent.
@@ -348,8 +420,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let r1 = root.path().to_path_buf();
         let r2 = root.path().to_path_buf();
-        let a = std::thread::spawn(move || gather_in(&r1, "preset:A", &[p("a.png")], Duration::from_millis(120)));
-        let b = std::thread::spawn(move || gather_in(&r2, "preset:B", &[p("b.png")], Duration::from_millis(120)));
+        let a = std::thread::spawn(move || {
+            gather_in(&r1, "preset:A", &[p("a.png")], Duration::from_millis(120))
+        });
+        let b = std::thread::spawn(move || {
+            gather_in(&r2, "preset:B", &[p("b.png")], Duration::from_millis(120))
+        });
         assert_eq!(a.join().unwrap(), Role::Leader(vec![p("a.png")]));
         assert_eq!(b.join().unwrap(), Role::Leader(vec![p("b.png")]));
     }
@@ -363,12 +439,19 @@ mod tests {
         let q = Duration::from_millis(50);
 
         let lock = std::fs::File::create(dir.join(LOCK)).unwrap();
-        lock.set_modified(SystemTime::now() - Duration::from_secs(120)).unwrap();
+        lock.set_modified(SystemTime::now() - Duration::from_secs(120))
+            .unwrap();
         drop(lock);
-        assert_eq!(gather_in(root.path(), "g", &[p("a.png")], q), Role::Leader(vec![p("a.png")]));
+        assert_eq!(
+            gather_in(root.path(), "g", &[p("a.png")], q),
+            Role::Leader(vec![p("a.png")])
+        );
 
         std::fs::File::create(dir.join(LOCK)).unwrap();
-        assert_eq!(gather_in(root.path(), "g", &[p("b.png")], q), Role::Follower);
+        assert_eq!(
+            gather_in(root.path(), "g", &[p("b.png")], q),
+            Role::Follower
+        );
     }
 
     /// Spool debris from a crashed run must not be silently converted later.
@@ -396,7 +479,11 @@ mod tests {
     #[test]
     fn paths_round_trip_verbatim() {
         let root = tempfile::tempdir().unwrap();
-        let mine = [p("C:/Työt/kuva ä.png"), p("D:/render/frame_0001.exr"), p("#w:not-hex.png")];
+        let mine = [
+            p("C:/Työt/kuva ä.png"),
+            p("D:/render/frame_0001.exr"),
+            p("#w:not-hex.png"),
+        ];
         let role = gather_in(root.path(), "g", &mine, Duration::from_millis(50));
         let mut expect = mine.to_vec();
         expect.sort();
@@ -409,11 +496,19 @@ mod tests {
     #[test]
     fn a_non_unicode_path_survives_the_spool() {
         use std::os::windows::ffi::OsStringExt;
-        let units: Vec<u16> = "C:\\odd\\".encode_utf16().chain([0xD800, 'x' as u16]).collect();
+        let units: Vec<u16> = "C:\\odd\\"
+            .encode_utf16()
+            .chain([0xD800, 'x' as u16])
+            .collect();
         let odd = PathBuf::from(std::ffi::OsString::from_wide(&units));
         assert!(odd.to_str().is_none(), "fixture must be non-Unicode");
         let root = tempfile::tempdir().unwrap();
-        let role = gather_in(root.path(), "g", &[odd.clone()], Duration::from_millis(50));
+        let role = gather_in(
+            root.path(),
+            "g",
+            std::slice::from_ref(&odd),
+            Duration::from_millis(50),
+        );
         assert_eq!(role, Role::Leader(vec![odd]));
     }
 }

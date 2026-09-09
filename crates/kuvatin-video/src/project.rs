@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use ges::prelude::*;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_editing_services as ges;
-use ges::prelude::*;
 use gstreamer_pbutils as gst_pbutils;
 
 use crate::Frame;
@@ -93,7 +93,11 @@ fn sample_to_frame(sample: &gst::Sample) -> Option<Frame> {
             rgba.extend_from_slice(&data[start..start + row_bytes]);
         }
     }
-    Some(Frame { width, height, rgba })
+    Some(Frame {
+        width,
+        height,
+        rgba,
+    })
 }
 
 /// Push one RGBA video sample to the frame callback.
@@ -273,7 +277,9 @@ pub const MIN_RENDER_H: i32 = 96;
 /// rounded to even and clamped to the canvas range.
 pub fn normalize_render_size(w: i32, h: i32) -> (i32, i32) {
     let (wf, hf) = (w.max(1) as f64, h.max(1) as f64);
-    let scale = (MIN_RENDER_W as f64 / wf).max(MIN_RENDER_H as f64 / hf).max(1.0);
+    let scale = (MIN_RENDER_W as f64 / wf)
+        .max(MIN_RENDER_H as f64 / hf)
+        .max(1.0);
     let w = ((wf * scale).round() as i32 & !1).clamp(16, 7680);
     let h = ((hf * scale).round() as i32 & !1).clamp(16, 4320);
     (w, h)
@@ -393,7 +399,10 @@ fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile 
                 .field("bitrate", s.bitrate_kbps)
                 .build(),
             VideoCodec::Vp9 | VideoCodec::Vp8 => gst_pbutils::ElementProperties::builder_general()
-                .field("target-bitrate", (s.bitrate_kbps.saturating_mul(1000)) as i32)
+                .field(
+                    "target-bitrate",
+                    (s.bitrate_kbps.saturating_mul(1000)) as i32,
+                )
                 .build(),
         };
         vb = vb.element_properties(props);
@@ -747,7 +756,10 @@ impl Project {
 
     /// The clip's current track index (its layer's priority, 0 = top).
     pub fn clip_track(&self, id: &ClipId) -> Option<usize> {
-        self.clips.get(&id.0)?.layer().map(|l| l.priority() as usize)
+        self.clips
+            .get(&id.0)?
+            .layer()
+            .map(|l| l.priority() as usize)
     }
 
     /// Remove a clip from the timeline entirely. Returns whether it existed.
@@ -1036,8 +1048,7 @@ impl Project {
         self.pipeline.set_state(gst::State::Null)?;
         let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
         // Drop the custom preview sink so render mode can route to encodebin.
-        self.pipeline
-            .preview_set_video_sink(None::<&gst::Element>);
+        self.pipeline.preview_set_video_sink(None::<&gst::Element>);
         // From here until end_render, transport and edits are inert.
         self.rendering.set(true);
         let attempt = (|| -> Result<()> {
@@ -1060,13 +1071,17 @@ impl Project {
     /// output when `delete_partial` is set. Also correct to call on a FAILED
     /// render for cleanup.
     pub fn cancel_render(&self, output: &Path, delete_partial: bool) -> Result<()> {
-        let _ = self.pipeline.send_event(gst::event::Eos::new());
-        if let Some(bus) = self.pipeline.bus() {
-            // Give the muxer up to 2 s to flush and post EOS.
-            let _ = bus.timed_pop_filtered(
-                gst::ClockTime::from_seconds(2),
-                &[gst::MessageType::Eos, gst::MessageType::Error],
-            );
+        // Only a file that is KEPT needs its moov atom: a partial that is
+        // deleted on the next line isn't worth a 2 s UI freeze.
+        if !delete_partial {
+            let _ = self.pipeline.send_event(gst::event::Eos::new());
+            if let Some(bus) = self.pipeline.bus() {
+                // Give the muxer up to 2 s to flush and post EOS.
+                let _ = bus.timed_pop_filtered(
+                    gst::ClockTime::from_seconds(2),
+                    &[gst::MessageType::Eos, gst::MessageType::Error],
+                );
+            }
         }
         let restore = self.end_render();
         if delete_partial {
@@ -1133,6 +1148,19 @@ impl Drop for Project {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Scratch space under the workspace's target dir — not `%TEMP%`, whose
+    /// 8.3 short path on the hosted runner trips GStreamer's URI opener — and
+    /// unique per process, so parallel `cargo test` invocations don't collide
+    /// on output names.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-tmp")
+            .join(format!("{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
 
     /// Pure trim math: no input may produce a negative (u64-wrapping) value.
     /// These are the exact wraps the audit found reachable via short clips.
@@ -1240,7 +1268,10 @@ mod tests {
         // No sleep: append #2 must not block while the pipeline is still
         // prerolling. With commit_sync() this deadlocked the calling thread.
         let info2 = project.append_clip(&path, 0, None).expect("append2");
-        assert!(info2.start > Duration::ZERO, "second clip should start after the first");
+        assert!(
+            info2.start > Duration::ZERO,
+            "second clip should start after the first"
+        );
     }
 
     /// Reproduces the "freeze when editing the overlay scale": append a clip,
@@ -1284,7 +1315,7 @@ mod tests {
         let src = std::path::PathBuf::from(path);
         // WebM (VP9/Opus) is deterministic — no hardware H.264 encoder to fight
         // with under the suite's rapid pipeline churn. Exercises the render path.
-        let out = std::env::temp_dir().join("kuvatin_render_test.webm");
+        let out = scratch("render").join("out.webm");
         let _ = std::fs::remove_file(&out);
         let mut project = Project::new(|_f| {}).expect("project");
         project.append_clip(&src, 1, None).expect("clip");
@@ -1332,7 +1363,7 @@ mod tests {
             return;
         };
         let src = std::path::PathBuf::from(path);
-        let out = std::env::temp_dir().join("kuvatin_eos_diag.mp4");
+        let out = scratch("eos").join("out.mp4");
         let _ = std::fs::remove_file(&out);
         let mut project = Project::new(|_f| {}).expect("project");
         project.append_clip(&src, 1, None).expect("clip");
@@ -1375,8 +1406,8 @@ mod tests {
         let _ = std::fs::remove_file(&out);
     }
 
-    /// Regression for the 111KB/no-moov export: a REALISTIC timeline — leading gap
-    /// + a still-image overlay track — must render to H.264 MP4. Gap/overlay
+    /// Regression for the 111KB/no-moov export: a REALISTIC timeline (a leading gap
+    /// and a still-image overlay track) must render to H.264 MP4. Gap/overlay
     /// boundaries renegotiate caps mid-stream, which hardware NVENC chokes on unless
     /// the profile pins one constant format. Self-skips without `GST_TEST_FILE`
     /// (also needs `GST_TEST_IMAGE` for the overlay; skipped if unset).
@@ -1392,7 +1423,7 @@ mod tests {
         };
         let src = std::path::PathBuf::from(path);
         let img = std::path::PathBuf::from(img);
-        let out = std::env::temp_dir().join("kuvatin_gapped_overlay.mp4");
+        let out = scratch("gapped").join("out.mp4");
         let _ = std::fs::remove_file(&out);
         let mut project = Project::new(|_f| {}).expect("project");
         // Video on track 1 with a 2s leading gap; image overlay on track 0.
@@ -1406,7 +1437,13 @@ mod tests {
             )
             .expect("video clip");
         project
-            .add_clip(&img, 0, Duration::ZERO, Duration::ZERO, Duration::from_secs(3))
+            .add_clip(
+                &img,
+                0,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::from_secs(3),
+            )
             .expect("image clip");
         project
             .begin_render(
@@ -1459,16 +1496,14 @@ mod tests {
                 return;
             }
         };
-        let dir = std::env::temp_dir().join(format!("kuvatin säq test-{}", std::process::id()));
+        let dir = scratch("säq test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         for i in 1..=10u32 {
-            let img = image::RgbaImage::from_pixel(
-                64,
-                36,
-                image::Rgba([(i * 20) as u8, 90, 200, 255]),
-            );
-            img.save(dir.join(format!("frame_{i:04}.png"))).expect("write frame");
+            let img =
+                image::RgbaImage::from_pixel(64, 36, image::Rgba([(i * 20) as u8, 90, 200, 255]));
+            img.save(dir.join(format!("frame_{i:04}.png")))
+                .expect("write frame");
         }
         let mut spec =
             crate::sequence::detect_sequence(&dir.join("frame_0001.png")).expect("detect");
@@ -1476,14 +1511,16 @@ mod tests {
         spec.fps = 25;
         let uri = spec.uri().expect("uri");
 
-        let info = project.append_clip_uri(&uri, 0, None).expect("append sequence");
+        let info = project
+            .append_clip_uri(&uri, 0, None)
+            .expect("append sequence");
         // 10 frames at 25 fps = 0.4 s, discovered as the clip's natural length.
         assert_eq!(info.duration, Duration::from_millis(400));
         assert_eq!(project.duration(), Some(Duration::from_millis(400)));
         project.play().expect("play");
         std::thread::sleep(Duration::from_millis(800));
 
-        let out = std::env::temp_dir().join("kuvatin_seq_render_test.webm");
+        let out = dir.join("out.webm");
         let _ = std::fs::remove_file(&out);
         project
             .begin_render(
@@ -1548,7 +1585,7 @@ mod tests {
                 return;
             }
         };
-        let dir = std::env::temp_dir().join(format!("kuvatin-inert-{}", std::process::id()));
+        let dir = scratch("inert");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         for i in 1..=12u32 {
@@ -1564,14 +1601,25 @@ mod tests {
         project
             .begin_render(
                 &out,
-                ExportSettings { codec: VideoCodec::Vp8, width: 320, height: 180, fps: 30, bitrate_kbps: 0 },
+                ExportSettings {
+                    codec: VideoCodec::Vp8,
+                    width: 320,
+                    height: 180,
+                    fps: 30,
+                    bitrate_kbps: 0,
+                },
             )
             .expect("begin_render");
         assert!(project.is_rendering());
         // Inert, not errors: the keyboard handler calls these blindly.
         project.pause().expect("pause is a no-op while rendering");
-        assert!(!project.remove_clip(&info.id), "edits refused while rendering");
-        assert!(project.append_clip_uri(&spec.uri().unwrap(), 1, None).is_err());
+        assert!(
+            !project.remove_clip(&info.id),
+            "edits refused while rendering"
+        );
+        assert!(project
+            .append_clip_uri(&spec.uri().unwrap(), 1, None)
+            .is_err());
         let mut done = false;
         for _ in 0..300 {
             match project.render_status() {
@@ -1586,7 +1634,10 @@ mod tests {
         assert!(done, "the paused-while-rendering export still finished");
         project.end_render().expect("end_render");
         assert!(!project.is_rendering());
-        assert!(project.remove_clip(&info.id), "edits work again after the render");
+        assert!(
+            project.remove_clip(&info.id),
+            "edits work again after the render"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1646,7 +1697,9 @@ mod tests {
         assert!(ok, "warm_asset failed on a worker thread");
         // After warming, adding the clip should succeed (cache hit, no block).
         let mut project = Project::new(|_f| {}).expect("project");
-        project.append_clip(&path, 0, None).expect("append after warm");
+        project
+            .append_clip(&path, 0, None)
+            .expect("append after warm");
     }
 
     /// Runtime-checks the track structural ops: move a clip between tracks, onto

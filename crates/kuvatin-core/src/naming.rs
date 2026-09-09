@@ -54,7 +54,11 @@ pub fn subfolder_name(suffix: &str) -> String {
 
 /// The output file name for a given stem: `<stem><suffix>.<ext>`.
 pub fn output_file_name(stem: &str, suffix: &str, format: OutputFormat) -> String {
-    format!("{stem}{}.{}", sanitize_component(suffix), format.extension())
+    format!(
+        "{stem}{}.{}",
+        sanitize_component(suffix),
+        format.extension()
+    )
 }
 
 /// Expand the policy into a final path next to `input` (or in a suffix-named
@@ -85,8 +89,16 @@ pub fn ensure_unique(path: PathBuf) -> PathBuf {
         return path;
     }
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string();
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     for n in 1.. {
         let candidate = dir.join(format!("{stem}-{n}.{ext}"));
         if !candidate.exists() {
@@ -113,14 +125,20 @@ mod tests {
 
     #[test]
     fn empty_suffix_keeps_name() {
-        let policy = OutputPolicy { suffix: String::new(), subfolder: false };
+        let policy = OutputPolicy {
+            suffix: String::new(),
+            subfolder: false,
+        };
         let p = render_output_path(&policy, Path::new("a/b/x.png"), OutputFormat::Png);
         assert_eq!(p.file_name().unwrap().to_str().unwrap(), "x.png");
     }
 
     #[test]
     fn subfolder_uses_trimmed_suffix() {
-        let policy = OutputPolicy { suffix: "_min".into(), subfolder: true };
+        let policy = OutputPolicy {
+            suffix: "_min".into(),
+            subfolder: true,
+        };
         let p = render_output_path(&policy, Path::new("/a/b/x.png"), OutputFormat::Png);
         assert!(p.ends_with("min/x_min.png"), "got {p:?}");
     }

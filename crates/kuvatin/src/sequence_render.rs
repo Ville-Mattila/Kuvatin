@@ -5,8 +5,7 @@
 use anyhow::{anyhow, Result};
 use kuvatin_core::naming::ensure_unique;
 use kuvatin_video::{
-    detect_sequence, is_frame_file, parse_frame_path, render_to_mp4, RenderProgress,
-    SequenceSpec,
+    detect_sequence, is_frame_file, parse_frame_path, render_to_mp4, RenderProgress, SequenceSpec,
 };
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -48,7 +47,10 @@ pub fn resolve_sequences(paths: &[PathBuf]) -> (Vec<SequenceSpec>, Vec<(PathBuf,
             // A selected .tif/.bmp frame used to fail late inside GStreamer.
             failures.push((
                 p.clone(),
-                format!("not a sequence frame format ({})", kuvatin_video::FRAME_EXTENSIONS.join(", ")),
+                format!(
+                    "not a sequence frame format ({})",
+                    kuvatin_video::FRAME_EXTENSIONS.join(", ")
+                ),
             ));
         } else {
             match parse_frame_path(p) {
@@ -140,12 +142,20 @@ pub fn run(
         match render_to_mp4(spec, &out, fps, report, cancel) {
             Ok(()) => rendered.push(out),
             Err(e) if e.is::<kuvatin_video::Cancelled>() => {
-                return Ok(SequenceReport { rendered, failures, cancelled: true });
+                return Ok(SequenceReport {
+                    rendered,
+                    failures,
+                    cancelled: true,
+                });
             }
             Err(e) => failures.push((spec.first_path(), format!("{e:#}"))),
         }
     }
-    Ok(SequenceReport { rendered, failures, cancelled: false })
+    Ok(SequenceReport {
+        rendered,
+        failures,
+        cancelled: false,
+    })
 }
 
 #[cfg(test)]
@@ -162,7 +172,9 @@ mod tests {
     #[test]
     fn selected_frames_of_one_run_merge_from_the_lowest() {
         let t = tempfile::tempdir().unwrap();
-        let frames: Vec<PathBuf> = (1..=5).map(|i| touch(t.path(), &format!("f_{i:03}.png"))).collect();
+        let frames: Vec<PathBuf> = (1..=5)
+            .map(|i| touch(t.path(), &format!("f_{i:03}.png")))
+            .collect();
         let (specs, failures) = resolve_sequences(&[frames[2].clone(), frames[0].clone()]);
         assert!(failures.is_empty(), "{failures:?}");
         assert_eq!(specs.len(), 1);
@@ -200,7 +212,15 @@ mod tests {
             resolve_sequences(&[photo.clone(), lone.clone(), empty.clone(), tif.clone()]);
         assert!(specs.is_empty());
         let failed: Vec<&std::path::Path> = failures.iter().map(|(p, _)| p.as_path()).collect();
-        assert_eq!(failed, [photo.as_path(), empty.as_path(), tif.as_path(), lone.as_path()]);
+        assert_eq!(
+            failed,
+            [
+                photo.as_path(),
+                empty.as_path(),
+                tif.as_path(),
+                lone.as_path()
+            ]
+        );
         assert!(failures[2].1.contains("not a sequence frame format"));
         assert!(failures[3].1.contains("only one frame"));
     }

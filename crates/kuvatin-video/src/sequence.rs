@@ -34,6 +34,10 @@ impl std::error::Error for Cancelled {}
 /// registration read.
 pub const FRAME_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "exr"];
 
+/// Video containers the engine demuxes (lower-case, no dot) — what the media
+/// dialog offers and what a Videos-mode drop keeps.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"];
+
 /// Whether `path` has a sequence-frame extension (any case).
 pub fn is_frame_file(path: &Path) -> bool {
     path.extension()
@@ -328,8 +332,7 @@ pub fn convert_exr_sequence(
     let _ = std::fs::remove_dir_all(&out_dir); // a marker-less dir is a crashed run
     let tmp_dir = cache_root().join(format!("{key}.tmp-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
-    std::fs::create_dir_all(&tmp_dir)
-        .with_context(|| format!("create {}", tmp_dir.display()))?;
+    std::fs::create_dir_all(&tmp_dir).with_context(|| format!("create {}", tmp_dir.display()))?;
 
     let done = AtomicU64::new(0);
     let result: Result<()> = (0..spec.count).into_par_iter().try_for_each(|i| {
@@ -337,8 +340,7 @@ pub fn convert_exr_sequence(
             return Err(Cancelled.into());
         }
         let src = spec.dir.join(spec.frame_file_name(spec.start + i));
-        let img =
-            image::open(&src).with_context(|| format!("decode {}", src.display()))?;
+        let img = image::open(&src).with_context(|| format!("decode {}", src.display()))?;
         let out = tmp_dir.join(converted.frame_file_name(i));
         to_display_rgba8(img)
             .save_with_format(&out, image::ImageFormat::Png)
@@ -370,7 +372,10 @@ pub fn convert_exr_sequence(
 /// Progress of [`render_to_mp4`]: an EXR sequence converts first, then encodes.
 #[derive(Clone, Copy, Debug)]
 pub enum RenderProgress {
-    Converting { done: u64, total: u64 },
+    Converting {
+        done: u64,
+        total: u64,
+    },
     /// Encode progress, 0..1.
     Rendering(f32),
 }
@@ -532,10 +537,9 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "kuvatin-seqtest-{tag}-{}",
-                std::process::id()
-            ));
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/test-tmp")
+                .join(format!("kuvatin-seqtest-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
@@ -636,7 +640,10 @@ mod tests {
         for i in 0..3u32 {
             let img = image::Rgb32FImage::from_pixel(4, 3, image::Rgb([0.5f32, 0.5, 0.5]));
             image::DynamicImage::ImageRgb32F(img)
-                .save_with_format(t.0.join(format!("r_{i:03}.exr")), image::ImageFormat::OpenExr)
+                .save_with_format(
+                    t.0.join(format!("r_{i:03}.exr")),
+                    image::ImageFormat::OpenExr,
+                )
                 .unwrap();
         }
         let mut spec = detect_sequence(&t.0.join("r_000.exr")).unwrap();
@@ -661,9 +668,15 @@ mod tests {
         assert!(!conv.is_exr());
 
         // Frames exist and carry the sRGB-encoded value (0.5 linear ≈ 188).
-        let png = image::open(conv.dir.join("f000001.png")).unwrap().into_rgba8();
+        let png = image::open(conv.dir.join("f000001.png"))
+            .unwrap()
+            .into_rgba8();
         let px = png.get_pixel(0, 0).0;
-        assert!((186..=190).contains(&px[0]), "srgb(0.5) ≈ 188, got {}", px[0]);
+        assert!(
+            (186..=190).contains(&px[0]),
+            "srgb(0.5) ≈ 188, got {}",
+            px[0]
+        );
         assert_eq!(px[3], 255);
 
         // Second call is a cache hit (no progress callbacks fire).
@@ -679,7 +692,10 @@ mod tests {
         let a = parse_frame_path(Path::new("C:/r/shot_0007.png")).unwrap();
         let b = parse_frame_path(Path::new("C:/r/shot_0120.png")).unwrap();
         let c = parse_frame_path(Path::new("C:/r/other_0007.png")).unwrap();
-        assert_eq!((a.prefix.as_str(), a.pad, a.start, a.count), ("shot_", 4, 7, 0));
+        assert_eq!(
+            (a.prefix.as_str(), a.pad, a.start, a.count),
+            ("shot_", 4, 7, 0)
+        );
         assert!(a.same_sequence(&b));
         assert!(!a.same_sequence(&c));
         assert!(parse_frame_path(Path::new("C:/r/photo.png")).is_err());
@@ -731,7 +747,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("{w}x{h} render: {e:#}"));
             let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
             assert!(len > 1000, "{w}x{h} mp4 too small: {len} bytes");
-            assert!(reported.load(Ordering::Relaxed), "encode progress was reported");
+            assert!(
+                reported.load(Ordering::Relaxed),
+                "encode progress was reported"
+            );
         }
     }
 
@@ -757,6 +776,51 @@ mod tests {
         assert!(!out.exists(), "partial output removed");
     }
 
+    /// Cancelling WHILE the encoder runs — the flag flips inside the first
+    /// progress report — exercises the teardown of a live render pipeline,
+    /// which the pre-start cancel above never reaches. Self-skips without a
+    /// working GStreamer.
+    #[test]
+    fn cancelling_mid_render_stops_and_removes_the_partial() {
+        if crate::project::Project::new(|_| {}).is_err() {
+            eprintln!("skipping cancelling_mid_render_stops_and_removes_the_partial: no GStreamer");
+            return;
+        }
+        let t = TempDir::new("mp4midcancel");
+        // Enough frames that the render outlives the first 100 ms poll even
+        // on a hardware encoder.
+        for i in 1..=600u32 {
+            image::RgbaImage::from_pixel(320, 180, image::Rgba([(i % 255) as u8, 60, 120, 255]))
+                .save(t.0.join(format!("f_{i:03}.png")))
+                .unwrap();
+        }
+        let spec = detect_sequence(&t.0.join("f_001.png")).unwrap();
+        let out = t.0.join("f.mp4");
+        let cancel = AtomicBool::new(false);
+        let mid_render = AtomicBool::new(false);
+        let err = render_to_mp4(
+            &spec,
+            &out,
+            24,
+            |p| {
+                if let RenderProgress::Rendering(f) = p {
+                    if f < 1.0 {
+                        mid_render.store(true, Ordering::Relaxed);
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+            },
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(err.is::<Cancelled>(), "typed cancel, got {err:#}");
+        assert!(!out.exists(), "partial output removed");
+        assert!(
+            mid_render.load(Ordering::Relaxed),
+            "the cancel was requested mid-render"
+        );
+    }
+
     /// A `%` in a frame name must not become a printf directive for
     /// imagesequencesrc (`g_strdup_printf`).
     #[test]
@@ -764,7 +828,10 @@ mod tests {
         let spec = parse_frame_path(Path::new("C:/r/50%_off_take%s_0001.png")).unwrap();
         assert_eq!(spec.pattern_name(), "50%%_off_take%%s_%04d.png");
         // …and the URI carries it percent-encoded on top (each % → %25).
-        assert!(spec.uri().unwrap().contains("50%25%25_off_take%25%25s_%2504d.png"));
+        assert!(spec
+            .uri()
+            .unwrap()
+            .contains("50%25%25_off_take%25%25s_%2504d.png"));
     }
 
     /// Touching a MIDDLE frame changes the cache key (only first/last used to
@@ -810,15 +877,15 @@ mod tests {
         let fresh = mk("cccc", 600, 60);
         let crashed = root.0.join("dddd.tmp-1");
         std::fs::create_dir_all(&crashed).unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&crashed)
-            .ok(); // dir mtime = now; a fresh tmp dir is left alone
+        std::fs::File::options().write(true).open(&crashed).ok(); // dir mtime = now; a fresh tmp dir is left alone
         sweep_cache_in(&root.0, Duration::from_secs(7 * 24 * 3600), 1000);
         assert!(!old.exists(), "aged out");
         assert!(!lru.exists(), "evicted to fit 1000 bytes (LRU first)");
         assert!(fresh.exists(), "newest kept");
-        assert!(crashed.exists(), "a fresh temp dir may belong to a live conversion");
+        assert!(
+            crashed.exists(),
+            "a fresh temp dir may belong to a live conversion"
+        );
     }
 
     #[test]
@@ -839,7 +906,11 @@ mod tests {
         let leftovers = std::fs::read_dir(cache_root())
             .map(|rd| {
                 rd.flatten()
-                    .filter(|e| e.file_name().to_string_lossy().starts_with(&cache_key(&spec)))
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with(&cache_key(&spec))
+                    })
                     .count()
             })
             .unwrap_or(0);

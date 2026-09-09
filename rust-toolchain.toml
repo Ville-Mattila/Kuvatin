@@ -1,0 +1,6 @@
+# One compiler for every build: rustup picks this up locally and on CI, so a
+# tag build can't use a different toolchain than the master run that warmed
+# its cache (and than the developer who tested the release). Bump deliberately.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

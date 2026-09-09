@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Cargo dependencies: one weekly PR batch (RUSTSEC advisories are caught
+  # by cargo-deny on every master run; this keeps the tree from ageing).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor:
+        update-types: ["minor", "patch"]
+  # The SHA-pinned actions in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

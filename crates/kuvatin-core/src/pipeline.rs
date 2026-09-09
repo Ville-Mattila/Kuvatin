@@ -97,11 +97,10 @@ pub fn encode(
             // expectation for logos/screenshots) instead of letting them fall
             // to black through a raw channel drop.
             let rgb = flatten_onto_white(img);
-            let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                Cursor::new(&mut buf),
-                quality,
-            );
-            enc.encode_image(&rgb).map_err(|e| CoreError::Encode(e.to_string()))?;
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut buf), quality);
+            enc.encode_image(&rgb)
+                .map_err(|e| CoreError::Encode(e.to_string()))?;
             Ok(buf)
         }
         OutputFormat::Webp => {
@@ -149,8 +148,7 @@ fn encode_png(img: &DynamicImage, mode: PngOptimize, quality: u8) -> CoreResult<
         PngOptimize::Lossless => {
             let raw = encode_png_plain(img)?;
             let opts = oxipng::Options::from_preset(2);
-            oxipng::optimize_from_memory(&raw, &opts)
-                .map_err(|e| CoreError::Encode(e.to_string()))
+            oxipng::optimize_from_memory(&raw, &opts).map_err(|e| CoreError::Encode(e.to_string()))
         }
         PngOptimize::Lossy => encode_png_lossy(img, quality),
     }
@@ -171,7 +169,8 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
 
     let mut liq = imagequant::new();
     // Best quantization quality (slowest) — closest to pngquant output.
-    liq.set_speed(1).map_err(|e| CoreError::Encode(e.to_string()))?;
+    liq.set_speed(1)
+        .map_err(|e| CoreError::Encode(e.to_string()))?;
     // Map our 0-100 quality to a (min, max) target window. Higher quality raises
     // the floor so the quantizer is allowed fewer color compromises.
     let qmax = quality.min(100);
@@ -305,27 +304,45 @@ pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
 fn write_unique(base: PathBuf, bytes: &[u8]) -> CoreResult<PathBuf> {
     use std::io::Write;
     let dir = base.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string();
-    let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let stem = base
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image")
+        .to_string();
+    let ext = base
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
     let mut candidate = base.clone();
     for n in 0.. {
         if n > 0 {
             candidate = dir.join(format!("{stem}-{n}.{ext}"));
         }
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
             Ok(mut f) => {
                 if let Err(e) = f.write_all(bytes) {
                     // Disk full mid-write: don't leave a half-written file
                     // that looks finished — the name is ours, so remove it.
                     drop(f);
                     let _ = std::fs::remove_file(&candidate);
-                    return Err(CoreError::Io { path: candidate, source: e });
+                    return Err(CoreError::Io {
+                        path: candidate,
+                        source: e,
+                    });
                 }
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
-                return Err(CoreError::Io { path: candidate, source: e });
+                return Err(CoreError::Io {
+                    path: candidate,
+                    source: e,
+                });
             }
         }
     }
@@ -387,9 +404,16 @@ pub fn plan_unique_outputs(targets: Vec<PathBuf>) -> Vec<PathBuf> {
         .into_iter()
         .map(|base| {
             let dir = base.parent().map(Path::to_path_buf).unwrap_or_default();
-            let stem =
-                base.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string();
-            let ext = base.extension().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let stem = base
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("image")
+                .to_string();
+            let ext = base
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             let mut candidate = base.clone();
             let mut n = 0usize;
             while taken.contains(&candidate) || candidate.exists() {
@@ -416,7 +440,11 @@ mod tests {
     fn process_image_crops_then_resizes() {
         let job = Job {
             resize: ResizeMode::Percent { factor: 0.5 },
-            crop: CropMode::FixedSize { width: 100, height: 100, anchor: Default::default() },
+            crop: CropMode::FixedSize {
+                width: 100,
+                height: 100,
+                anchor: Default::default(),
+            },
             ..Job::default()
         };
         // crop 100x100 first, then scale by 0.5 -> 50x50
@@ -428,8 +456,17 @@ mod tests {
     fn rect_crop_then_resize_to_resolution() {
         // Source 800x600, crop the top-left 400x300, then resize to 200x150.
         let job = Job {
-            crop: CropMode::Rect { x: 0, y: 0, width: 400, height: 300 },
-            resize: ResizeMode::Pixels { width: Some(200), height: Some(150), keep_aspect: false },
+            crop: CropMode::Rect {
+                x: 0,
+                y: 0,
+                width: 400,
+                height: 300,
+            },
+            resize: ResizeMode::Pixels {
+                width: Some(200),
+                height: Some(150),
+                keep_aspect: false,
+            },
             ..Job::default()
         };
         let (_img, w, h) = process_image(&sample(800, 600), &job);
@@ -514,7 +551,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.png");
         sample(32, 24).save(&input).unwrap();
-        let job = Job { format: OutputFormat::Webp, ..Job::default() };
+        let job = Job {
+            format: OutputFormat::Webp,
+            ..Job::default()
+        };
         let out = process_file(&input, &job, "test").unwrap();
         assert!(out.exists());
         assert_eq!(out.extension().unwrap(), "webp");
@@ -600,7 +640,10 @@ mod tests {
         let b = dir.path().join("photo.jpg");
         sample(8, 8).save(&a).unwrap();
         sample(8, 8).to_rgb8().save(&b).unwrap();
-        let job = Job { format: OutputFormat::Webp, ..Job::default() };
+        let job = Job {
+            format: OutputFormat::Webp,
+            ..Job::default()
+        };
         let outs: Vec<_> = [a, b]
             .par_iter()
             .map(|p| process_file(p, &job, "t").unwrap())
@@ -670,9 +713,16 @@ mod tests {
 
     #[test]
     fn job_uses_quality_accounts_for_lossy_png() {
-        let lossy_png = Job { png: PngOptimize::Lossy, ..Job::default() };
+        let lossy_png = Job {
+            png: PngOptimize::Lossy,
+            ..Job::default()
+        };
         assert!(lossy_png.uses_quality());
         assert!(!Job::default().uses_quality()); // plain PNG
-        assert!(Job { format: OutputFormat::Jpeg, ..Job::default() }.uses_quality());
+        assert!(Job {
+            format: OutputFormat::Jpeg,
+            ..Job::default()
+        }
+        .uses_quality());
     }
 }

@@ -1,4 +1,4 @@
-import { Button, ComboBox, ProgressIndicator, ListView, LineEdit, SpinBox, CheckBox } from "std-widgets.slint";
+import { Button, ComboBox, ProgressIndicator, ListView, LineEdit, SpinBox, CheckBox, ScrollView } from "std-widgets.slint";
 
 export struct FileRow {
     name: string,
@@ -48,6 +48,9 @@ component QualitySlider inherits Rectangle {
     // Do not absorb the panel's extra vertical space (that's the spacer's job);
     // otherwise the QUALITY group stretches and the slider drops to its middle.
     vertical-stretch: 0;
+    accessible-role: slider;
+    accessible-label: "Quality";
+    accessible-value: root.value + "";
 
     // track
     Rectangle {
@@ -98,7 +101,8 @@ component Card inherits Rectangle {
     border-color: #2c313b;
 }
 
-// Secondary (card-colored) button used for Add/Clear.
+// Secondary (card-colored) button used for Add/Clear. Keyboard-reachable
+// (Tab focus, Enter/Space) and announced as a button to assistive tech.
 component SecondaryButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
@@ -107,11 +111,14 @@ component SecondaryButton inherits Rectangle {
     min-width: 96px;
     border-radius: 8px;
     border-width: 1px;
-    border-color: #2c313b;
+    border-color: fs.has-focus ? #2dd4bf : #2c313b;
     background: !root.enabled
         ? #191d24
         : (ta.pressed ? #2c313b : (ta.has-hover ? #262b34 : #20242c));
-    animate background { duration: 130ms; }
+    animate background, border-color { duration: 130ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
     Text {
         text: root.text;
         color: root.enabled ? #f2f4f8 : #5b6472;
@@ -120,9 +127,90 @@ component SecondaryButton inherits Rectangle {
         vertical-alignment: center;
         animate color { duration: 130ms; }
     }
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
+            return reject;
+        }
+    }
     ta := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { fs.focus(); root.clicked(); }
+    }
+}
+
+// A modal dialog button (Cancel / OK / the primary action). Same keyboard and
+// accessibility contract as SecondaryButton; ≥32 px tall.
+component DialogButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    min-width: 92px;
+    height: 32px;
+    border-radius: 7px;
+    background: !root.enabled
+        ? #191d24
+        : (root.primary
+            ? (ta.has-hover ? #2dd4bf : #22c9b0)
+            : (ta.has-hover ? #2b313c : #20242c));
+    border-width: fs.has-focus ? 2px : (root.primary ? 0px : 1px);
+    border-color: fs.has-focus ? (root.primary ? #ffffff : #2dd4bf) : #343b46;
+    animate background, border-color { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    Text {
+        text: root.text;
+        font-size: 11px;
+        font-weight: root.primary ? 700 : 600;
+        color: !root.enabled ? #5b6472 : (root.primary ? #08110f : #cdd3dc);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { fs.focus(); root.clicked(); }
+    }
+}
+
+// A small square "remove" affordance (×). ≥24 px hit target regardless of the
+// visual size, hover-revealed by the owner via `shown`.
+component RemoveButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> shown: true;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: ta.has-hover ? #ff547033 : transparent;
+    opacity: (root.shown || ta.has-hover) && root.enabled ? 1.0 : 0.0;
+    animate opacity { duration: 130ms; }
+    animate background { duration: 100ms; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    Text {
+        text: "✕";
+        color: ta.has-hover ? #ff8098 : #7a828f;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: 100ms; }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
     }
 }
@@ -197,6 +285,8 @@ component WinButton inherits Rectangle {
     width: 46px;
     background: ta.has-hover ? (root.danger ? #e23b3b : #2c313b) : transparent;
     animate background { duration: 110ms; }
+    accessible-role: button;
+    accessible-label: root.kind == "min" ? "Minimize" : (root.kind == "max" ? "Maximize" : "Close");
     property <color> ink: ta.has-hover && root.danger ? #ffffff : #c8ccd4;
     animate ink { duration: 110ms; }
 
@@ -258,6 +348,10 @@ component SegToggle inherits Rectangle {
             border-radius: 6px;
             background: root.selected == i ? #2dd4bf : (ta.has-hover ? #20242c : transparent);
             animate background { duration: 120ms; }
+            accessible-role: button;
+            accessible-label: seg;
+            accessible-checkable: true;
+            accessible-checked: root.selected == i;
             Text {
                 text: seg;
                 horizontal-alignment: center;
@@ -351,6 +445,10 @@ component PillButton inherits Rectangle {
     border-width: 1px;
     border-color: root.active ? #2dd4bf : #343b46;
     animate background, border-color { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.active;
     HorizontalLayout {
         padding-left: 10px; padding-right: 10px;
         Text {
@@ -363,13 +461,19 @@ component PillButton inherits Rectangle {
 }
 
 // A thin 0..1 slider used for the video scrubber and volume. Reports the new
-// fraction via `changed` on click or drag.
+// fraction via `changed` on click or drag, and `released` when the pointer
+// lets go (the scrubber lands frame-accurately then).
 component Scrubber inherits Rectangle {
     in property <float> value;     // 0..1
+    in property <string> label: "Position";
     callback changed(float);
+    callback released();
     min-height: 18px;
     max-height: 18px;
     horizontal-stretch: 1;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: Math.round(root.value * 100) + "%";
     Rectangle {
         y: parent.height / 2 - 3px;
         height: 6px;
@@ -402,6 +506,9 @@ component Scrubber inherits Rectangle {
         function emit(mx: length) { root.changed(Math.clamp(mx / root.width, 0, 1)); }
         moved => { sta.emit(sta.mouse-x); }
         clicked => { sta.emit(sta.mouse-x); }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.up) { root.released(); }
+        }
     }
 }
 
@@ -415,6 +522,9 @@ component InspSlider inherits Rectangle {
     in-out property <float> value: 0;
     callback changed();
     height: 38px;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: Math.round(root.value) + root.suffix;
     property <float> frac: (root.max - root.min) > 0
         ? Math.clamp((root.value - root.min) / (root.max - root.min), 0, 1) : 0;
     VerticalLayout {
@@ -514,6 +624,9 @@ export component ProgressWindow inherits Window {
                     font-size: 11px; font-weight: 600;
                     horizontal-alignment: center; vertical-alignment: center;
                 }
+                accessible-role: button;
+                accessible-label: "Cancel";
+                accessible-enabled: !root.cancelling;
                 cancel-ta := TouchArea { enabled: !root.cancelling; clicked => { root.cancel(); } }
             }
         }
@@ -568,8 +681,12 @@ export component AppWindow inherits Window {
     in-out property <int> seq-fps: 30;         // one file = one frame at this rate
     callback video-playpause();
     callback video-seek(float);            // fraction 0..1
+    callback seek-done();                  // scrub released → land frame-accurately
     callback video-volume-changed(float);  // 0..1
     in-out property <bool> video-repeat: false;  // loop playback at the end
+    // The GStreamer engine failed to initialise (set from Rust): the media
+    // actions are disabled rather than silently doing nothing.
+    in-out property <bool> video-engine-down: false;
 
     // Timeline editor.
     in property <[TimelineClip]> timeline-clips;
@@ -646,8 +763,6 @@ export component AppWindow inherits Window {
     // (0..1) relative to the displayed image, so the preview size is irrelevant —
     // Rust maps normalized → absolute pixels using the original image dimensions.
     in-out property <bool> cropping: false;
-    in property <float> crop-box-w: 400;   // preview box size in px (matches image aspect)
-    in property <float> crop-box-h: 300;
     in-out property <float> crop-x: 0;
     in-out property <float> crop-y: 0;
     in-out property <float> crop-w: 1;
@@ -677,6 +792,7 @@ export component AppWindow inherits Window {
 
     callback add-files();
     callback clear-files();
+    callback remove-file(int);             // the × on a file row
     callback preset-changed(int);
     callback convert();
     callback save-preset(string);
@@ -698,8 +814,11 @@ export component AppWindow inherits Window {
     // in the numeric fields is never hijacked.
     kbd := FocusScope {
         key-pressed(event) => {
+            // Esc dismisses the topmost modal — every one of them.
             if (root.error-visible && event.text == Key.Escape) { root.error-visible = false; return accept; }
             if (root.export-config && event.text == Key.Escape) { root.export-config = false; return accept; }
+            if (root.seq-config && event.text == Key.Escape) { root.seq-config = false; return accept; }
+            if (root.importing && event.text == Key.Escape) { root.import-cancel(); return accept; }
             // Transport/edit keys are dead during an export (the engine ignores
             // them too — this just keeps the play icon from flipping).
             if (root.app-mode == 1 && !root.exporting) {
@@ -864,6 +983,9 @@ export component AppWindow inherits Window {
                                     ? #2dd4bf18
                                     : (row-ta.has-hover ? #262b34 : (Math.mod(i, 2) == 0 ? transparent : #1c2027));
                                 animate background { duration: 120ms; }
+                                accessible-role: list-item;
+                                accessible-label: row.name + (row.dims == "" ? "" : ", " + row.dims) + ", " + row.status;
+                                accessible-item-selected: root.selected-index == i;
                                 // newly added files fade in
                                 opacity: 0;
                                 animate opacity { duration: 160ms; easing: ease-out; }
@@ -926,6 +1048,14 @@ export component AppWindow inherits Window {
                                         animate color { duration: 250ms; }
                                         font-size: 12px;
                                         vertical-alignment: center;
+                                    }
+                                    // Per-row remove (hover-revealed; never during a run).
+                                    RemoveButton {
+                                        y: (parent.height - self.height) / 2;
+                                        label: "Remove " + row.name;
+                                        shown: row-ta.has-hover;
+                                        enabled: !root.running;
+                                        clicked => { root.remove-file(i); }
                                     }
                                 }
                             }
@@ -1022,10 +1152,11 @@ export component AppWindow inherits Window {
                     }
 
                     // Crop surface: hosts the preview and the inline crop editor.
-                    // The crop math (ported verbatim from the modal) works in the
-                    // crop-box-w/h coordinate system, so the crop UI is rendered as
-                    // a CENTERED region of exactly crop-box-w × crop-box-h px — the
-                    // same coordinate system the modal uses.
+                    // The crop math works in the box-w/h coordinate system: the
+                    // crop UI is rendered as a CENTERED region of exactly
+                    // box-w × box-h px, the largest image-aspect box that fits
+                    // the surface (so a maximised window gets a big editor and
+                    // a small image is scaled up to be workable).
                     crop-surface := Rectangle {
                         vertical-stretch: 1;
                         background: #0b0d11;
@@ -1033,6 +1164,14 @@ export component AppWindow inherits Window {
                         border-width: 1.5px;
                         border-color: #2dd4bf;
                         clip: true;
+
+                        property <float> avail-w: Math.max(1, (self.width - 24px) / 1px);
+                        property <float> avail-h: Math.max(1, (self.height - 24px) / 1px);
+                        property <float> img-ar: root.crop-img-h > 0 && root.crop-img-w > 0
+                            ? root.crop-img-w * 1.0 / root.crop-img-h : 4.0 / 3.0;
+                        property <bool> fit-h: (self.avail-w / self.avail-h) > self.img-ar;
+                        property <float> box-w: self.fit-h ? self.avail-h * self.img-ar : self.avail-w;
+                        property <float> box-h: self.fit-h ? self.avail-h : self.avail-w / self.img-ar;
 
                         // Minimum normalized rect size, so a rectangle can't collapse.
                         property <float> min-n: 0.03;
@@ -1056,7 +1195,7 @@ export component AppWindow inherits Window {
                             self.edge-t = root.crop-y;
                             self.edge-r = root.crop-x + root.crop-w;
                             self.edge-b = root.crop-y + root.crop-h;
-                            self.edge-ratio = (root.crop-w * root.crop-box-w) / (root.crop-h * root.crop-box-h);
+                            self.edge-ratio = (root.crop-w * crop-surface.box-w) / (root.crop-h * crop-surface.box-h);
                         }
 
                         // Apply a corner drag. sgx/sgy pick which edges move (-1 left/top, +1 right/bottom).
@@ -1082,7 +1221,7 @@ export component AppWindow inherits Window {
                             if (root.aspect-lock && self.edge-ratio > 0) {
                                 // Recompute height from width to preserve the on-screen aspect:
                                 // crop-w*box-w : crop-h*box-h == edge-ratio. Solve for crop-h.
-                                root.crop-h = (root.crop-w * root.crop-box-w) / (self.edge-ratio * root.crop-box-h);
+                                root.crop-h = (root.crop-w * crop-surface.box-w) / (self.edge-ratio * crop-surface.box-h);
                                 // Grow/shrink from the anchored corner (the edge that did NOT move).
                                 if (sgy < 0) {
                                     root.crop-y = self.edge-b - root.crop-h;
@@ -1155,8 +1294,8 @@ export component AppWindow inherits Window {
                         if root.selected-index >= 0 && root.cropping: cbox := Rectangle {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
-                            width: root.crop-box-w * 1px;
-                            height: root.crop-box-h * 1px;
+                            width: crop-surface.box-w * 1px;
+                            height: crop-surface.box-h * 1px;
                             border-radius: 6px;
                             clip: true;
                             opacity: 0;
@@ -1197,10 +1336,10 @@ export component AppWindow inherits Window {
                                     }
                                     moved => {
                                         root.crop-x = Math.clamp(
-                                            crop-surface.move-x0 + (self.mouse-x - crop-surface.move-sx) / (root.crop-box-w * 1px),
+                                            crop-surface.move-x0 + (self.mouse-x - crop-surface.move-sx) / (crop-surface.box-w * 1px),
                                             0, 1 - root.crop-w);
                                         root.crop-y = Math.clamp(
-                                            crop-surface.move-y0 + (self.mouse-y - crop-surface.move-sy) / (root.crop-box-h * 1px),
+                                            crop-surface.move-y0 + (self.mouse-y - crop-surface.move-sy) / (crop-surface.box-h * 1px),
                                             0, 1 - root.crop-h);
                                     }
                                 }
@@ -1212,7 +1351,7 @@ export component AppWindow inherits Window {
                             CropHandle {
                                 x: root.crop-x * cbox.width;
                                 y: root.crop-y * cbox.height;
-                                box-w: root.crop-box-w; box-h: root.crop-box-h;
+                                box-w: crop-surface.box-w; box-h: crop-surface.box-h;
                                 sign-x: -1; sign-y: -1;
                                 pressed => { crop-surface.begin-corner(); }
                                 dragged(dx, dy) => { crop-surface.corner(-1, -1, dx, dy); }
@@ -1220,7 +1359,7 @@ export component AppWindow inherits Window {
                             CropHandle {
                                 x: (root.crop-x + root.crop-w) * cbox.width - self.width;
                                 y: root.crop-y * cbox.height;
-                                box-w: root.crop-box-w; box-h: root.crop-box-h;
+                                box-w: crop-surface.box-w; box-h: crop-surface.box-h;
                                 sign-x: 1; sign-y: -1;
                                 pressed => { crop-surface.begin-corner(); }
                                 dragged(dx, dy) => { crop-surface.corner(1, -1, dx, dy); }
@@ -1228,7 +1367,7 @@ export component AppWindow inherits Window {
                             CropHandle {
                                 x: root.crop-x * cbox.width;
                                 y: (root.crop-y + root.crop-h) * cbox.height - self.height;
-                                box-w: root.crop-box-w; box-h: root.crop-box-h;
+                                box-w: crop-surface.box-w; box-h: crop-surface.box-h;
                                 sign-x: -1; sign-y: 1;
                                 pressed => { crop-surface.begin-corner(); }
                                 dragged(dx, dy) => { crop-surface.corner(-1, 1, dx, dy); }
@@ -1236,7 +1375,7 @@ export component AppWindow inherits Window {
                             CropHandle {
                                 x: (root.crop-x + root.crop-w) * cbox.width - self.width;
                                 y: (root.crop-y + root.crop-h) * cbox.height - self.height;
-                                box-w: root.crop-box-w; box-h: root.crop-box-h;
+                                box-w: crop-surface.box-w; box-h: crop-surface.box-h;
                                 sign-x: 1; sign-y: 1;
                                 pressed => { crop-surface.begin-corner(); }
                                 dragged(dx, dy) => { crop-surface.corner(1, 1, dx, dy); }
@@ -1409,7 +1548,19 @@ export component AppWindow inherits Window {
                             : (convert-ta.pressed
                                 ? #14b8a6
                                 : (convert-ta.has-hover ? #14b8a6 : #2dd4bf));
+                        border-width: convert-fs.has-focus ? 2px : 0px;
+                        border-color: #ffffff;
                         animate background { duration: 150ms; }
+                        accessible-role: button;
+                        accessible-label: root.running ? "Converting" : "Convert";
+                        accessible-enabled: !root.running;
+                        convert-fs := FocusScope {
+                            enabled: !root.running;
+                            key-pressed(e) => {
+                                if (!root.running && (e.text == Key.Return || e.text == " ")) { root.convert(); return accept; }
+                                return reject;
+                            }
+                        }
                         Text {
                             text: root.running ? "Converting…" : "Convert";
                             color: root.running ? #9aa3b2 : #08110f;
@@ -1421,7 +1572,7 @@ export component AppWindow inherits Window {
                         }
                         convert-ta := TouchArea {
                             enabled: !root.running;
-                            clicked => { root.convert(); }
+                            clicked => { convert-fs.focus(); root.convert(); }
                         }
                     }
                 }
@@ -1469,6 +1620,8 @@ export component AppWindow inherits Window {
                                     opacity: 0;
                                     animate opacity { duration: 160ms; easing: ease-out; }
                                     init => { self.opacity = 1; }
+                                    accessible-role: list-item;
+                                    accessible-label: asset.name + ", add to timeline";
                                     asset-ta := TouchArea { clicked => { root.video-add(i); } }
                                     HorizontalLayout {
                                         padding-left: 8px; padding-right: 8px; spacing: 8px;
@@ -1484,26 +1637,18 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center; opacity: asset-ta.has-hover ? 1.0 : 0.0;
                                             animate opacity { duration: 130ms; }
                                         }
-                                        Rectangle {
-                                            width: 18px; height: 18px; y: (parent.height - self.height) / 2;
-                                            border-radius: 5px;
-                                            background: rm-ta.has-hover ? #ff547033 : transparent;
-                                            opacity: asset-ta.has-hover || rm-ta.has-hover ? 1.0 : 0.0;
-                                            animate opacity { duration: 130ms; }
-                                            animate background { duration: 100ms; }
-                                            Text {
-                                                text: "✕"; color: rm-ta.has-hover ? #ff8098 : #7a828f; font-size: 10px;
-                                                horizontal-alignment: center; vertical-alignment: center;
-                                                animate color { duration: 100ms; }
-                                            }
-                                            rm-ta := TouchArea { clicked => { root.video-bin-removed(i); } }
+                                        RemoveButton {
+                                            y: (parent.height - self.height) / 2;
+                                            label: "Remove " + asset.name + " from the media bin";
+                                            shown: asset-ta.has-hover;
+                                            clicked => { root.video-bin-removed(i); }
                                         }
                                     }
                                 }
                             }
                         }
-                        SecondaryButton { text: "Open media…"; clicked => { root.video-open(); } }
-                        SecondaryButton { text: "Import sequence…"; clicked => { root.video-open-sequence(); } }
+                        SecondaryButton { text: "Open media…"; enabled: !root.video-engine-down; clicked => { root.video-open(); } }
+                        SecondaryButton { text: "Import sequence…"; enabled: !root.video-engine-down; clicked => { root.video-open-sequence(); } }
                     }
                 }
 
@@ -1618,6 +1763,8 @@ export component AppWindow inherits Window {
                             width: 32px; border-radius: 8px;
                             background: pp-ta.has-hover ? #20242c : transparent;
                             animate background { duration: 110ms; }
+                            accessible-role: button;
+                            accessible-label: root.video-playing ? "Pause" : "Play";
                             // Two stacked icons cross-fading beats an instant source swap.
                             Image {
                                 source: @image-url("../assets/ic_play.svg");
@@ -1640,6 +1787,10 @@ export component AppWindow inherits Window {
                             width: 32px; border-radius: 8px;
                             background: root.video-repeat ? #2dd4bf22 : (rp-ta.has-hover ? #20242c : transparent);
                             animate background { duration: 110ms; }
+                            accessible-role: button;
+                            accessible-label: "Repeat";
+                            accessible-checkable: true;
+                            accessible-checked: root.video-repeat;
                             Image {
                                 source: @image-url("../assets/ic_repeat.svg");
                                 colorize: root.video-repeat ? #2dd4bf : #9aa3b2; width: 16px; height: 16px;
@@ -1649,9 +1800,9 @@ export component AppWindow inherits Window {
                             rp-ta := TouchArea { clicked => { root.video-repeat = !root.video-repeat; } }
                         }
                         Text { text: root.video-time; color: #9aa3b2; font-size: 11px; vertical-alignment: center; }
-                        Scrubber { value: root.video-position; changed(f) => { root.video-seek(f); } }
+                        Scrubber { value: root.video-position; changed(f) => { root.video-seek(f); } released => { root.seek-done(); } }
                         Image { source: @image-url("../assets/ic_volume.svg"); colorize: #9aa3b2; width: 15px; height: 15px; }
-                        Scrubber { width: 70px; value: root.video-volume; changed(f) => { root.video-volume-changed(f); } }
+                        Scrubber { width: 70px; label: "Volume"; value: root.video-volume; changed(f) => { root.video-volume-changed(f); } }
                     }
                 }
 
@@ -1746,18 +1897,30 @@ export component AppWindow inherits Window {
                             Rectangle { horizontal-stretch: 1; }
                             Text { text: "drag clips to arrange"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
                             exp-btn := Rectangle {
-                                width: 74px; y: (parent.height - self.height) / 2; height: 19px;
+                                // Nothing to export from an empty timeline (or a dead engine).
+                                property <bool> can-export: root.timeline-clips.length > 0 && !root.video-engine-down;
+                                width: 74px; y: (parent.height - self.height) / 2; height: 22px;
                                 border-radius: 5px;
-                                background: exp-ta.has-hover ? #2dd4bf : #22c9b0;
+                                background: !self.can-export ? #1d3f3a : (exp-ta.has-hover ? #2dd4bf : #22c9b0);
                                 animate background { duration: 120ms; }
-                                Text { text: "Export"; color: #08110f; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                accessible-role: button;
+                                accessible-label: "Export";
+                                accessible-enabled: self.can-export;
+                                Text {
+                                    text: "Export"; color: exp-btn.can-export ? #08110f : #5b6472; font-size: 10px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
                                 // Open the export settings dialog, defaulting the output
                                 // size to the current canvas.
-                                exp-ta := TouchArea { clicked => {
-                                    root.export-w = root.canvas-w;
-                                    root.export-h = root.canvas-h;
-                                    root.export-config = true;
-                                } }
+                                exp-ta := TouchArea {
+                                    enabled: exp-btn.can-export;
+                                    mouse-cursor: exp-btn.can-export ? MouseCursor.pointer : MouseCursor.not-allowed;
+                                    clicked => {
+                                        root.export-w = root.canvas-w;
+                                        root.export-h = root.canvas-h;
+                                        root.export-config = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -1817,6 +1980,7 @@ export component AppWindow inherits Window {
                                 moved => { scrub-ta.seek(self.mouse-x); }
                                 pointer-event(ev) => {
                                     if (ev.kind == PointerEventKind.down) { scrub-ta.seek(self.mouse-x); }
+                                    if (ev.kind == PointerEventKind.up) { root.seek-done(); }
                                 }
                             }
 
@@ -1886,16 +2050,23 @@ export component AppWindow inherits Window {
                                     Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
                                     Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
                                     // Delete affordance on the selected clip (also Delete key).
+                                    // The visible square is 16 px; the hit area spans the
+                                    // clip's full height and 24 px of width.
                                     if clip.selected : Rectangle {
                                         x: parent.width - self.width - 3px; y: 3px;
-                                        width: 15px; height: 15px; border-radius: 5px;
+                                        width: 16px; height: 16px; border-radius: 5px;
                                         background: del-ta.has-hover ? #ff5470 : #00000088;
                                         animate background { duration: 100ms; }
                                         opacity: 0;
                                         animate opacity { duration: 140ms; }
                                         init => { self.opacity = 1; }
+                                        accessible-role: button;
+                                        accessible-label: "Remove " + clip.name + " from the timeline";
                                         Text { text: "✕"; color: white; font-size: 9px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                                        del-ta := TouchArea { clicked => { root.timeline-clip-removed(i); } }
+                                        del-ta := TouchArea {
+                                            x: -6px; y: -3px; width: 24px; height: 22px;
+                                            clicked => { root.timeline-clip-removed(i); }
+                                        }
                                     }
                                 }
 
@@ -1929,9 +2100,9 @@ export component AppWindow inherits Window {
                                     }
                                     clicked => { root.timeline-select(i); }
                                 }
-                                // left-edge trim (on top of the body)
+                                // left-edge trim (on top of the body); 12 px grips
                                 Rectangle {
-                                    x: 0; width: 8px; height: parent.height; background: transparent;
+                                    x: 0; width: 12px; height: parent.height; background: transparent;
                                     TouchArea {
                                         mouse-cursor: ew-resize;
                                         moved => { blk.dmode = 2; blk.ddx = self.mouse-x - self.pressed-x; }
@@ -1948,7 +2119,7 @@ export component AppWindow inherits Window {
                                 }
                                 // right-edge trim
                                 Rectangle {
-                                    x: parent.width - 8px; width: 8px; height: parent.height; background: transparent;
+                                    x: parent.width - 12px; width: 12px; height: parent.height; background: transparent;
                                     TouchArea {
                                         mouse-cursor: ew-resize;
                                         moved => { blk.dmode = 3; blk.ddx = self.mouse-x - self.pressed-x; }
@@ -2115,14 +2286,7 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     alignment: center;
-                    Rectangle {
-                        width: 92px; height: 30px; border-radius: 7px;
-                        background: imp-cancel-ta.has-hover ? #2b313c : #20242c;
-                        animate background { duration: 120ms; }
-                        border-width: 1px; border-color: #343b46;
-                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        imp-cancel-ta := TouchArea { clicked => { root.import-cancel(); } }
-                    }
+                    DialogButton { text: "Cancel"; clicked => { root.import-cancel(); } }
                 }
             }
         }
@@ -2198,19 +2362,11 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 10px;
                     Rectangle { horizontal-stretch: 1; }
-                    Rectangle {
-                        width: 92px; height: 32px; border-radius: 7px;
-                        background: cancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
-                        animate background { duration: 120ms; }
-                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        cancel-ta := TouchArea { clicked => { root.export-config = false; } }
-                    }
-                    Rectangle {
-                        width: 112px; height: 32px; border-radius: 7px;
-                        background: exp2-ta.has-hover ? #2dd4bf : #22c9b0;
-                        animate background { duration: 120ms; }
-                        Text { text: "Export…"; color: #08110f; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                        exp2-ta := TouchArea { clicked => { root.export-config = false; root.video-export(); } }
+                    DialogButton { text: "Cancel"; clicked => { root.export-config = false; } }
+                    DialogButton {
+                        text: "Export…"; primary: true; min-width: 112px;
+                        enabled: root.timeline-clips.length > 0;
+                        clicked => { root.export-config = false; root.video-export(); }
                     }
                 }
             }
@@ -2257,14 +2413,7 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     alignment: center;
-                    Rectangle {
-                        width: 92px; height: 30px;
-                        border-radius: 7px;
-                        background: xcancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
-                        animate background { duration: 120ms; }
-                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        xcancel-ta := TouchArea { clicked => { root.export-cancel(); } }
-                    }
+                    DialogButton { text: "Cancel"; clicked => { root.export-cancel(); } }
                 }
             }
         }
@@ -2311,19 +2460,10 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 10px;
                     Rectangle { horizontal-stretch: 1; }
-                    Rectangle {
-                        width: 92px; height: 32px; border-radius: 7px;
-                        background: seq-cancel-ta.has-hover ? #2b313c : #20242c; border-width: 1px; border-color: #343b46;
-                        animate background { duration: 120ms; }
-                        Text { text: "Cancel"; color: #cdd3dc; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
-                        seq-cancel-ta := TouchArea { clicked => { root.seq-config = false; } }
-                    }
-                    Rectangle {
-                        width: 132px; height: 32px; border-radius: 7px;
-                        background: seq-add-ta.has-hover ? #2dd4bf : #22c9b0;
-                        animate background { duration: 120ms; }
-                        Text { text: "Add to timeline"; color: #08110f; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                        seq-add-ta := TouchArea { clicked => { root.seq-config = false; root.seq-confirm(); } }
+                    DialogButton { text: "Cancel"; clicked => { root.seq-config = false; } }
+                    DialogButton {
+                        text: "Add to timeline"; primary: true; min-width: 132px;
+                        clicked => { root.seq-config = false; root.seq-confirm(); }
                     }
                 }
             }
@@ -2338,15 +2478,22 @@ export component AppWindow inherits Window {
         animate opacity { duration: 150ms; easing: ease-out; }
         init => { self.opacity = 1; }
         TouchArea {}
-        Rectangle {
+        // Content-sized card: grows with the detail text up to most of the
+        // window, then the detail scrolls — twenty file names used to render
+        // straight over the OK button.
+        err-card := Rectangle {
             property <length> rise: 14px;
             animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
             init => { self.rise = 0px; }
-            width: 420px; height: 200px;
+            property <length> chrome: 24px * 2 + 26px + 12px * 2 + 32px;
+            width: 460px;
+            height: Math.min(parent.height - 80px, Math.max(200px, self.chrome + err-detail.preferred-height + 8px));
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2 + self.rise;
             background: #1b1f27; border-radius: 12px;
             border-width: 1px; border-color: #4a2a30;
+            accessible-role: text;
+            accessible-label: root.error-title + ". " + root.error-detail;
             VerticalLayout {
                 padding: 24px; spacing: 12px;
                 HorizontalLayout {
@@ -2355,22 +2502,22 @@ export component AppWindow inherits Window {
                         width: 26px; height: 26px; border-radius: 13px; background: #ff547022;
                         Text { text: "!"; color: #ff7088; font-size: 16px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
                     }
-                    Text { text: root.error-title; color: #f2f4f8; font-size: 15px; font-weight: 700; vertical-alignment: center; }
+                    Text { text: root.error-title; color: #f2f4f8; font-size: 15px; font-weight: 700; vertical-alignment: center; overflow: elide; }
                 }
-                Text {
-                    text: root.error-detail;
-                    color: #9aa3b2; font-size: 12px; wrap: word-wrap;
+                ScrollView {
                     vertical-stretch: 1;
+                    viewport-width: self.visible-width;
+                    viewport-height: Math.max(self.visible-height, err-detail.preferred-height);
+                    err-detail := Text {
+                        x: 0; y: 0;
+                        width: err-card.width - 48px;
+                        text: root.error-detail;
+                        color: #9aa3b2; font-size: 12px; wrap: word-wrap;
+                    }
                 }
                 HorizontalLayout {
                     Rectangle { horizontal-stretch: 1; }
-                    Rectangle {
-                        width: 88px; height: 32px;
-                        border-radius: 7px; background: err-ok-ta.has-hover ? #2dd4bf : #22c9b0;
-                        animate background { duration: 120ms; }
-                        Text { text: "OK"; color: #08110f; font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                        err-ok-ta := TouchArea { clicked => { root.error-visible = false; } }
-                    }
+                    DialogButton { text: "OK"; primary: true; min-width: 88px; clicked => { root.error-visible = false; } }
                 }
             }
         }

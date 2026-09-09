@@ -70,7 +70,10 @@ mod tests {
         }
         assert!(is_input_extension("JFIF"));
         assert!(is_input_extension("tif"));
-        assert!(!is_input_extension("exr"), "EXR is a sequence frame, not an image input");
+        assert!(
+            !is_input_extension("exr"),
+            "EXR is a sequence frame, not an image input"
+        );
         assert!(!is_input_extension("txt"));
     }
 

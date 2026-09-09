@@ -13,9 +13,14 @@ pub enum ResizeMode {
         keep_aspect: bool,
     },
     /// Scale both dimensions by `factor` (1.0 = unchanged).
-    Percent { factor: f32 },
+    Percent {
+        factor: f32,
+    },
     /// Largest size that fits within width x height, preserving aspect ratio.
-    FitBox { width: u32, height: u32 },
+    FitBox {
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Ceiling on either output dimension. A hand-edited preset (factor = 1000,
@@ -91,7 +96,10 @@ mod tests {
 
     #[test]
     fn none_keeps_size() {
-        assert_eq!(compute_target_dimensions(ResizeMode::None, 800, 600), (800, 600));
+        assert_eq!(
+            compute_target_dimensions(ResizeMode::None, 800, 600),
+            (800, 600)
+        );
     }
 
     #[test]
@@ -102,19 +110,30 @@ mod tests {
 
     #[test]
     fn fitbox_preserves_aspect() {
-        let m = ResizeMode::FitBox { width: 1920, height: 1080 };
+        let m = ResizeMode::FitBox {
+            width: 1920,
+            height: 1080,
+        };
         assert_eq!(compute_target_dimensions(m, 4000, 3000), (1440, 1080));
     }
 
     #[test]
     fn pixels_width_only_keeps_aspect() {
-        let m = ResizeMode::Pixels { width: Some(400), height: None, keep_aspect: true };
+        let m = ResizeMode::Pixels {
+            width: Some(400),
+            height: None,
+            keep_aspect: true,
+        };
         assert_eq!(compute_target_dimensions(m, 800, 600), (400, 300));
     }
 
     #[test]
     fn pixels_both_no_aspect_is_exact() {
-        let m = ResizeMode::Pixels { width: Some(123), height: Some(45), keep_aspect: false };
+        let m = ResizeMode::Pixels {
+            width: Some(123),
+            height: Some(45),
+            keep_aspect: false,
+        };
         assert_eq!(compute_target_dimensions(m, 800, 600), (123, 45));
     }
 

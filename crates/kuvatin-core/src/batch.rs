@@ -46,7 +46,12 @@ pub const CANCELLED: &str = "cancelled";
 /// Run `job` over every input in parallel. `on_progress` is called once per
 /// finished file (from worker threads — it must be `Sync`). A single failing
 /// file never aborts the batch; its error is captured in the returned results.
-pub fn run_batch<F>(inputs: &[PathBuf], job: &Job, preset_name: &str, on_progress: F) -> Vec<FileResult>
+pub fn run_batch<F>(
+    inputs: &[PathBuf],
+    job: &Job,
+    preset_name: &str,
+    on_progress: F,
+) -> Vec<FileResult>
 where
     F: Fn(Progress) + Sync,
 {
@@ -98,13 +103,23 @@ where
         .par_iter()
         .map(|(input, job)| {
             if cancelled() {
-                return FileResult { input: input.clone(), outcome: Err(CANCELLED.into()) };
+                return FileResult {
+                    input: input.clone(),
+                    outcome: Err(CANCELLED.into()),
+                };
             }
             let outcome =
                 isolate(|| process_file(input, job, preset_name).map_err(|e| e.to_string()));
-            let result = FileResult { input: input.clone(), outcome };
+            let result = FileResult {
+                input: input.clone(),
+                outcome,
+            };
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-            on_progress(Progress { done: n, total, last: result.clone() });
+            on_progress(Progress {
+                done: n,
+                total,
+                last: result.clone(),
+            });
             result
         })
         .collect()
@@ -124,9 +139,16 @@ where
         .map(|(input, job, output)| {
             let outcome =
                 isolate(|| process_file_to(input, job, output).map_err(|e| e.to_string()));
-            let result = FileResult { input: input.clone(), outcome };
+            let result = FileResult {
+                input: input.clone(),
+                outcome,
+            };
             let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-            on_progress(Progress { done: n, total, last: result.clone() });
+            on_progress(Progress {
+                done: n,
+                total,
+                last: result.clone(),
+            });
             result
         })
         .collect()
@@ -143,11 +165,16 @@ mod tests {
     fn batch_processes_all_and_isolates_failures() {
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("good.png");
-        RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255])).save(&good).unwrap();
+        RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]))
+            .save(&good)
+            .unwrap();
         let bad = dir.path().join("bad.png");
         std::fs::write(&bad, b"not an image").unwrap();
 
-        let job = Job { format: OutputFormat::Jpeg, ..Job::default() };
+        let job = Job {
+            format: OutputFormat::Jpeg,
+            ..Job::default()
+        };
         let calls = AtomicUsize::new(0);
         let results = run_batch(&[good.clone(), bad.clone()], &job, "t", |_p| {
             calls.fetch_add(1, Ordering::SeqCst);
@@ -171,14 +198,22 @@ mod tests {
         let inputs: Vec<PathBuf> = (0..8)
             .map(|i| {
                 let p = dir.path().join(format!("{i}.png"));
-                RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255])).save(&p).unwrap();
+                RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]))
+                    .save(&p)
+                    .unwrap();
                 p
             })
             .collect();
-        let job = Job { format: OutputFormat::Jpeg, ..Job::default() };
+        let job = Job {
+            format: OutputFormat::Jpeg,
+            ..Job::default()
+        };
         let stop = AtomicBool::new(false);
         let calls = AtomicUsize::new(0);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
         let results = pool.install(|| {
             run_batch_until(
                 &inputs,
@@ -196,8 +231,15 @@ mod tests {
             .iter()
             .filter(|r| r.outcome.as_ref().err().map(String::as_str) == Some(CANCELLED))
             .count();
-        assert!(skipped >= 4, "most inputs skipped after cancel, got {skipped}");
-        assert_eq!(calls.load(Ordering::SeqCst), 8 - skipped, "no progress for skipped inputs");
+        assert!(
+            skipped >= 4,
+            "most inputs skipped after cancel, got {skipped}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            8 - skipped,
+            "no progress for skipped inputs"
+        );
     }
 
     /// A panicking worker becomes an Err result — it must not unwind the batch
@@ -208,7 +250,10 @@ mod tests {
         let err = outcome.unwrap_err();
         assert!(err.contains("boom in codec"), "got: {err}");
         // And a normal closure passes through untouched.
-        assert_eq!(isolate(|| Ok(PathBuf::from("x"))).unwrap(), PathBuf::from("x"));
+        assert_eq!(
+            isolate(|| Ok(PathBuf::from("x"))).unwrap(),
+            PathBuf::from("x")
+        );
     }
 
     #[test]
@@ -217,15 +262,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.png");
         let b = dir.path().join("b.png");
-        RgbaImage::from_pixel(20, 20, Rgba([5, 5, 5, 255])).save(&a).unwrap();
-        RgbaImage::from_pixel(20, 20, Rgba([5, 5, 5, 255])).save(&b).unwrap();
+        RgbaImage::from_pixel(20, 20, Rgba([5, 5, 5, 255]))
+            .save(&a)
+            .unwrap();
+        RgbaImage::from_pixel(20, 20, Rgba([5, 5, 5, 255]))
+            .save(&b)
+            .unwrap();
         let items = vec![
-            (a.clone(), Job { format: OutputFormat::Jpeg, ..Job::default() }),
-            (b.clone(), Job { format: OutputFormat::Webp, ..Job::default() }),
+            (
+                a.clone(),
+                Job {
+                    format: OutputFormat::Jpeg,
+                    ..Job::default()
+                },
+            ),
+            (
+                b.clone(),
+                Job {
+                    format: OutputFormat::Webp,
+                    ..Job::default()
+                },
+            ),
         ];
         let results = run_jobs(&items, "t", |_p| {});
-        let ra = results.iter().find(|r| r.input == a).unwrap().outcome.as_ref().unwrap();
-        let rb = results.iter().find(|r| r.input == b).unwrap().outcome.as_ref().unwrap();
+        let ra = results
+            .iter()
+            .find(|r| r.input == a)
+            .unwrap()
+            .outcome
+            .as_ref()
+            .unwrap();
+        let rb = results
+            .iter()
+            .find(|r| r.input == b)
+            .unwrap()
+            .outcome
+            .as_ref()
+            .unwrap();
         assert_eq!(ra.extension().unwrap(), "jpg");
         assert_eq!(rb.extension().unwrap(), "webp");
     }

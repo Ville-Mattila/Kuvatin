@@ -1,22 +1,25 @@
-use crate::collect::collect_images;
+use crate::collect::{collect_images, collect_media};
 use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_jobs_to;
-use kuvatin_core::naming::{output_file_name, subfolder_name};
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::format::OutputFormat;
+use kuvatin_core::naming::{output_file_name, subfolder_name};
 use kuvatin_core::pipeline::{decode_oriented, plan_unique_outputs, Job, PngOptimize};
 use kuvatin_core::preset::PresetStore;
+use kuvatin_core::resize::ResizeMode;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
-/// Video containers the media dialog offers (what GStreamer demuxes here).
-const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"];
+/// Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
+/// not present here are converted with the base job (no crop override).
+type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
 
 /// Show the app's error dialog with `title` + `detail`. The one place failures
 /// become visible — in the release windowed build there is no stderr.
@@ -26,8 +29,109 @@ fn show_error(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
     ui.set_error_visible(true);
 }
 
+/// Join file names for a dialog, capped so twenty failures don't overflow it
+/// (the headless path uses the same cap).
+fn name_list(names: &[String]) -> String {
+    let mut s = names
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if names.len() > 10 {
+        s.push_str(&format!("\n\u{2026}and {} more", names.len() - 10));
+    }
+    s
+}
+
+/// Paths already queued or in the media bin, keyed by their canonical form so
+/// `C:\x.mp4` and `c:\x.mp4` (or a `..`-relative spelling) are one file.
+#[derive(Default)]
+struct SeenSet(std::collections::HashSet<PathBuf>);
+
+impl SeenSet {
+    fn key(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+    /// Whether `p` was new.
+    fn insert(&mut self, p: &Path) -> bool {
+        self.0.insert(Self::key(p))
+    }
+    #[cfg(test)]
+    fn contains(&self, p: &Path) -> bool {
+        self.0.contains(&Self::key(p))
+    }
+    fn remove(&mut self, p: &Path) {
+        self.0.remove(&Self::key(p));
+    }
+    fn reseed<'a>(&mut self, keep: impl IntoIterator<Item = &'a PathBuf>) {
+        self.0 = keep.into_iter().map(|p| Self::key(p)).collect();
+    }
+}
+
+/// The media import queue. Dropped/opened paths go to a worker thread
+/// (discovery off the UI thread); every batch is stamped with `gen`, and a
+/// cancel bumps it, so the worker and the drain discard anything queued before
+/// — no cancelled stragglers revived by the next drop, no double-counted files.
+struct ImportQueue {
+    tx: std::sync::mpsc::Sender<(u64, PathBuf)>,
+    /// Files in the current import (drives the progress modal); 0 = idle.
+    total: Cell<usize>,
+    done: Cell<usize>,
+    gen: Arc<AtomicU64>,
+    seen: RefCell<SeenSet>,
+}
+
+impl ImportQueue {
+    fn current_gen(&self) -> u64 {
+        self.gen.load(Ordering::Relaxed)
+    }
+
+    /// Expand folders, keep media, queue what's new and open the progress
+    /// modal. Explicitly dropped EXR frames get a pointer at "Import sequence…"
+    /// instead of a slow GES failure.
+    fn enqueue(&self, ui: &AppWindow, picked: Vec<PathBuf>) {
+        let (media, frames_only) = collect_media(&picked);
+        let gen = self.current_gen();
+        let mut queued = 0;
+        for path in media {
+            if !self.seen.borrow_mut().insert(&path) {
+                continue; // already queued or in the bin
+            }
+            let _ = self.tx.send((gen, path));
+            self.total.set(self.total.get() + 1);
+            queued += 1;
+        }
+        if queued > 0 {
+            ui.set_importing(true);
+            ui.set_import_total(self.total.get() as i32);
+        }
+        if !frames_only.is_empty() {
+            show_error(
+                ui,
+                "EXR frames import as a sequence",
+                format!(
+                    "{} EXR file(s) were skipped. Use Import sequence\u{2026} and pick the first frame of the run.",
+                    frames_only.len()
+                ),
+            );
+        }
+    }
+
+    /// Abandon everything queued: later arrivals of the old generation are
+    /// dropped, and "seen" is re-seeded from what actually reached the bin so
+    /// the discarded files can be imported again.
+    fn cancel<'a>(&self, in_bin: impl IntoIterator<Item = &'a PathBuf>) {
+        self.gen.fetch_add(1, Ordering::Relaxed);
+        self.total.set(0);
+        self.done.set(0);
+        self.seen.borrow_mut().reseed(in_bin);
+    }
+}
+
 /// Remove the timeline clip at model index `i` from GES, the model, and fix up
-/// the selection (shared by the clip's × button and the Delete key).
+/// the selection and the timeline length (shared by the clip's × button and
+/// the Delete key).
 fn remove_timeline_clip(
     i: i32,
     ui_weak: &slint::Weak<AppWindow>,
@@ -38,12 +142,19 @@ fn remove_timeline_clip(
     if i < 0 || (i as usize) >= tl_clips.row_count() {
         return;
     }
+    let mut duration = None;
     if let Some(row) = tl_clips.row_data(i as usize) {
         if let Some(p) = project_slot.borrow_mut().as_mut() {
             p.remove_clip(&kuvatin_video::ClipId(row.id.to_string()));
+            duration = Some(p.duration());
         }
     }
     tl_clips.remove(i as usize);
+    if let (Some(ui), Some(d)) = (ui_weak.upgrade(), duration) {
+        // Deleting the last clip used to leave the lane and scrollbar at the
+        // old length.
+        ui.set_timeline_duration(d.map(|d| d.as_secs_f32()).unwrap_or(0.0));
+    }
     // Keep selection consistent: the removed clip is gone; rows above it shift down.
     let sel = sel_idx.get();
     if sel == i {
@@ -75,7 +186,18 @@ fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Proje
     }) {
         Ok(project) => Some(project),
         Err(e) => {
-            eprintln!("video project init error: {e:#}");
+            // Without this, every bin click was a silent no-op for the rest of
+            // the session (the windowed build has no stderr).
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_video_engine_down(true);
+                show_error(
+                    &ui,
+                    "Video engine unavailable",
+                    format!(
+                        "{e:#}\n\nThe video editor needs the bundled GStreamer runtime next to kuvatin.exe; reinstalling Kuvatin restores it."
+                    ),
+                );
+            }
             None
         }
     }
@@ -247,7 +369,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
 
     // Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
     // not present here are converted with the base job (no crop override).
-    type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
+
     let crops: Arc<Mutex<CropMap>> = Arc::new(Mutex::new(HashMap::new()));
 
     // Path-keyed thumbnail cache (see `ThumbCache`): lets row rebuilds restore
@@ -269,18 +391,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
     let edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>> = Arc::new(Mutex::new(None));
 
-    // Selecting a preset syncs the format/quality controls to that preset's job.
+    // Selecting a preset syncs every control (format, quality, resolution,
+    // naming) to that preset's job — a stale resolution override no longer
+    // survives into "Original size".
     {
         let store = store.clone();
         let ui_weak = ui.as_weak();
         ui.on_preset_changed(move |idx| {
             let store = store.lock().unwrap();
             if let (Some(ui), Some(p)) = (ui_weak.upgrade(), store.presets.get(idx as usize)) {
-                ui.set_format(format_combo_str(p.job.format).into());
-                ui.set_quality(p.job.quality as i32);
-                ui.set_png_mode(png_mode_to_idx(p.job.png));
-                ui.set_suffix(p.job.output.suffix.clone().into());
-                ui.set_save_subfolder(p.job.output.subfolder);
+                sync_controls(&ui, &p.job);
                 ui.set_preset_name(p.name.clone().into());
             }
         });
@@ -330,26 +450,25 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // thread (warming the GES asset cache); a UI timer then adds each cache-warm
     // clip quickly. So importing many files shows a progress modal instead of
     // freezing the app for the whole batch.
-    // (path, thumbnail, Some(error) if discovery failed → not addable).
-    type ImportItem = (PathBuf, Option<kuvatin_video::Frame>, Option<String>);
-    let (import_tx, import_rx) = std::sync::mpsc::channel::<PathBuf>();
+    // (generation, path, thumbnail, Some(error) if discovery failed → not addable).
+    type ImportItem = (u64, PathBuf, Option<kuvatin_video::Frame>, Option<String>);
+    let (import_tx, import_rx) = std::sync::mpsc::channel::<(u64, PathBuf)>();
     let import_ready: Arc<Mutex<std::collections::VecDeque<ImportItem>>> =
         Arc::new(Mutex::new(std::collections::VecDeque::new()));
-    let import_total = Rc::new(std::cell::Cell::new(0usize));
-    let import_done = Rc::new(std::cell::Cell::new(0usize));
-    // Cancel flag (shared with the worker so a Cancel drains the queue fast).
-    let import_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Paths already queued or in the bin, so re-dropping a file doesn't duplicate it.
-    let import_seen: Rc<RefCell<std::collections::HashSet<PathBuf>>> =
-        Rc::new(RefCell::new(std::collections::HashSet::new()));
+    let import_q = Rc::new(ImportQueue {
+        tx: import_tx,
+        total: Cell::new(0),
+        done: Cell::new(0),
+        gen: Arc::new(AtomicU64::new(0)),
+        seen: RefCell::new(SeenSet::default()),
+    });
     {
         let ready = import_ready.clone();
-        let cancel = import_cancel.clone();
+        let gen = import_q.gen.clone();
         std::thread::spawn(move || {
-            use std::sync::atomic::Ordering;
-            for path in import_rx {
-                // On cancel, drain remaining paths without the expensive discovery.
-                if cancel.load(Ordering::Relaxed) {
+            for (item_gen, path) in import_rx {
+                // A cancelled batch drains without the expensive discovery.
+                if item_gen != gen.load(Ordering::Relaxed) {
                     continue;
                 }
                 let warm = kuvatin_video::warm_asset(&path);
@@ -359,7 +478,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 } else {
                     None
                 };
-                ready.lock().unwrap().push_back((path, thumb, err));
+                ready
+                    .lock()
+                    .unwrap()
+                    .push_back((item_gen, path, thumb, err));
             }
         });
     }
@@ -390,12 +512,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         std::mem::forget(setup_timer);
 
         // Drain dropped paths on the UI thread. Images go to the file list;
-        // videos are queued for the import worker (discovered off-thread, then
+        // media is queued for the import worker (discovered off-thread, then
         // added by the import timer) so a big drop doesn't freeze the app.
-        let import_tx = import_tx.clone();
-        let import_total = import_total.clone();
-        let import_cancel = import_cancel.clone();
-        let import_seen = import_seen.clone();
+        let import_q = import_q.clone();
         let drain_timer = slint::Timer::default();
         drain_timer.start(
             slint::TimerMode::Repeated,
@@ -405,30 +524,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 if dropped.is_empty() {
                     return;
                 }
-                let videos = ui_weak.upgrade().map(|ui| ui.get_app_mode() == 1).unwrap_or(false);
-                if videos {
-                    import_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                    let mut queued = 0;
-                    for path in dropped {
-                        if import_seen.borrow().contains(&path) {
-                            continue; // already queued or in the bin
-                        }
-                        import_seen.borrow_mut().insert(path.clone());
-                        let _ = import_tx.send(path);
-                        import_total.set(import_total.get() + 1);
-                        queued += 1;
-                    }
-                    if queued > 0 {
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_importing(true);
-                            ui.set_import_total(import_total.get() as i32);
-                        }
-                    }
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                if ui.get_app_mode() == 1 {
+                    // Same expansion + filtering as the image mode (folders,
+                    // hidden files, junk), then the shared queue.
+                    import_q.enqueue(&ui, dropped);
                 } else {
                     // Ignore image drops while a batch is running — adding rows
                     // would desync the progress callback's snapshot indices.
-                    let running = ui_weak.upgrade().map(|u| u.get_running()).unwrap_or(false);
-                    if !running {
+                    if !ui.get_running() {
                         add_paths(dropped, &files, &rows, &crops, &thumbs, &ui_weak);
                     }
                 }
@@ -464,20 +570,62 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
         ui.on_clear_files(move || {
-            let Some(ui) = ui_weak.upgrade() else { return; };
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
             if ui.get_running() {
                 return; // don't clear the list a running batch is iterating
             }
             let mut guard = files.lock().unwrap();
-            guard.clear();
+            let old = std::mem::take(&mut *guard);
             let mut crops_guard = crops.lock().unwrap();
             crops_guard.clear();
             thumbs.lock().unwrap().clear();
-            refresh(&rows, &guard, &crops_guard, &thumbs);
+            sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
             drop(crops_guard);
             ui.set_selected_index(-1);
+            ui.set_viewer_image(Image::default());
             ui.set_cropping(false);
             *edit.lock().unwrap() = None;
+        });
+    }
+
+    // Remove one file from the queue (the × on its row). Selection and the
+    // crop state follow the file, not the index.
+    {
+        let files = files.clone();
+        let rows = rows.clone();
+        let crops = crops.clone();
+        let thumbs = thumbs.clone();
+        let edit = edit.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_remove_file(move |i| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if ui.get_running() || i < 0 {
+                return;
+            }
+            let mut guard = files.lock().unwrap();
+            if (i as usize) >= guard.len() {
+                return;
+            }
+            let old = guard.clone();
+            let removed = guard.remove(i as usize);
+            let mut crops_guard = crops.lock().unwrap();
+            crops_guard.remove(&removed);
+            sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
+            drop(crops_guard);
+            drop(guard);
+            let sel = ui.get_selected_index();
+            if sel == i {
+                ui.set_selected_index(-1);
+                ui.set_viewer_image(Image::default());
+                ui.set_cropping(false);
+                *edit.lock().unwrap() = None;
+            } else if sel > i {
+                ui.set_selected_index(sel - 1);
+            }
         });
     }
 
@@ -579,15 +727,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         let ui_weak = ui.as_weak();
         let select_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         ui.on_select_file(move |index| {
-            let Some(ui) = ui_weak.upgrade() else { return; };
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
             let path = match files.lock().unwrap().get(index as usize) {
                 Some(p) => p.clone(),
                 None => return,
             };
             // Highlight is instant; the preview arrives when the decode finishes.
             ui.set_selected_index(index);
-            let generation =
-                select_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let generation = select_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
             let ui_weak = ui_weak.clone();
             let crops = crops.clone();
@@ -608,7 +757,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
                             return;
                         }
-                        let Some(ui) = ui_weak.upgrade() else { return; };
+                        let Some(ui) = ui_weak.upgrade() else {
+                            return;
+                        };
                         ui.set_viewer_image(Image::default());
                         ui.set_cropping(false);
                         *edit.lock().unwrap() = None;
@@ -633,17 +784,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
                         return;
                     }
-                    let Some(ui) = ui_weak.upgrade() else { return; };
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
                     let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&raw, pw, ph);
                     ui.set_viewer_image(Image::from_rgba8(buf));
 
                     // Seed crop state for this file (used when the viewer enters
-                    // Crop mode later).
+                    // Crop mode later). The crop box itself is sized by the
+                    // Slint side from the surface and this aspect ratio.
                     ui.set_crop_img_w(ow as i32);
                     ui.set_crop_img_h(oh as i32);
-                    let (bw, bh) = crate::preview::preview_box(ow, oh, 560.0, 420.0);
-                    ui.set_crop_box_w(bw);
-                    ui.set_crop_box_h(bh);
                     if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
                         ui.set_crop_x(x as f32 / ow as f32);
                         ui.set_crop_y(y as f32 / oh as f32);
@@ -724,32 +875,19 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             if ui.get_running() {
                 return; // a batch is already running; ignore re-entrant Convert
             }
-            let preset_idx = ui.get_current_preset() as usize;
-            let preset = match store.lock().unwrap().presets.get(preset_idx) {
-                Some(p) => p.clone(),
-                None => return,
+            let job = {
+                let store = store.lock().unwrap();
+                if store
+                    .presets
+                    .get(ui.get_current_preset().max(0) as usize)
+                    .is_none()
+                {
+                    return;
+                }
+                // The same recipe "Save preset" stores, so what runs is what
+                // gets saved.
+                current_job(&ui, &store)
             };
-            // Apply the live format/quality controls on top of the preset's job.
-            let mut job = preset.job.clone();
-            job.format = format_combo_to_format(&ui.get_format());
-            job.quality = ui.get_quality().clamp(0, 100) as u8;
-            job.png = png_mode_from(ui.get_png_mode());
-
-            // Explicit output-resolution override from the Settings fields. When
-            // either dimension is set (> 0) it replaces the preset's resize for
-            // this run; a 0 dimension is left unconstrained. With both at 0 the
-            // preset's resize is used unchanged. The core pipeline crops first
-            // and resizes second, so a per-file crop + this resolution combine
-            // correctly (crop the region, then scale it to the resolution).
-            let rw = ui.get_res_w().max(0) as u32;
-            let rh = ui.get_res_h().max(0) as u32;
-            if rw > 0 || rh > 0 {
-                job.resize = kuvatin_core::resize::ResizeMode::Pixels {
-                    width: if rw > 0 { Some(rw) } else { None },
-                    height: if rh > 0 { Some(rh) } else { None },
-                    keep_aspect: ui.get_res_lock(),
-                };
-            }
 
             // Build a per-file job list: files with a stored crop get a
             // CropMode::Rect override; the rest use the base job unchanged. Clone
@@ -760,7 +898,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 .map(|p| {
                     let mut j = job.clone();
                     if let Some(&(x, y, width, height)) = crop_map.get(p) {
-                        j.crop = CropMode::Rect { x, y, width, height };
+                        j.crop = CropMode::Rect {
+                            x,
+                            y,
+                            width,
+                            height,
+                        };
                     }
                     (p.clone(), j)
                 })
@@ -775,14 +918,21 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let subfolder = ui.get_save_subfolder();
             let ext = job.format.extension();
             let stem_of = |p: &std::path::Path| {
-                p.file_stem().and_then(|s| s.to_str()).unwrap_or("image").to_string()
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("image")
+                    .to_string()
             };
             let items_to: Vec<(PathBuf, Job, PathBuf)> = if items.len() == 1 && !subfolder {
                 let (input, j) = items[0].clone();
                 // The suffix is user text: sanitized (no separators) like the
                 // core pipeline does, never interpolated raw into a path.
                 let mut dlg = rfd::FileDialog::new()
-                    .set_file_name(output_file_name(&stem_of(input.as_path()), &suffix, job.format))
+                    .set_file_name(output_file_name(
+                        &stem_of(input.as_path()),
+                        &suffix,
+                        job.format,
+                    ))
                     .add_filter(ext, &[ext]);
                 if let Some(dir) = input.parent() {
                     dlg = dlg.set_directory(dir);
@@ -812,7 +962,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 let targets: Vec<PathBuf> = items
                     .iter()
                     .map(|(input, _)| {
-                        dir.join(output_file_name(&stem_of(input.as_path()), &suffix, job.format))
+                        dir.join(output_file_name(
+                            &stem_of(input.as_path()),
+                            &suffix,
+                            job.format,
+                        ))
                     })
                     .collect();
                 items
@@ -875,9 +1029,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // True while an export/render is running (pauses the preview timer, whose
         // seeks/commits would corrupt the render).
         let export_active = Rc::new(std::cell::Cell::new(false));
+        // True between "Export…" and the deferred `begin_render` (one tick
+        // later, so the modal paints before the engine blocks the UI thread).
+        let export_pending = Rc::new(std::cell::Cell::new(false));
         // The output path of the running export, so Cancel/failure can delete
         // the partial file.
         let export_path: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+        // Latest scrub target (seconds, frame-accurate?) awaiting the UI tick:
+        // one seek per tick instead of one per pointer event, and an ACCURATE
+        // landing on release so the picture matches the playhead.
+        let pending_seek: Rc<Cell<Option<(f32, bool)>>> = Rc::new(Cell::new(None));
 
         // Image-sequence import state. `pending_seq` holds the detected sequence
         // while its confirm dialog is open; `seq_by_path` maps a media-bin entry
@@ -914,13 +1075,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         // Open media via the file dialog → the same import queue as drag-and-drop.
         {
             let ui_weak = ui_weak.clone();
-            let import_tx = import_tx.clone();
-            let import_total = import_total.clone();
-            let import_cancel = import_cancel.clone();
-            let import_seen = import_seen.clone();
+            let import_q = import_q.clone();
             ui.on_video_open(move || {
                 // Videos plus every image input (stills become overlays).
-                let mut media: Vec<&str> = VIDEO_EXTENSIONS.to_vec();
+                let mut media: Vec<&str> = kuvatin_video::VIDEO_EXTENSIONS.to_vec();
                 media.extend_from_slice(kuvatin_core::format::INPUT_EXTENSIONS);
                 let Some(paths) = rfd::FileDialog::new()
                     .add_filter("Media", &media)
@@ -928,22 +1086,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
-                import_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                let mut queued = 0;
-                for path in paths {
-                    if import_seen.borrow().contains(&path) {
-                        continue;
-                    }
-                    import_seen.borrow_mut().insert(path.clone());
-                    let _ = import_tx.send(path);
-                    import_total.set(import_total.get() + 1);
-                    queued += 1;
-                }
-                if queued > 0 {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_importing(true);
-                        ui.set_import_total(import_total.get() as i32);
-                    }
+                if let Some(ui) = ui_weak.upgrade() {
+                    import_q.enqueue(&ui, paths);
                 }
             });
         }
@@ -990,13 +1134,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         {
             let ui_weak = ui_weak.clone();
             let pending_seq = pending_seq.clone();
-            let import_seen = import_seen.clone();
+            let import_q = import_q.clone();
             let seq_ready = seq_ready.clone();
             let seq_progress = seq_progress.clone();
             let seq_active = seq_active.clone();
             let seq_cancel = seq_cancel.clone();
             ui.on_seq_confirm(move || {
-                use std::sync::atomic::Ordering;
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
@@ -1005,7 +1148,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 };
                 spec.fps = ui.get_seq_fps().clamp(1, 240) as u32;
                 let first = spec.first_path();
-                if import_seen.borrow().contains(&first) {
+                if !import_q.seen.borrow_mut().insert(&first) {
                     show_error(
                         &ui,
                         "Already imported",
@@ -1013,7 +1156,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     );
                     return;
                 }
-                import_seen.borrow_mut().insert(first.clone());
                 seq_cancel.store(false, Ordering::Relaxed);
                 seq_progress.0.store(0, Ordering::Relaxed);
                 seq_progress.1.store(0, Ordering::Relaxed);
@@ -1036,9 +1178,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                                     seq_progress
                                         .0
                                         .store(done.min(u32::MAX as u64) as u32, Ordering::Relaxed);
-                                    seq_progress
-                                        .1
-                                        .store(total.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                                    seq_progress.1.store(
+                                        total.min(u32::MAX as u64) as u32,
+                                        Ordering::Relaxed,
+                                    );
                                 },
                                 &seq_cancel,
                             )
@@ -1078,32 +1221,25 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         }
 
         // Cancel an in-flight import: stop the modal and discard the queue. The
-        // worker keeps draining in the background (results ignored); a file whose
-        // discovery is mid-flight finishes that one call, then bows out.
+        // worker keeps draining in the background; everything of the old
+        // generation — including the file whose discovery was mid-flight — is
+        // dropped by the drain, so nothing sneaks into the bin after Cancel.
         {
             let ui_weak = ui_weak.clone();
-            let import_cancel = import_cancel.clone();
+            let import_q = import_q.clone();
             let import_ready = import_ready.clone();
-            let import_total = import_total.clone();
-            let import_done = import_done.clone();
-            let import_seen = import_seen.clone();
             let bin_paths = bin_paths.clone();
             let seq_cancel = seq_cancel.clone();
             let seq_ready = seq_ready.clone();
             let seq_active = seq_active.clone();
             ui.on_import_cancel(move || {
-                import_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 import_ready.lock().unwrap().clear();
-                import_total.set(0);
-                import_done.set(0);
                 // Abort a running sequence import too (the EXR conversion
                 // checks the flag per frame and cleans up its partial cache).
-                seq_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                seq_cancel.store(true, Ordering::Relaxed);
                 seq_ready.lock().unwrap().clear();
                 seq_active.set(false);
-                // Re-seed "seen" from what actually made it into the bin, so the
-                // discarded-but-not-added files can be imported again later.
-                *import_seen.borrow_mut() = bin_paths.borrow().iter().cloned().collect();
+                import_q.cancel(bin_paths.borrow().iter());
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_importing(false);
                 }
@@ -1119,9 +1255,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let bin_paths = bin_paths.clone();
             let tl_clips = tl_clips.clone();
             let ready = import_ready.clone();
-            let import_total = import_total.clone();
-            let import_done = import_done.clone();
-            let import_seen = import_seen.clone();
+            let import_q = import_q.clone();
             let seq_ready = seq_ready.clone();
             let seq_progress = seq_progress.clone();
             let seq_active = seq_active.clone();
@@ -1135,13 +1269,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 move || {
                     loop {
                         let next = ready.lock().unwrap().pop_front();
-                        let Some((path, thumb_frame, err)) = next else {
+                        let Some((item_gen, path, thumb_frame, err)) = next else {
                             break;
                         };
-                        import_done.set(import_done.get() + 1);
+                        if item_gen != import_q.current_gen() {
+                            continue; // cancelled batch: neither counted nor added
+                        }
+                        import_q.done.set(import_q.done.get() + 1);
                         if let Some(_e) = err {
                             // Unreadable/undiscoverable → don't add a dead bin entry.
-                            import_seen.borrow_mut().remove(&path);
+                            import_q.seen.borrow_mut().remove(&path);
                             import_failures.borrow_mut().push(
                                 path.file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
@@ -1170,13 +1307,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             continue;
                         };
                         // Close the modal unless a file import still drives it.
-                        if import_total.get() == 0 {
+                        if import_q.total.get() == 0 {
                             ui.set_importing(false);
                         }
                         match (res.spec, res.err, res.cancelled) {
                             (_, _, true) => {
                                 // User cancelled: forget it silently, allow re-import.
-                                import_seen.borrow_mut().remove(&res.first);
+                                import_q.seen.borrow_mut().remove(&res.first);
                             }
                             (Some(spec), None, false) => {
                                 let thumb = frame_to_image(res.thumb);
@@ -1196,7 +1333,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                                 );
                             }
                             (_, err, false) => {
-                                import_seen.borrow_mut().remove(&res.first);
+                                import_q.seen.borrow_mut().remove(&res.first);
                                 show_error(
                                     &ui,
                                     "Could not import sequence",
@@ -1206,12 +1343,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         }
                     }
                     if let Some(ui) = ui_weak.upgrade() {
-                        if import_total.get() > 0 {
-                            ui.set_import_done(import_done.get() as i32);
-                            if import_done.get() >= import_total.get() {
-                                ui.set_importing(false);
-                                import_total.set(0);
-                                import_done.set(0);
+                        if import_q.total.get() > 0 {
+                            ui.set_import_done(import_q.done.get() as i32);
+                            if import_q.done.get() >= import_q.total.get() {
+                                // A sequence import still in flight keeps the
+                                // modal (it shows that one's progress next).
+                                if !seq_active.get() {
+                                    ui.set_importing(false);
+                                }
+                                import_q.total.set(0);
+                                import_q.done.set(0);
                                 let failures = std::mem::take(&mut *import_failures.borrow_mut());
                                 if !failures.is_empty() {
                                     show_error(
@@ -1220,7 +1361,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                                         format!(
                                             "{} file(s) couldn't be read as media:\n{}",
                                             failures.len(),
-                                            failures.join("\n")
+                                            name_list(&failures)
                                         ),
                                     );
                                 }
@@ -1228,7 +1369,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         } else if seq_active.get() {
                             // Mirror the EXR-conversion progress (file imports
                             // take display precedence over it).
-                            use std::sync::atomic::Ordering;
                             let total = seq_progress.1.load(Ordering::Relaxed);
                             if total > 0 {
                                 ui.set_import_done(seq_progress.0.load(Ordering::Relaxed) as i32);
@@ -1261,7 +1401,14 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 // sequence, not the single first-frame file.
                 if let Some(spec) = seq_by_path.borrow().get(&path).cloned() {
                     let name = spec.pattern_name();
-                    add_sequence_to_timeline(&spec, &name, &ui_weak, &project_slot, &tl_clips, thumb);
+                    add_sequence_to_timeline(
+                        &spec,
+                        &name,
+                        &ui_weak,
+                        &project_slot,
+                        &tl_clips,
+                        thumb,
+                    );
                     return;
                 }
                 add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
@@ -1508,10 +1655,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 let Some(mut row) = tl_clips.row_data(i as usize) else {
                     return;
                 };
-                let geom = project_slot
-                    .borrow_mut()
-                    .as_mut()
-                    .and_then(|p| p.trim_clip(&kuvatin_video::ClipId(row.id.to_string()), edge, delta as f64));
+                let geom = project_slot.borrow_mut().as_mut().and_then(|p| {
+                    p.trim_clip(
+                        &kuvatin_video::ClipId(row.id.to_string()),
+                        edge,
+                        delta as f64,
+                    )
+                });
                 let Some(geom) = geom else {
                     return;
                 };
@@ -1544,21 +1694,40 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     let _ = project.pause();
                     ui.set_video_playing(false);
                 } else {
+                    // Play from a finished timeline restarts it instead of
+                    // pausing again on the same last frame.
+                    if let (Some(p), Some(d)) = (project.position(), project.duration()) {
+                        if p + std::time::Duration::from_millis(120) >= d {
+                            let _ = project.seek(std::time::Duration::ZERO);
+                        }
+                    }
                     let _ = project.play();
                     ui.set_video_playing(true);
                 }
             });
         }
 
-        // Seek to a fraction of the timeline.
+        // Seek to a fraction of the timeline (transport scrubber). The playhead
+        // moves at once; the pipeline seek is coalesced onto the UI tick.
         {
+            let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
+            let pending_seek = pending_seek.clone();
             ui.on_video_seek(move |frac| {
-                let slot = project_slot.borrow();
-                if let Some(project) = slot.as_ref() {
-                    if let Some(dur) = project.duration() {
-                        let _ = project.seek(dur.mul_f32(frac.clamp(0.0, 1.0)));
-                    }
+                let dur = project_slot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.duration())
+                    .map(|d| d.as_secs_f32())
+                    .unwrap_or(0.0);
+                if dur <= 0.0 {
+                    return;
+                }
+                let secs = dur * frac.clamp(0.0, 1.0);
+                pending_seek.set(Some((secs, false)));
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_playhead(secs);
+                    ui.set_video_position(frac.clamp(0.0, 1.0));
                 }
             });
         }
@@ -1567,19 +1736,37 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
+            let pending_seek = pending_seek.clone();
             ui.on_timeline_seek_time(move |secs| {
-                let slot = project_slot.borrow();
-                let Some(project) = slot.as_ref() else {
-                    return;
+                let dur = project_slot
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.duration())
+                    .map(|d| d.as_secs_f32())
+                    .unwrap_or(0.0);
+                let secs = if dur > 0.0 {
+                    secs.clamp(0.0, dur)
+                } else {
+                    secs.max(0.0)
                 };
-                let dur = project.duration().map(|d| d.as_secs_f32()).unwrap_or(0.0);
-                let secs = if dur > 0.0 { secs.clamp(0.0, dur) } else { secs.max(0.0) };
-                let _ = project.seek(std::time::Duration::from_secs_f32(secs));
+                pending_seek.set(Some((secs, false)));
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_playhead(secs);
                     if dur > 0.0 {
                         ui.set_video_position((secs / dur).clamp(0.0, 1.0));
                     }
+                }
+            });
+        }
+
+        // Scrub released: land frame-accurately where the playhead shows, so
+        // the paused picture can't sit a keyframe interval away from it.
+        {
+            let ui_weak = ui_weak.clone();
+            let pending_seek = pending_seek.clone();
+            ui.on_seek_done(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    pending_seek.set(Some((ui.get_playhead(), true)));
                 }
             });
         }
@@ -1639,14 +1826,23 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let export_active = export_active.clone();
+            let export_pending = export_pending.clone();
             let export_path = export_path.clone();
             ui.on_video_export(move || {
-                if export_active.get() || project_slot.borrow().is_none() {
+                if export_active.get() || export_pending.get() {
                     return;
                 }
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
+                if project_slot.borrow().is_none() {
+                    show_error(
+                        &ui,
+                        "Nothing to export",
+                        "Add a clip to the timeline first.",
+                    );
+                    return;
+                }
                 // Codec index → codec + container extension (chosen in the dialog).
                 let (codec, ext, default_name) = match ui.get_export_codec() {
                     1 => (kuvatin_video::VideoCodec::Vp9, "webm", "export.webm"),
@@ -1662,7 +1858,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 };
                 let Some(path) = rfd::FileDialog::new()
                     .add_filter(
-                        if ext == "mp4" { "MP4 video" } else { "WebM video" },
+                        if ext == "mp4" {
+                            "MP4 video"
+                        } else {
+                            "WebM video"
+                        },
                         &[ext],
                     )
                     .set_file_name(default_name)
@@ -1670,35 +1870,68 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 else {
                     return;
                 };
-                let result = project_slot
-                    .borrow()
-                    .as_ref()
-                    .map(|p| p.begin_render(&path, settings));
-                match result {
-                    Some(Ok(())) => {
-                        *export_path.borrow_mut() = Some(path);
-                        export_active.set(true);
-                        ui.set_exporting(true);
-                        ui.set_export_progress(0.0);
-                        ui.set_export_status("Starting…".into());
+                // Show the modal NOW and start the render on the next tick:
+                // begin_render tears the preview down and waits for NULL (up
+                // to 3 s) on this thread, which used to freeze the window with
+                // no feedback before anything appeared.
+                *export_path.borrow_mut() = Some(path.clone());
+                export_pending.set(true);
+                ui.set_exporting(true);
+                ui.set_export_progress(0.0);
+                ui.set_export_status("Starting\u{2026}".into());
+                let ui_weak = ui_weak.clone();
+                let project_slot = project_slot.clone();
+                let export_active = export_active.clone();
+                let export_pending = export_pending.clone();
+                let export_path = export_path.clone();
+                slint::Timer::single_shot(std::time::Duration::from_millis(60), move || {
+                    if !export_pending.get() {
+                        return; // cancelled before it started
                     }
-                    Some(Err(e)) => {
-                        let _ = std::fs::remove_file(&path);
-                        show_error(&ui, "Export failed to start", e.to_string());
+                    export_pending.set(false);
+                    let result = project_slot
+                        .borrow()
+                        .as_ref()
+                        .map(|p| p.begin_render(&path, settings));
+                    match result {
+                        Some(Ok(())) => export_active.set(true),
+                        Some(Err(e)) => {
+                            let _ = std::fs::remove_file(&path);
+                            export_path.borrow_mut().take();
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_exporting(false);
+                                show_error(&ui, "Export failed to start", e.to_string());
+                            }
+                        }
+                        None => {
+                            export_path.borrow_mut().take();
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_exporting(false);
+                            }
+                        }
                     }
-                    None => {}
-                }
+                });
             });
         }
 
-        // Cancel a running export: tear the render down gracefully and delete the
-        // partial file.
+        // Cancel a running export: tear the render down and delete the partial
+        // file (no EOS wait — the file is discarded anyway).
         {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let export_active = export_active.clone();
+            let export_pending = export_pending.clone();
             let export_path = export_path.clone();
             ui.on_export_cancel(move || {
+                if export_pending.get() {
+                    // Not started yet: the deferred start sees the flag and bails.
+                    export_pending.set(false);
+                    export_path.borrow_mut().take();
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_exporting(false);
+                    }
+                    return;
+                }
                 if !export_active.get() {
                     return;
                 }
@@ -1721,7 +1954,9 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let export_path = export_path.clone();
             // Watchdog: if progress hasn't advanced for this many ticks (200ms
             // each → 20s), tell the user the render looks stuck (Cancel is right
-            // there). Some pipeline stalls never post EOS/Error.
+            // there). Some pipeline stalls never post EOS/Error. The baseline
+            // is the last fraction that actually ADVANCED — comparing against
+            // the previous tick called a slow-but-healthy render stuck.
             let stall = Rc::new(std::cell::Cell::new((0.0f32, 0u32)));
             let timer = slint::Timer::default();
             timer.start(
@@ -1738,8 +1973,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     match p.render_status() {
                         kuvatin_video::RenderStatus::Rendering(f) => {
                             let (last, ticks) = stall.get();
-                            let ticks = if (f - last).abs() < 0.0005 { ticks + 1 } else { 0 };
-                            stall.set((f, ticks));
+                            let (last, ticks) = if f > last { (f, 0) } else { (last, ticks + 1) };
+                            stall.set((last, ticks));
                             if let Some(ui) = ui_weak.upgrade() {
                                 ui.set_export_progress(f);
                                 ui.set_export_status(if ticks >= 100 {
@@ -1768,7 +2003,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                         kuvatin_video::RenderStatus::Failed(e) => {
                             if let Err(restore) = p.end_render() {
                                 if let Some(ui) = ui_weak.upgrade() {
-                                    show_error(&ui, "Preview could not be restored", restore.to_string());
+                                    show_error(
+                                        &ui,
+                                        "Preview could not be restored",
+                                        restore.to_string(),
+                                    );
                                 }
                             }
                             drop(slot);
@@ -1814,7 +2053,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
         {
             let video_assets = video_assets.clone();
             let bin_paths = bin_paths.clone();
-            let import_seen = import_seen.clone();
+            let import_q = import_q.clone();
             let seq_by_path = seq_by_path.clone();
             ui.on_video_bin_removed(move |i| {
                 if i < 0 {
@@ -1827,7 +2066,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 let mut bp = bin_paths.borrow_mut();
                 if i < bp.len() {
                     let removed = bp.remove(i);
-                    import_seen.borrow_mut().remove(&removed);
+                    import_q.seen.borrow_mut().remove(&removed);
                     seq_by_path.borrow_mut().remove(&removed);
                 }
             });
@@ -1854,14 +2093,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let ui_weak = ui_weak.clone();
             let project_slot = project_slot.clone();
             let pending_xform = pending_xform.clone();
+            let pending_seek = pending_seek.clone();
             let export_active = export_active.clone();
+            let export_pending = export_pending.clone();
             let timer = slint::Timer::default();
             timer.start(
                 slint::TimerMode::Repeated,
                 std::time::Duration::from_millis(100),
                 move || {
-                    // Never touch the pipeline while a render is in progress.
-                    if export_active.get() {
+                    // Never touch the pipeline while a render is in progress
+                    // (or about to start).
+                    if export_active.get() || export_pending.get() {
                         return;
                     }
                     let Some(ui) = ui_weak.upgrade() else {
@@ -1880,6 +2122,16 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     if let Some((id, l)) = pending_xform.borrow_mut().take() {
                         project.set_clip_layout(&kuvatin_video::ClipId(id), l);
                     }
+                    // Scrub target: one (keyframe) seek per tick during a drag,
+                    // a frame-accurate one on release.
+                    if let Some((secs, accurate)) = pending_seek.take() {
+                        let t = std::time::Duration::from_secs_f32(secs.max(0.0));
+                        let _ = if accurate {
+                            project.seek_accurate(t)
+                        } else {
+                            project.seek(t)
+                        };
+                    }
                     project.refresh_preview();
                     // Surface a dead preview pipeline instead of freezing silently.
                     if let Some(err) = project.poll_preview_error() {
@@ -1890,13 +2142,17 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     }
                     let pos = project.position().unwrap_or_default();
                     let dur = project.duration().unwrap_or_default();
-                    // Loop at the end when repeat is on.
-                    if ui.get_video_repeat()
-                        && ui.get_video_playing()
-                        && dur.as_secs_f32() > 0.1
-                        && pos.as_secs_f32() + 0.12 >= dur.as_secs_f32()
-                    {
-                        let _ = project.seek(std::time::Duration::ZERO);
+                    // End of the timeline: loop when repeat is on, otherwise
+                    // reflect the stop — the pause icon used to stick forever.
+                    let at_end =
+                        dur.as_secs_f32() > 0.1 && pos.as_secs_f32() + 0.12 >= dur.as_secs_f32();
+                    if at_end && ui.get_video_playing() {
+                        if ui.get_video_repeat() {
+                            let _ = project.seek(std::time::Duration::ZERO);
+                        } else {
+                            let _ = project.pause();
+                            ui.set_video_playing(false);
+                        }
                     }
                     ui.set_playhead(pos.as_secs_f32());
                     let frac = if dur.as_secs_f32() > 0.0 {
@@ -1921,26 +2177,56 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
 }
 
 /// (Re)build the preset-names model, select `select` (clamped to a valid index),
-/// and sync the format/quality controls to the selected preset's job.
+/// and sync every control to the selected preset's job.
 fn refresh_presets(ui: &AppWindow, store: &PresetStore, select: usize) {
-    let names: Vec<SharedString> = store.presets.iter().map(|p| p.name.clone().into()).collect();
+    let names: Vec<SharedString> = store
+        .presets
+        .iter()
+        .map(|p| p.name.clone().into())
+        .collect();
     ui.set_preset_names(ModelRc::new(VecModel::from(names)));
     let idx = select.min(store.presets.len().saturating_sub(1));
     ui.set_current_preset(idx as i32);
     if let Some(p) = store.presets.get(idx) {
-        ui.set_format(format_combo_str(p.job.format).into());
-        ui.set_quality(p.job.quality as i32);
-        ui.set_png_mode(png_mode_to_idx(p.job.png));
-        ui.set_suffix(p.job.output.suffix.clone().into());
-        ui.set_save_subfolder(p.job.output.subfolder);
+        sync_controls(ui, &p.job);
     }
 }
 
+/// Mirror a job into the Settings controls — the inverse of [`current_job`],
+/// so a preset round-trips through the UI unchanged. A pixel resize shows in
+/// the resolution fields; any other resize (percent, fit) leaves them at 0 =
+/// "as the preset says".
+fn sync_controls(ui: &AppWindow, job: &Job) {
+    ui.set_format(format_combo_str(job.format).into());
+    ui.set_quality(job.quality as i32);
+    ui.set_png_mode(png_mode_to_idx(job.png));
+    ui.set_suffix(job.output.suffix.clone().into());
+    ui.set_save_subfolder(job.output.subfolder);
+    let (w, h, lock) = match job.resize {
+        ResizeMode::Pixels {
+            width,
+            height,
+            keep_aspect,
+        } => (width.unwrap_or(0), height.unwrap_or(0), keep_aspect),
+        _ => (0, 0, true),
+    };
+    ui.set_res_w(w.min(i32::MAX as u32) as i32);
+    ui.set_res_h(h.min(i32::MAX as u32) as i32);
+    ui.set_res_lock(lock);
+}
+
 /// Build the job described by the live UI: start from the selected preset's job
-/// (to preserve resize/crop/output), then override format + quality from the
-/// controls — the same recipe `on_convert` applies before running a batch.
+/// (to preserve crop/other fields), then override format, quality, naming and
+/// the resolution from the controls. ONE recipe for "Convert" and "Save
+/// preset", so what runs is exactly what gets saved — the resolution override
+/// used to apply to conversions but silently vanish from saved presets.
+///
+/// Resolution: when either field is set (> 0) it replaces the preset's resize;
+/// a 0 dimension is left unconstrained; both at 0 keep the preset's resize.
+/// The core pipeline crops first and resizes second, so a per-file crop and
+/// this resolution combine correctly.
 fn current_job(ui: &AppWindow, store: &PresetStore) -> Job {
-    let idx = ui.get_current_preset() as usize;
+    let idx = ui.get_current_preset().max(0) as usize;
     let mut job = store
         .presets
         .get(idx)
@@ -1951,6 +2237,15 @@ fn current_job(ui: &AppWindow, store: &PresetStore) -> Job {
     job.png = png_mode_from(ui.get_png_mode());
     job.output.suffix = ui.get_suffix().to_string();
     job.output.subfolder = ui.get_save_subfolder();
+    let rw = ui.get_res_w().max(0) as u32;
+    let rh = ui.get_res_h().max(0) as u32;
+    if rw > 0 || rh > 0 {
+        job.resize = ResizeMode::Pixels {
+            width: (rw > 0).then_some(rw),
+            height: (rh > 0).then_some(rh),
+            keep_aspect: ui.get_res_lock(),
+        };
+    }
     job
 }
 
@@ -1988,38 +2283,74 @@ struct ThumbData {
 /// every file already in the list (and existing thumbnails survive the rebuild).
 type ThumbCache = Arc<Mutex<HashMap<PathBuf, ThumbData>>>;
 
-fn rows_from(
-    paths: &[PathBuf],
-    crops: &HashMap<PathBuf, (u32, u32, u32, u32)>,
-    thumbs: &ThumbCache,
-) -> Vec<FileRow> {
+/// A fresh row for `p` (thumbnail from the cache when already decoded).
+fn row_for(p: &Path, crops: &CropMap, cache: &HashMap<PathBuf, ThumbData>) -> FileRow {
+    let (thumb, dims) = match cache.get(p) {
+        Some(d) => (
+            Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                &d.rgba, d.w, d.h,
+            )),
+            d.dims.clone().into(),
+        ),
+        None => (Image::default(), SharedString::new()),
+    };
+    FileRow {
+        name: p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+            .into(),
+        status: "queued".into(),
+        thumb,
+        dims,
+        cropped: crops.contains_key(p),
+    }
+}
+
+fn rows_from(paths: &[PathBuf], crops: &CropMap, thumbs: &ThumbCache) -> Vec<FileRow> {
     let cache = thumbs.lock().unwrap();
-    paths
-        .iter()
-        .map(|p| {
-            let (thumb, dims) = match cache.get(p) {
-                Some(d) => (
-                    Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                        &d.rgba, d.w, d.h,
-                    )),
-                    d.dims.clone().into(),
-                ),
-                None => (Image::default(), SharedString::new()),
-            };
-            FileRow {
-                name: p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string()
-                    .into(),
-                status: "queued".into(),
-                thumb,
-                dims,
-                cropped: crops.contains_key(p),
+    paths.iter().map(|p| row_for(p, crops, &cache)).collect()
+}
+
+/// Bring `rows` (which mirror `old`) in line with `new` by inserting and
+/// removing only what changed. Both lists are sorted and de-duplicated. Rows
+/// that stay keep their status, thumbnail and dimensions — a rebuild used to
+/// reset every row to "queued" and replay the fade-in on the whole list.
+fn sync_rows(
+    rows: &Rc<VecModel<FileRow>>,
+    old: &[PathBuf],
+    new: &[PathBuf],
+    crops: &CropMap,
+    thumbs: &ThumbCache,
+) {
+    debug_assert_eq!(rows.row_count(), old.len(), "rows must mirror `old`");
+    let cache = thumbs.lock().unwrap();
+    let mut i = 0; // position in `rows`
+    let mut oi = 0; // position in `old`
+    for p in new {
+        while oi < old.len() && old[oi] < *p {
+            rows.remove(i);
+            oi += 1;
+        }
+        if oi < old.len() && old[oi] == *p {
+            if let Some(mut r) = rows.row_data(i) {
+                let cropped = crops.contains_key(p);
+                if r.cropped != cropped {
+                    r.cropped = cropped;
+                    rows.set_row_data(i, r);
+                }
             }
-        })
-        .collect()
+            oi += 1;
+        } else {
+            rows.insert(i, row_for(p, crops, &cache));
+        }
+        i += 1;
+    }
+    while oi < old.len() {
+        rows.remove(i);
+        oi += 1;
+    }
 }
 
 /// Decode thumbnails for the current `files` on a background thread and post
@@ -2042,7 +2373,9 @@ fn spawn_thumbnails(
                 let ui_weak = ui_weak.clone();
                 let files = files.clone();
                 let _ = slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else { return; };
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
                     if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
                         let model = ui.get_files();
                         if let Some(mut row) = model.row_data(i) {
@@ -2116,49 +2449,90 @@ fn format_combo_to_format(s: &str) -> OutputFormat {
     }
 }
 
-fn refresh(
-    rows: &Rc<VecModel<FileRow>>,
-    paths: &[PathBuf],
-    crops: &HashMap<PathBuf, (u32, u32, u32, u32)>,
-    thumbs: &ThumbCache,
-) {
-    let new = rows_from(paths, crops, thumbs);
-    while rows.row_count() > 0 {
-        rows.remove(0);
-    }
-    for r in new {
-        rows.push(r);
-    }
-}
-
 /// Add `picked` paths to the queue: filter/expand to image files, merge with the
-/// existing set (sorted + deduped), refresh the visible rows, and kick off
-/// thumbnail decoding. Shared by the Add files… button and the drag-and-drop
-/// drain timer so both paths behave identically.
+/// existing set (sorted + deduped), update the visible rows, and kick off
+/// thumbnail decoding. The selection follows its FILE across the re-sort (the
+/// highlighted row used to become a different file than the viewer and the
+/// crop state). Shared by the Add files… button and the drag-and-drop drain
+/// timer so both paths behave identically.
 fn add_paths(
     picked: Vec<PathBuf>,
     files: &Arc<Mutex<Vec<PathBuf>>>,
     rows: &Rc<VecModel<FileRow>>,
-    crops: &Arc<Mutex<HashMap<PathBuf, (u32, u32, u32, u32)>>>,
+    crops: &Arc<Mutex<CropMap>>,
     thumbs: &ThumbCache,
     ui_weak: &slint::Weak<AppWindow>,
 ) {
     let mut guard = files.lock().unwrap();
+    let old = guard.clone();
+    let selected = ui_weak
+        .upgrade()
+        .map(|ui| ui.get_selected_index())
+        .filter(|&i| i >= 0)
+        .and_then(|i| old.get(i as usize).cloned());
     guard.extend(collect_images(&picked));
     guard.sort();
     guard.dedup();
     let crops_guard = crops.lock().unwrap();
-    refresh(rows, &guard, &crops_guard, thumbs);
+    sync_rows(rows, &old, &guard, &crops_guard, thumbs);
     drop(crops_guard);
+    if let (Some(ui), Some(sel)) = (ui_weak.upgrade(), selected) {
+        let idx = guard
+            .iter()
+            .position(|p| *p == sel)
+            .map(|i| i as i32)
+            .unwrap_or(-1);
+        ui.set_selected_index(idx);
+    }
     // Decode only files we don't already have a thumbnail for — an add no longer
     // re-decodes the whole list, and cached rows kept their thumbnail above.
     let missing: Vec<PathBuf> = {
         let cache = thumbs.lock().unwrap();
-        guard.iter().filter(|p| !cache.contains_key(*p)).cloned().collect()
+        guard
+            .iter()
+            .filter(|p| !cache.contains_key(*p))
+            .cloned()
+            .collect()
     };
     drop(guard);
     if !missing.is_empty() {
         spawn_thumbnails(ui_weak.clone(), files.clone(), thumbs.clone(), missing);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Different spellings of one file are one "seen" entry (Windows paths
+    /// are case-insensitive; a `..` segment is the same file too).
+    #[cfg(windows)]
+    #[test]
+    fn seen_set_canonicalises_case_and_dots() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Clip.mp4");
+        std::fs::write(&file, b"x").unwrap();
+        let mut seen = SeenSet::default();
+        assert!(seen.insert(&file));
+        let lower = dir.path().join("clip.MP4");
+        assert!(seen.contains(&lower), "case-insensitive");
+        let dotted = dir.path().join("sub").join("..").join("Clip.mp4");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        assert!(!seen.insert(&dotted), "`..` spelling is the same file");
+        seen.remove(&lower);
+        assert!(!seen.contains(&file));
+        // A path that doesn't exist still works (by its literal form).
+        let ghost = dir.path().join("missing.mp4");
+        assert!(seen.insert(&ghost) && seen.contains(&ghost));
+    }
+
+    #[test]
+    fn dialog_name_lists_are_capped() {
+        let names: Vec<String> = (1..=12).map(|i| format!("f{i}.png")).collect();
+        let s = name_list(&names);
+        assert_eq!(s.lines().count(), 11);
+        assert!(s.ends_with("\u{2026}and 2 more"));
+        assert_eq!(name_list(&names[..3]), "f1.png\nf2.png\nf3.png");
     }
 }
 
@@ -2178,19 +2552,19 @@ mod win_drop {
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-    use windows::Win32::UI::Shell::{
-        DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
-    };
-    use windows::Win32::System::Ole::RevokeDragDrop;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, ShowWindow, HTBOTTOM,
-        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-        HTTOPRIGHT, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES,
-    };
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
     };
+    use windows::Win32::System::Ole::RevokeDragDrop;
     use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::Shell::{
+        DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetWindowRect, IsZoomed, PostMessageW, ShowWindow, HTBOTTOM, HTBOTTOMLEFT,
+        HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, SW_MAXIMIZE,
+        SW_MINIMIZE, SW_RESTORE, WM_CLOSE, WM_DROPFILES,
+    };
 
     /// Width of the invisible edge zone (in physical px) used for resize hit-testing.
     const RESIZE_BORDER: i32 = 6;

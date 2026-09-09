@@ -3,7 +3,10 @@ name = "kuvatin-video"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GStreamer-backed video playback for Kuvatin"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "GStreamer Editing Services-backed video engine for Kuvatin: layered timeline, composited preview, hardware export, image-sequence rendering"
 
 [dependencies]
 gstreamer = "0.23"

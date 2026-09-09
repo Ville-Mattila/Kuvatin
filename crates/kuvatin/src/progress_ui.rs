@@ -39,6 +39,17 @@ impl ProgressSink {
     }
 }
 
+/// Run `work` with no window at all (`--quiet`: installers, CI smoke runs and
+/// scripts have nobody to watch a progress bar, and a headless runner may not
+/// even be able to create one). Progress is discarded; cancel never fires.
+pub fn run_headless<T>(work: impl FnOnce(&ProgressSink) -> T) -> Result<T> {
+    let sink = ProgressSink {
+        latest: Mutex::new((0.0, String::new())),
+        cancel: AtomicBool::new(false),
+    };
+    Ok(work(&sink))
+}
+
 /// Run `work` on a worker thread under a progress window titled `heading`,
 /// blocking until it finishes; returns the work's result.
 pub fn run_with_progress<T: Send + 'static>(

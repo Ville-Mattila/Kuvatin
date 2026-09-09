@@ -63,11 +63,19 @@ installed separately.
 
 ## Install
 
-Grab the latest `.msi` from the [releases page](https://github.com/Ville-Mattila/Kuvatin/releases/latest).
+Grab the latest `.msi` from the [releases page](https://github.com/Ville-Mattila/Kuvatin/releases/latest)
+(direct link: [kuvatin-x86_64.msi](https://github.com/Ville-Mattila/Kuvatin/releases/latest/download/kuvatin-x86_64.msi)).
 It adds a Start-menu shortcut, registers the Explorer context menu, and always
 upgrades any previous version in place (no duplicate installs). The context-menu
 registration is per-user and **self-heals at app launch**, so other Windows users
 on the same machine get the menu the first time they open Kuvatin.
+
+The installer is **not code-signed** (no certificate yet), so Windows
+SmartScreen shows an "unknown publisher" prompt — choose *More info → Run
+anyway*. Every release ships a `.sha256` file next to the `.msi`; compare it
+with `Get-FileHash` before running the installer if you want to be sure of
+what you downloaded. The release job also installs the built MSI on a clean
+runner and converts an image with the installed copy before publishing.
 
 ## Licensing & third-party notices
 
@@ -151,8 +159,9 @@ cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging"
   utilities (off-thread discovery, thumbnails). Headless-tested against real
   pipelines.
 - **`crates/kuvatin`** — the `kuvatin.exe`: Slint GUI + CLI + the Windows shell
-  (registry) integration. Runs in three modes — GUI, `--preset` quick batch, and
-  `--register` / `--unregister`.
+  (registry) integration. Runs in four modes — GUI, `--preset` quick batch,
+  `--sequence-mp4` headless render, and `--register` / `--unregister` (`--quiet`
+  suppresses the progress window and dialogs for installers and scripts).
 
 See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the design and
 [`docs/superpowers/plans/`](docs/superpowers/plans/) for the implementation plans.
@@ -165,14 +174,16 @@ this kind of use, so the whole application is distributed under the GPL.
 ## Status
 
 Working today: compress / convert / resize / crop / batch / presets / context menu /
-video timeline editing / hardware video export / custom frameless UI / `.msi`
-installer with bundled GStreamer runtime and Start-menu shortcut.
+image-sequence rendering / video timeline editing / hardware video export /
+custom frameless UI / `.msi` installer with a trimmed, license-complete
+GStreamer runtime and a Start-menu shortcut. What changed in each version is
+on the [releases page](https://github.com/Ville-Mattila/Kuvatin/releases).
 
-**2.0.1** is a hardening release from a full-codebase audit: crash-proof batch
-encoding, collision-proof outputs, corruption-tolerant + versioned presets,
-visible error dialogs (the windowed build has no console), cancellable
-export/import, EXIF-aware decode, and a release pipeline that pins every
-third-party download by SHA-256 and gates on the test suite.
+Every master push runs `cargo fmt --check`, `clippy -D warnings`, `cargo deny`
+(licenses + advisories), the deterministic test suites and a headless smoke
+render of the video engine; a tag additionally builds the MSI, installs it on
+the runner and converts an image with the installed copy before the release is
+published (with a SHA-256 file and a CycloneDX SBOM).
 
 Deferred to later: audio-only tracks & transitions in the video editor, a top-level
-Windows 11 menu via `IExplorerCommand`, and macOS/Linux packaging.
+Windows 11 menu via `IExplorerCommand`, code signing, and macOS/Linux packaging.

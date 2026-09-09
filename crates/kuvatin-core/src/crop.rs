@@ -21,12 +21,25 @@ pub enum Anchor {
 pub enum CropMode {
     None,
     /// Crop a fixed pixel rectangle (clamped to the image), positioned by anchor.
-    FixedSize { width: u32, height: u32, anchor: Anchor },
+    FixedSize {
+        width: u32,
+        height: u32,
+        anchor: Anchor,
+    },
     /// Crop the largest w:h rectangle that fits, positioned by anchor.
-    AspectRatio { w: u32, h: u32, anchor: Anchor },
+    AspectRatio {
+        w: u32,
+        h: u32,
+        anchor: Anchor,
+    },
     /// An absolute pixel rectangle (origin x,y, size width,height), clamped to
     /// the image. Used for interactive per-image crops drawn in the GUI.
-    Rect { x: u32, y: u32, width: u32, height: u32 },
+    Rect {
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// (x, y, width, height) of the crop within a `src_w` x `src_h` image.
@@ -38,7 +51,11 @@ pub fn compute_crop_rect(mode: CropMode, src_w: u32, src_h: u32) -> (u32, u32, u
     }
     match mode {
         CropMode::None => (0, 0, src_w, src_h),
-        CropMode::FixedSize { width, height, anchor } => {
+        CropMode::FixedSize {
+            width,
+            height,
+            anchor,
+        } => {
             let w = width.clamp(1, src_w);
             let h = height.clamp(1, src_h);
             place(anchor, src_w, src_h, w, h)
@@ -56,7 +73,12 @@ pub fn compute_crop_rect(mode: CropMode, src_w: u32, src_h: u32) -> (u32, u32, u
             };
             place(anchor, src_w, src_h, cw.clamp(1, src_w), ch.clamp(1, src_h))
         }
-        CropMode::Rect { x, y, width, height } => {
+        CropMode::Rect {
+            x,
+            y,
+            width,
+            height,
+        } => {
             let x = x.min(src_w.saturating_sub(1));
             let y = y.min(src_h.saturating_sub(1));
             let w = width.clamp(1, src_w - x);
@@ -98,49 +120,83 @@ mod tests {
 
     #[test]
     fn none_is_full_image() {
-        assert_eq!(compute_crop_rect(CropMode::None, 800, 600), (0, 0, 800, 600));
+        assert_eq!(
+            compute_crop_rect(CropMode::None, 800, 600),
+            (0, 0, 800, 600)
+        );
     }
 
     #[test]
     fn fixed_center_is_centered() {
-        let m = CropMode::FixedSize { width: 400, height: 200, anchor: Anchor::Center };
+        let m = CropMode::FixedSize {
+            width: 400,
+            height: 200,
+            anchor: Anchor::Center,
+        };
         assert_eq!(compute_crop_rect(m, 800, 600), (200, 200, 400, 200));
     }
 
     #[test]
     fn fixed_top_left() {
-        let m = CropMode::FixedSize { width: 100, height: 100, anchor: Anchor::TopLeft };
+        let m = CropMode::FixedSize {
+            width: 100,
+            height: 100,
+            anchor: Anchor::TopLeft,
+        };
         assert_eq!(compute_crop_rect(m, 800, 600), (0, 0, 100, 100));
     }
 
     #[test]
     fn fixed_size_clamps_to_image() {
-        let m = CropMode::FixedSize { width: 9999, height: 9999, anchor: Anchor::Center };
+        let m = CropMode::FixedSize {
+            width: 9999,
+            height: 9999,
+            anchor: Anchor::Center,
+        };
         assert_eq!(compute_crop_rect(m, 800, 600), (0, 0, 800, 600));
     }
 
     #[test]
     fn aspect_square_from_landscape() {
-        let m = CropMode::AspectRatio { w: 1, h: 1, anchor: Anchor::Center };
+        let m = CropMode::AspectRatio {
+            w: 1,
+            h: 1,
+            anchor: Anchor::Center,
+        };
         assert_eq!(compute_crop_rect(m, 800, 600), (100, 0, 600, 600));
     }
 
     #[test]
     fn rect_within_bounds_is_exact() {
-        let m = CropMode::Rect { x: 100, y: 50, width: 200, height: 150 };
+        let m = CropMode::Rect {
+            x: 100,
+            y: 50,
+            width: 200,
+            height: 150,
+        };
         assert_eq!(compute_crop_rect(m, 800, 600), (100, 50, 200, 150));
     }
 
     #[test]
     fn rect_clamped_when_overflowing() {
-        let m = CropMode::Rect { x: 700, y: 500, width: 400, height: 400 };
+        let m = CropMode::Rect {
+            x: 700,
+            y: 500,
+            width: 400,
+            height: 400,
+        };
         // origin stays, size clamped to remaining 100x100
         assert_eq!(compute_crop_rect(m, 800, 600), (700, 500, 100, 100));
     }
 
     #[test]
     fn rect_origin_clamped_inside_image() {
-        let m = CropMode::Rect { x: 9999, y: 9999, width: 50, height: 50 };
+        let m = CropMode::Rect {
+            x: 9999,
+            y: 9999,
+            width: 50,
+            height: 50,
+        };
         let (x, y, w, h) = compute_crop_rect(m, 800, 600);
         assert!(x < 800 && y < 600 && w >= 1 && h >= 1);
     }
