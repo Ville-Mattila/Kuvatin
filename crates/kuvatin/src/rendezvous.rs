@@ -301,7 +301,9 @@ mod tests {
 
     /// Eight "processes" arrive in a staggered burst (like Explorer's
     /// CreateProcess loop): exactly one leads and it holds every path, no
-    /// path is lost or duplicated, and nothing is left behind.
+    /// path is lost or duplicated, and nothing is left behind. The quiet
+    /// window is generous: a loaded CI runner scheduled 15 ms-staggered
+    /// threads more than 250 ms apart, which correctly made two batches.
     #[test]
     fn a_burst_of_processes_yields_one_leader_holding_every_path() {
         let root = tempfile::tempdir().unwrap();
@@ -314,7 +316,7 @@ mod tests {
                         &root,
                         "preset:test",
                         &[p(&format!("C:/img/{i}.png"))],
-                        Duration::from_millis(250),
+                        Duration::from_millis(1200),
                     )
                 })
             })
@@ -357,7 +359,7 @@ mod tests {
         let took = t0.elapsed();
         assert_eq!(role, Role::Leader(vec![p("only.png")]));
         assert!(
-            took < Duration::from_millis(900),
+            took < Duration::from_millis(1200),
             "waited {took:?} for a lone arrival"
         );
     }
