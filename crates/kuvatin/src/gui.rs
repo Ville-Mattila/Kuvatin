@@ -1,10 +1,10 @@
 use crate::collect::collect_images;
 use anyhow::{anyhow, Result};
 use kuvatin_core::batch::run_jobs_to;
-use kuvatin_core::naming::{ensure_unique, subfolder_name};
+use kuvatin_core::naming::{output_file_name, subfolder_name};
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::format::OutputFormat;
-use kuvatin_core::pipeline::{Job, PngOptimize};
+use kuvatin_core::pipeline::{decode_oriented, plan_unique_outputs, Job, PngOptimize};
 use kuvatin_core::preset::PresetStore;
 use slint::{Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use std::cell::RefCell;
@@ -583,12 +583,36 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let crops = crops.clone();
             let edit = edit.clone();
             let select_gen = select_gen.clone();
+            let files = files.clone();
             std::thread::spawn(move || {
-                let Ok(img) = image::open(&path) else { return; };
-                let (ow, oh) = (img.width(), img.height());
-                if ow == 0 || oh == 0 {
+                // Decode exactly as the conversion will (EXIF orientation applied,
+                // animated GIFs refused), so the crop the user draws lands on the
+                // same pixels the pipeline crops.
+                let decoded = decode_oriented(&path)
+                    .ok()
+                    .filter(|i| i.width() > 0 && i.height() > 0);
+                let Some(img) = decoded else {
+                    // Unreadable: don't leave the viewer and Crop aimed at the
+                    // PREVIOUS file — clear them and say so in the row.
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                            return;
+                        }
+                        let Some(ui) = ui_weak.upgrade() else { return; };
+                        ui.set_viewer_image(Image::default());
+                        ui.set_cropping(false);
+                        *edit.lock().unwrap() = None;
+                        if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
+                            let model = ui.get_files();
+                            if let Some(mut row) = model.row_data(i) {
+                                row.dims = "unreadable".into();
+                                model.set_row_data(i, row);
+                            }
+                        }
+                    });
                     return;
-                }
+                };
+                let (ow, oh) = (img.width(), img.height());
                 // Decode a display-sized preview; normalized crop coords stay
                 // size-independent. Ship raw pixels (Send) to the UI thread.
                 let preview = img.thumbnail(1280, 1280).to_rgba8();
@@ -745,8 +769,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             };
             let items_to: Vec<(PathBuf, Job, PathBuf)> = if items.len() == 1 && !subfolder {
                 let (input, j) = items[0].clone();
+                // The suffix is user text: sanitized (no separators) like the
+                // core pipeline does, never interpolated raw into a path.
                 let mut dlg = rfd::FileDialog::new()
-                    .set_file_name(format!("{}{suffix}.{ext}", stem_of(input.as_path())))
+                    .set_file_name(output_file_name(&stem_of(input.as_path()), &suffix, job.format))
                     .add_filter(ext, &[ext]);
                 if let Some(dir) = input.parent() {
                     dlg = dlg.set_directory(dir);
@@ -769,12 +795,20 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 } else {
                     base
                 };
+                // Plan every target up front: same-stem inputs from different
+                // folders would otherwise all plan the same name and the batch
+                // would overwrite its own results (a filesystem check alone
+                // can't see the other targets in this batch).
+                let targets: Vec<PathBuf> = items
+                    .iter()
+                    .map(|(input, _)| {
+                        dir.join(output_file_name(&stem_of(input.as_path()), &suffix, job.format))
+                    })
+                    .collect();
                 items
                     .iter()
-                    .map(|(input, j)| {
-                        let out = ensure_unique(dir.join(format!("{}{suffix}.{ext}", stem_of(input.as_path()))));
-                        (input.clone(), j.clone(), out)
-                    })
+                    .zip(plan_unique_outputs(targets))
+                    .map(|((input, j), out)| (input.clone(), j.clone(), out))
                     .collect()
             };
 
@@ -1985,7 +2019,21 @@ fn spawn_thumbnails(
 ) {
     std::thread::spawn(move || {
         for path in paths {
-            let Ok(img) = image::open(&path) else {
+            // Same decode as the conversion (orientation applied) — and an
+            // unreadable file says so in its row instead of staying blank.
+            let Ok(img) = decode_oriented(&path) else {
+                let ui_weak = ui_weak.clone();
+                let files = files.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else { return; };
+                    if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
+                        let model = ui.get_files();
+                        if let Some(mut row) = model.row_data(i) {
+                            row.dims = "unreadable".into();
+                            model.set_row_data(i, row);
+                        }
+                    }
+                });
                 continue;
             };
             let (ow, oh) = (img.width(), img.height());

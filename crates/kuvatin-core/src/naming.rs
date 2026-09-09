@@ -76,6 +76,10 @@ pub fn render_output_path(policy: &OutputPolicy, input: &Path, format: OutputFor
 }
 
 /// If `path` exists, append `-1`, `-2`, ... to the stem until free.
+///
+/// Single-output use only: it consults the filesystem, not the other targets
+/// of a batch. Batches must plan with `pipeline::plan_unique_outputs`, or two
+/// same-stem inputs from different folders will plan the same name.
 pub fn ensure_unique(path: PathBuf) -> PathBuf {
     if !path.exists() {
         return path;

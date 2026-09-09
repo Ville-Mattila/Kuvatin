@@ -22,7 +22,11 @@ pub enum PngOptimize {
     Lossy,
 }
 
+/// Struct-level `serde(default)`: a presets.toml written by an older version
+/// that lacks a field added later still parses, with that field defaulted —
+/// otherwise every such preset would be rejected as "invalid" on load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Job {
     pub resize: ResizeMode,
     pub crop: CropMode,
@@ -175,12 +179,34 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
     liq.set_quality(qmin, qmax)
         .map_err(|e| CoreError::Encode(e.to_string()))?;
 
+    // Borrow the pixels so a second attempt can reuse them without a copy.
     let mut qimg = liq
-        .new_image(pixels, w, h, 0.0)
+        .new_image_borrowed(&pixels, w, h, 0.0)
         .map_err(|e| CoreError::Encode(e.to_string()))?;
-    let mut res = liq
-        .quantize(&mut qimg)
-        .map_err(|e| CoreError::Encode(e.to_string()))?;
+    let mut res = match liq.quantize(&mut qimg) {
+        Ok(r) => r,
+        // The palette can't reach the quality floor (grainy photos, noisy
+        // gradients): drop the floor and retry rather than fail the file, and
+        // if even that is refused, deliver a lossless PNG instead of nothing.
+        Err(imagequant::Error::QualityTooLow) => {
+            liq.set_quality(0, qmax)
+                .map_err(|e| CoreError::Encode(e.to_string()))?;
+            let mut retry = liq
+                .new_image_borrowed(&pixels, w, h, 0.0)
+                .map_err(|e| CoreError::Encode(e.to_string()))?;
+            match liq.quantize(&mut retry) {
+                Ok(r) => {
+                    qimg = retry;
+                    r
+                }
+                Err(imagequant::Error::QualityTooLow) => {
+                    return encode_png(img, PngOptimize::Lossless, quality)
+                }
+                Err(e) => return Err(CoreError::Encode(e.to_string())),
+            }
+        }
+        Err(e) => return Err(CoreError::Encode(e.to_string())),
+    };
     res.set_dithering_level(1.0).ok();
     let (palette, indices) = res
         .remapped(&mut qimg)
@@ -227,7 +253,11 @@ fn flatten_onto_white(img: &DynamicImage) -> image::RgbImage {
 
 /// Decode `input` honoring EXIF orientation (phone photos!) and refusing
 /// animated GIFs (which `image::open` would silently flatten to frame 1).
-fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
+///
+/// Public because the GUI must preview and thumbnail through the SAME decode:
+/// a crop drawn on an un-rotated preview of a portrait phone photo would
+/// otherwise select the wrong region once the pipeline rotates the pixels.
+pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
     let decode_err = |e: image::ImageError| CoreError::Decode {
         path: input.to_path_buf(),
         source: e,
@@ -284,10 +314,13 @@ fn write_unique(base: PathBuf, bytes: &[u8]) -> CoreResult<PathBuf> {
         }
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
             Ok(mut f) => {
-                f.write_all(bytes).map_err(|e| CoreError::Io {
-                    path: candidate.clone(),
-                    source: e,
-                })?;
+                if let Err(e) = f.write_all(bytes) {
+                    // Disk full mid-write: don't leave a half-written file
+                    // that looks finished — the name is ours, so remove it.
+                    drop(f);
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(CoreError::Io { path: candidate, source: e });
+                }
                 return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -577,6 +610,42 @@ mod tests {
     }
 
     /// Batch planning dedupes same-stem targets before anything is written.
+    /// Lossy PNG on a noisy image at maximum quality: libimagequant can't
+    /// reach the quality floor (QUALITY_TOO_LOW) — the encoder must still
+    /// deliver a file (floor dropped, else lossless) instead of failing.
+    #[test]
+    fn lossy_png_survives_quality_too_low() {
+        let mut img = RgbaImage::new(96, 96);
+        let mut seed: u32 = 0x2545_F491;
+        for px in img.pixels_mut() {
+            // xorshift noise: every pixel a different colour.
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let b = seed.to_le_bytes();
+            *px = Rgba([b[0], b[1], b[2], 255]);
+        }
+        let bytes = encode(
+            &DynamicImage::ImageRgba8(img),
+            OutputFormat::Png,
+            100,
+            PngOptimize::Lossy,
+        )
+        .expect("a noisy image must still encode");
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    /// A Job written by an older version (fields missing) deserializes with
+    /// defaults instead of rejecting the whole preset.
+    #[test]
+    fn job_missing_fields_take_defaults() {
+        let job: Job = toml::from_str("format = \"jpeg\"\nquality = 70\n").unwrap();
+        assert_eq!(job.format, OutputFormat::Jpeg);
+        assert_eq!(job.quality, 70);
+        assert_eq!(job.resize, ResizeMode::None);
+        assert_eq!(job.output, OutputPolicy::default());
+    }
+
     #[test]
     fn plan_unique_outputs_dedupes_same_stem() {
         let dir = tempfile::tempdir().unwrap();

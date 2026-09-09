@@ -102,11 +102,12 @@ impl PresetStore {
             store.save(path)?;
             return Ok(store);
         }
-        let text = std::fs::read_to_string(path).map_err(|e| CoreError::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-        match Self::parse_tolerant(&text) {
+        // A file that can't even be READ (permissions, a UTF-16 re-save by
+        // Notepad) must not abort startup any more than a corrupt one does.
+        let parsed = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| Self::parse_tolerant(&text));
+        match parsed {
             Ok((mut store, warning)) => {
                 store.last_load_warning = warning;
                 // Upgrade an older file once, then persist so the migration
@@ -135,13 +136,32 @@ impl PresetStore {
 
     /// Parse a presets file, skipping (not failing on) individual bad presets.
     /// Errors only when the document itself isn't TOML or has no usable shape.
+    /// Schema migrations on the raw TOML document, keyed by its `version`.
+    /// Runs BEFORE typed parsing, so an older file's shape can be rewritten
+    /// into the current one (renames, moved fields, changed enums) — a typed
+    /// parse of an old shape would otherwise fail every entry and shelve the
+    /// user's presets as "invalid". Fields that merely gained a default need
+    /// no step here: `Job` and `OutputPolicy` carry `#[serde(default)]`.
+    fn migrate_document(doc: &mut toml::Value) {
+        let version = doc
+            .get("version")
+            .and_then(|v| v.as_integer())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
+        // v0 (pre-versioning) → v1: no structural change.
+        let _ = version;
+    }
+
     fn parse_tolerant(text: &str) -> Result<(PresetStore, Option<String>), String> {
-        // Fast path: the whole document deserializes cleanly.
-        if let Ok(store) = toml::from_str::<PresetStore>(text) {
+        // Always go through the generic document first so migrations see the
+        // file before any typed parse does.
+        let mut doc: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+        Self::migrate_document(&mut doc);
+        // Fast path: the (migrated) document deserializes cleanly.
+        if let Ok(store) = doc.clone().try_into::<PresetStore>() {
             return Ok((store, None));
         }
-        // Tolerant path: parse as a generic document and recover per-preset.
-        let doc: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+        // Tolerant path: recover per-preset.
         let version = doc
             .get("version")
             .and_then(|v| v.as_integer())
@@ -179,23 +199,18 @@ impl PresetStore {
         }
         // last_load_warning is #[serde(skip)], so it never lands on disk.
         let text = toml::to_string_pretty(self).map_err(|e| CoreError::Encode(e.to_string()))?;
-        let tmp = path.with_extension("toml.tmp");
+        // Per-process temp name: two instances saving at once must not share it.
+        let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
         std::fs::write(&tmp, text).map_err(|e| CoreError::Io {
             path: tmp.clone(),
             source: e,
         })?;
-        // On Windows, rename fails if the target exists — remove it first. The
-        // window between remove and rename is tolerable: the complete new file
-        // already exists on disk, so no crash can leave a *truncated* store.
-        if path.exists() {
-            std::fs::remove_file(path).map_err(|e| CoreError::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-        }
-        std::fs::rename(&tmp, path).map_err(|e| CoreError::Io {
-            path: path.to_path_buf(),
-            source: e,
+        // `rename` replaces an existing target atomically (on Windows too: std
+        // uses MOVEFILE_REPLACE_EXISTING), so there is never a moment without a
+        // presets.toml on disk — no delete-first window for a crash to hit.
+        std::fs::rename(&tmp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            CoreError::Io { path: path.to_path_buf(), source: e }
         })
     }
 }
@@ -203,6 +218,48 @@ impl PresetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file that can't be read as UTF-8 (Notepad's UTF-16 re-save) falls
+    /// back to built-ins with a warning instead of aborting startup.
+    #[test]
+    fn unreadable_file_falls_back_to_builtins() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("presets.toml");
+        std::fs::write(&p, [0xFF, 0xFE, 0x00, 0xD8, 0x41, 0x00]).unwrap();
+        let store = PresetStore::load_or_init(&p).expect("never fails on a bad file");
+        assert!(store.find("Compress PNG").is_some());
+        assert!(store.last_load_warning.is_some());
+    }
+
+    /// Fields added since a file was written take their defaults, and the
+    /// entry parses cleanly (no "skipped" warning) thanks to the struct-level
+    /// serde defaults + document-level migration running before typed parsing.
+    #[test]
+    fn missing_job_fields_take_defaults() {
+        let text = "[[presets]]\nname = \"Old\"\n[presets.job]\nformat = \"webp\"\n";
+        let (store, warning) = PresetStore::parse_tolerant(text).unwrap();
+        assert!(warning.is_none(), "entry must parse cleanly, got {warning:?}");
+        let job = &store.find("Old").unwrap().job;
+        assert_eq!(job.format, OutputFormat::Webp);
+        assert_eq!(job.quality, Job::default().quality);
+    }
+
+    /// Saving over an existing file leaves no temp file behind and never
+    /// deletes the target first.
+    #[test]
+    fn save_replaces_in_place_without_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("presets.toml");
+        let store = PresetStore::builtin();
+        store.save(&p).unwrap();
+        store.save(&p).unwrap();
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["presets.toml".to_string()], "no temp files: {names:?}");
+    }
 
     #[test]
     fn builtins_present() {

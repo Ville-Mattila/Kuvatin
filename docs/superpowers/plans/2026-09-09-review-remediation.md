@@ -42,6 +42,33 @@
   - CI builds the release exe before staging (the closure needs it).
 
 ## §1 Data safety — H1, H2, H7, M1–M4, L1, L3
+
+- **H1** Folder-mode Convert plans every target through
+  `pipeline::plan_unique_outputs` (in-batch + filesystem uniqueness) instead of
+  per-file `ensure_unique`; same-stem inputs from different folders now get
+  `-1`, `-2`, … `ensure_unique` is documented as single-output only.
+- **H2** `decode_oriented` is public; the viewer preview and the thumbnails
+  decode through it, so crops are drawn in the same (EXIF-oriented) pixel
+  space the pipeline crops.
+- **H7** An unreadable selection clears the viewer, drops the crop edit state
+  and marks the row `unreadable`; thumbnails do the same instead of staying
+  blank.
+- **M1** `encode_png_lossy` borrows the pixels (`new_image_borrowed`) and on
+  `QualityTooLow` retries with the floor dropped (`0..qmax`), then falls back
+  to lossless — a noisy photo at quality 100 gets a file, not an error.
+- **M2** `load_or_init` treats an unreadable file (UTF-16 re-save,
+  permissions) like a corrupt one: back up, built-ins, warning — never `Err`.
+- **M3** `Job` has struct-level `#[serde(default)]`; `parse_tolerant` runs a
+  document-level `migrate_document` on the raw TOML BEFORE typed parsing.
+- **M4** The GUI builds output names with `naming::output_file_name`
+  (sanitized suffix) for both the Save dialog default and folder mode.
+- **L1** `write_unique` removes a half-written file on a write error.
+- **L3** Preset `save` renames over the target (no delete-first window) with a
+  per-process temp name.
+- Tests: quality-floor fallback on xorshift noise; `Job` from a TOML missing
+  fields; unreadable presets file → built-ins + warning; missing job fields in
+  a preset entry parse cleanly; save twice leaves no temp files.
+
 ## §2 Engine guards — H3, H4, M7–M10, M14, L14, L15
 ## §3 Explorer & CLI — H8–H10, M12, M13, M15–M17, M34, L7–L10
 ## §4 Editor UX — H5, H6, M11, M18–M26, L11
