@@ -43,12 +43,19 @@ WiX source references its sidecar files (e.g. `License.rtf`) with paths relative
 to the `wix/` folder, so run the command **from the package directory** so those
 relative paths resolve.
 
-The app links GStreamer and bundles its **runtime** into the installer, so the
-build is two steps: harvest the runtime (needs the GStreamer SDK installed and
-`heat.exe` on PATH), then build with the staging path passed to the compiler.
+The app links GStreamer and bundles a **trimmed** subset of its runtime into
+the installer, so the build is three steps: build the release exe (the bundle
+script walks its PE imports to compute which DLLs are needed), harvest the
+runtime (an allow-list of plugins, their DLL closure, and every component's
+license text — needs the GStreamer SDK installed and `heat.exe` on PATH), then
+build with the staging path passed to the compiler. Pass `-AllPlugins` to the
+script to bundle the entire distribution instead (the pre-2.7 behaviour).
 
 ```pwsh
-# 1. Stage the GStreamer runtime + generate wix/gstreamer.wxs (gitignored).
+# 0. The release exe seeds the DLL closure.
+cargo build --release -p kuvatin
+
+# 1. Stage the trimmed GStreamer runtime + licenses; generate wix/gstreamer.wxs (gitignored).
 crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir "$PWD\target\gst-staging"
 
 # 2. Build the MSI, pointing the compiler at the staged runtime.
@@ -60,7 +67,7 @@ cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$(Resolve-Path ..
 run before step 2 (CI does both — see `.github/workflows/release.yml`).
 
 The installer is written to `target/wix/kuvatin-<version>-x86_64.msi`
-(e.g. `kuvatin-1.5.0-x86_64.msi`), now ~106 MB because it carries the GStreamer
+(e.g. `kuvatin-1.5.0-x86_64.msi`), ~33 MB (it was ~106 MB before the runtime was trimmed to what the app loads) because it carries the GStreamer
 runtime. It is under `target/`, which is gitignored and not committed.
 
 ## Registration scope (per-machine MSI, per-user context menu)

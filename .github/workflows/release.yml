@@ -141,10 +141,14 @@ jobs:
           Expand-Archive $zip -DestinationPath $dest -Force
           "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build MSI (bundling GStreamer runtime)
+      - name: Build MSI (trimmed GStreamer runtime + third-party licenses)
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
+          # The bundle script walks kuvatin.exe's imports to compute the DLL
+          # closure, so the release binary must exist before staging (cargo wix
+          # then finds it up to date).
+          cargo build --release -p kuvatin
           $stage = "$env:GITHUB_WORKSPACE\target\gst-staging"
           & crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir $stage -HeatExe "$env:USERPROFILE\wix3-bin\heat.exe"
           cd crates\kuvatin

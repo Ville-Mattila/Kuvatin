@@ -56,7 +56,8 @@ Outputs are written next to the originals with a token-pattern name
   (also via the × on clips and media-bin rows), Esc closes dialogs
 
 The video engine is [GStreamer Editing Services](https://gstreamer.freedesktop.org/documentation/gst-editing-services/);
-the installer bundles the full GStreamer runtime, so nothing needs to be
+the installer bundles a trimmed subset of the GStreamer runtime (only what the app
+actually loads, with every component's license text), so nothing needs to be
 installed separately.
 
 ## Install
@@ -66,6 +67,14 @@ It adds a Start-menu shortcut, registers the Explorer context menu, and always
 upgrades any previous version in place (no duplicate installs). The context-menu
 registration is per-user and **self-heals at app launch**, so other Windows users
 on the same machine get the menu the first time they open Kuvatin.
+
+## Licensing & third-party notices
+
+Kuvatin is GPL-3.0-or-later. The installer bundles a trimmed subset of the
+official GStreamer 1.26.11 runtime (LGPL/GPL/BSD components); it installs the
+full license text of every component under `licenses\` next to the exe plus a
+generated `THIRD-PARTY-NOTICES.txt`, and the corresponding source is linked
+from [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Build & run
 
@@ -118,11 +127,12 @@ correct build command.
 
 ```powershell
 cargo install cargo-wix
-# install WiX v3, then stage + harvest the GStreamer runtime and build:
+# install WiX v3, build the release exe (its imports seed the DLL closure), then stage + build:
+cargo build --release -p kuvatin
 crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir target\gst-staging
 cd crates\kuvatin
 cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging"
-# produces target/wix/kuvatin-<version>-x86_64.msi (~110 MB with the bundled runtime)
+# produces target/wix/kuvatin-<version>-x86_64.msi (~33 MB with the trimmed bundled runtime + licenses)
 ```
 
 ## Architecture

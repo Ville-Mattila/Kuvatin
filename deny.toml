@@ -1,0 +1,60 @@
+﻿# cargo-deny configuration: license compliance + security advisories for the
+# Rust dependency tree. Run `cargo deny check` (licenses, advisories, bans,
+# sources). Kuvatin is GPL-3.0-or-later, so GPL-compatible licenses are fine;
+# anything not listed below fails the check and must be reviewed.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+# Fail on unmaintained crates only when they are DIRECT dependencies; the
+# unmaintained crates in Slint's transitive text stack (paste, rustybuzz,
+# ttf-parser) are Slint's to replace and are reported as warnings instead.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    # GPL-family: Kuvatin itself is GPL-3.0-or-later.
+    "GPL-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "LGPL-2.1",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0",
+]
+# Crates whose license expressions cargo-deny can't resolve from metadata.
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
