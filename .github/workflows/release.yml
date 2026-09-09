@@ -154,8 +154,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path $fixdir | Out-Null
           $fx = Join-Path $fixdir "fixture_av.webm"
           $img = Join-Path $fixdir "fixture.png"
-          gst-launch-1.0 -e videotestsrc num-buffers=150 ! "video/x-raw,width=320,height=180" ! vp8enc ! webmmux name=m ! filesink location=$fx audiotestsrc num-buffers=300 ! audioconvert ! vorbisenc ! m.
-          gst-launch-1.0 videotestsrc num-buffers=1 ! "video/x-raw,width=320,height=180" ! pngenc ! filesink location=$img
+          # Forward slashes: gst-launch unescapes backslashes in property values.
+          $fxl = $fx -replace "\\", "/"
+          $imgl = $img -replace "\\", "/"
+          gst-launch-1.0 -e videotestsrc num-buffers=150 ! "video/x-raw,width=320,height=180" ! vp8enc ! webmmux name=m ! filesink location="$fxl" audiotestsrc num-buffers=300 ! audioconvert ! vorbisenc ! m.
+          gst-launch-1.0 videotestsrc num-buffers=1 ! "video/x-raw,width=320,height=180" ! pngenc ! filesink location="$imgl"
           if (-not (Test-Path $fx) -or (Get-Item $fx).Length -eq 0) { throw "fixture webm not created at $fx" }
           if (-not (Test-Path $img) -or (Get-Item $img).Length -eq 0) { throw "fixture png not created at $img" }
           $env:GST_TEST_FILE = $fx
@@ -172,7 +175,10 @@ jobs:
           cargo build --release -p kuvatin
           $frames = Join-Path $env:GITHUB_WORKSPACE "target\smoke\frames"
           New-Item -ItemType Directory -Force -Path $frames | Out-Null
-          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$frames\frame_%04d.png"
+          # gst-launch unescapes backslashes in property values (C:\x -> C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
           $first = Join-Path $frames "frame_0000.png"
           if (-not (Test-Path $first)) { throw "frames not generated" }
           $p = Start-Process -FilePath "target\release\kuvatin.exe" -ArgumentList "--sequence-mp4","--fps","24","--quiet","`"$first`"" -Wait -NoNewWindow -PassThru

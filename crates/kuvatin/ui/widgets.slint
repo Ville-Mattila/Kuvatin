@@ -1,0 +1,540 @@
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Shared controls. Every colour comes from Theme; every button is
+// keyboard-reachable and announced to assistive tech.
+
+// A clearly visible, fully custom quality slider (0..100). Replaces the
+// std-widgets Slider, which rendered invisibly against the dark theme.
+export component QualitySlider inherits Rectangle {
+    in-out property <int> value;
+    // Pin the height: inside a layout a plain `height` is only a preferred size
+    // and the slider would stretch to fill extra vertical space (dropping the
+    // track to the middle). min/max keep it a fixed 24px row.
+    min-height: 24px;
+    max-height: 24px;
+    horizontal-stretch: 1;
+    // Do not absorb the panel's extra vertical space (that's the spacer's job);
+    // otherwise the QUALITY group stretches and the slider drops to its middle.
+    vertical-stretch: 0;
+    accessible-role: slider;
+    accessible-label: "Quality";
+    accessible-value: root.value + "";
+
+    // track
+    Rectangle {
+        y: parent.height / 2 - 3px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.line;
+        // filled portion (the short animate gives clicks/preset changes a glide
+        // without making drags feel laggy)
+        Rectangle {
+            x: 0;
+            width: parent.width * (root.value / 100.0);
+            height: parent.height;
+            border-radius: 3px;
+            background: Theme.accent;
+            animate width { duration: 80ms; easing: ease-out; }
+        }
+    }
+
+    // knob
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: ta.has-hover || ta.pressed ? #e6fffb : white;
+        border-width: 2px;
+        border-color: Theme.accent;
+        y: parent.height / 2 - 8px;
+        x: (root.width - 16px) * (root.value / 100.0);
+        animate x { duration: 80ms; easing: ease-out; }
+        animate background { duration: 100ms; }
+    }
+
+    ta := TouchArea {
+        function set(mx: length) {
+            root.value = Math.clamp(Math.round(mx / root.width * 100), 0, 100);
+        }
+        moved => { ta.set(ta.mouse-x); }
+        clicked => { ta.set(ta.mouse-x); }
+    }
+}
+
+// A card surface used for the two main panels.
+export component Card inherits Rectangle {
+    background: Theme.card;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.line;
+}
+
+// Secondary (card-colored) button used for Add/Clear. Keyboard-reachable
+// (Tab focus, Enter/Space) and announced as a button to assistive tech.
+export component SecondaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 34px;
+    min-width: 96px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: fs.has-focus ? Theme.accent : Theme.line;
+    background: !root.enabled
+        ? Theme.disabled
+        : (ta.pressed ? Theme.line : (ta.has-hover ? #262b34 : Theme.card));
+    animate background, border-color { duration: 130ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    Text {
+        text: root.text;
+        color: root.enabled ? Theme.ink : Theme.disabled-ink;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: 130ms; }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { fs.focus(); root.clicked(); }
+    }
+}
+
+// A modal dialog button (Cancel / OK / the primary action). Same keyboard and
+// accessibility contract as SecondaryButton; ≥32 px tall.
+export component DialogButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    min-width: 92px;
+    height: 32px;
+    border-radius: 7px;
+    background: !root.enabled
+        ? Theme.disabled
+        : (root.primary
+            ? (ta.has-hover ? Theme.accent : Theme.accent2)
+            : (ta.has-hover ? Theme.hover : Theme.card));
+    border-width: fs.has-focus ? 2px : (root.primary ? 0px : 1px);
+    border-color: fs.has-focus ? (root.primary ? #ffffff : Theme.accent) : Theme.line2;
+    animate background, border-color { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    Text {
+        text: root.text;
+        font-size: 11px;
+        font-weight: root.primary ? 700 : 600;
+        color: !root.enabled ? Theme.disabled-ink : (root.primary ? Theme.on-accent : Theme.ink2);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { fs.focus(); root.clicked(); }
+    }
+}
+
+// A small square "remove" affordance (×). ≥24 px hit target regardless of the
+// visual size, hover-revealed by the owner via `shown`.
+export component RemoveButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> shown: true;
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: ta.has-hover ? #ff547033 : transparent;
+    opacity: (root.shown || ta.has-hover) && root.enabled ? 1.0 : 0.0;
+    animate opacity { duration: 130ms; }
+    animate background { duration: 100ms; }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    Text {
+        text: "✕";
+        color: ta.has-hover ? #ff8098 : #7a828f;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        animate color { duration: 100ms; }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Field label: bold, muted.
+export component FieldLabel inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+// One resize handle for a corner of the crop rectangle. It owns its own drag
+// bookkeeping (start values captured on press) and reports the dragged corner
+// position back as normalized deltas via the `dragged` callback.
+export component CropHandle inherits Rectangle {
+    in property <float> box-w;
+    in property <float> box-h;
+    // Which corner: -1 = left/top edge moves, +1 = right/bottom edge moves.
+    in property <float> sign-x;
+    in property <float> sign-y;
+    // Fired when the drag starts, so the owner can capture the edges to offset.
+    callback pressed();
+    // dx, dy are normalized (0..1) drag deltas since press.
+    callback dragged(float, float);
+
+    // Large transparent hit area so the corner is easy to grab; the visible
+    // square is centered within it. The TouchArea fills `root`.
+    width: 32px;
+    height: 32px;
+    background: transparent;
+
+    property <length> sx;
+    property <length> sy;
+
+    // Visible handle: a smaller teal square with a dark outline, centered.
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 5px;
+        background: ha.pressed ? Theme.accent-pressed : Theme.accent;
+        animate background { duration: 100ms; }
+        border-width: 2px;
+        border-color: Theme.on-accent;
+    }
+
+    ha := TouchArea {
+        mouse-cursor: move;
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.down) {
+                root.sx = self.mouse-x;
+                root.sy = self.mouse-y;
+                root.pressed();
+            }
+        }
+        moved => {
+            root.dragged(
+                (self.mouse-x - root.sx) / (root.box-w * 1px),
+                (self.mouse-y - root.sy) / (root.box-h * 1px),
+            );
+        }
+    }
+}
+
+// A window-control button for the custom title bar. The icon is drawn as a
+// vector shape (not a font glyph) so it stays crisp: kind = "min" | "max" | "close".
+export component WinButton inherits Rectangle {
+    in property <string> kind;
+    in property <bool> danger: false;
+    callback clicked();
+    width: 46px;
+    background: ta.has-hover ? (root.danger ? #e23b3b : Theme.line) : transparent;
+    animate background { duration: 110ms; }
+    accessible-role: button;
+    accessible-label: root.kind == "min" ? "Minimize" : (root.kind == "max" ? "Maximize" : "Close");
+    property <color> ink: ta.has-hover && root.danger ? #ffffff : #c8ccd4;
+    animate ink { duration: 110ms; }
+
+    // Minimize: a single horizontal line.
+    if root.kind == "min": Rectangle {
+        width: 11px;
+        height: 1px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: root.ink;
+    }
+    // Maximize: a square outline.
+    if root.kind == "max": Rectangle {
+        width: 10px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-width: 1px;
+        border-color: root.ink;
+        background: transparent;
+    }
+    // Close: an X drawn as two diagonal strokes.
+    if root.kind == "close": Path {
+        width: 11px;
+        height: 11px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        stroke: root.ink;
+        stroke-width: 1.2px;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        MoveTo { x: 0; y: 0; }
+        LineTo { x: 100; y: 100; }
+        MoveTo { x: 100; y: 0; }
+        LineTo { x: 0; y: 100; }
+    }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A clean segmented control: a rounded track with the active segment as a
+// rounded-rect that fills its slice. Used for the mode and the View/Crop toggles.
+export component SegToggle inherits Rectangle {
+    in property <[string]> labels;
+    in property <int> selected;
+    callback select(int);
+    height: 28px;
+    border-radius: 8px;
+    background: #14171c;
+    border-width: 1px;
+    border-color: Theme.line;
+    HorizontalLayout {
+        padding: 3px;
+        spacing: 0px;
+        for seg[i] in root.labels: Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 6px;
+            background: root.selected == i ? Theme.accent : (ta.has-hover ? Theme.card : transparent);
+            animate background { duration: 120ms; }
+            accessible-role: button;
+            accessible-label: seg;
+            accessible-checkable: true;
+            accessible-checked: root.selected == i;
+            Text {
+                text: seg;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 12.5px;
+                font-weight: 600;
+                color: root.selected == i ? Theme.on-accent : Theme.muted;
+                animate color { duration: 120ms; }
+            }
+            ta := TouchArea { clicked => { root.select(i); } }
+        }
+    }
+}
+
+// A draggable vertical divider between body panels. Emits the horizontal drag
+// delta since press; the parent clamps it onto a panel width. (The divider moves
+// with the resized panel, so the per-event delta self-converges to track the cursor.)
+export component Splitter inherits Rectangle {
+    callback dragged(length);
+    width: 12px;
+    background: transparent;
+    Rectangle {
+        width: 2px;
+        height: 56%;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        border-radius: 1px;
+        background: sta.has-hover || sta.pressed ? Theme.accent : Theme.line;
+        animate background { duration: 120ms; }
+    }
+    sta := TouchArea {
+        mouse-cursor: ew-resize;
+        moved => { root.dragged(self.mouse-x - self.pressed-x); }
+    }
+}
+
+// A compact popover number editor used by the inline crop toolbar. The
+// displayed value is computed by the caller (one-way `value`); typing a number
+// and pressing Enter fires `edited(int)` with the value clamped to [min,max].
+// Callback-based (not two-way bound to a computed property) to avoid binding
+// loops.
+export component NumberDropdown inherits Rectangle {
+    in property <string> label;
+    in property <int> value;        // display value (computed by caller, one-way)
+    in property <int> minimum: 0;
+    in property <int> maximum: 100000;
+    callback edited(int);           // fires with the new clamped value
+    width: 66px; height: 24px; border-radius: 6px;
+    background: ta.has-hover ? #1b202a : Theme.window;
+    border-width: 1px;
+    border-color: ta.has-hover ? #46505f : Theme.line2;
+    animate background, border-color { duration: 120ms; }
+    HorizontalLayout {
+        padding-left: 6px; padding-right: 6px;
+        Text { text: root.label + " " + root.value; color: #e6e9ef; font-size: 10px; vertical-alignment: center; }
+    }
+    ta := TouchArea { clicked => { popup.show(); } }
+    // A real PopupWindow renders in a top-level overlay, so the editor is never
+    // clipped or overdrawn by controls stacked below it in a dialog. It only
+    // dismisses on an *outside* click, so clicking into the field keeps it open.
+    popup := PopupWindow {
+        x: 0; y: root.height + 3px; width: 92px; height: 30px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.card; border-radius: 6px; border-width: 1px; border-color: Theme.line2;
+            opacity: 0;
+            animate opacity { duration: 130ms; easing: ease-out; }
+            init => { self.opacity = 1; }
+            LineEdit {
+                width: 84px; x: 4px; y: 3px;
+                text: root.value;
+                input-type: number;
+                accepted(t) => {
+                    root.edited(Math.clamp(t.to-float(), root.minimum, root.maximum));
+                    popup.close();
+                }
+            }
+        }
+    }
+}
+
+// A small pill button/chip: highlights when `active`, fires `clicked`. Used for
+// the resolution/bitrate presets in the export dialog.
+export component PillButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+    height: 24px;
+    border-radius: 6px;
+    background: pb-ta.has-hover ? Theme.hover : (root.active ? #163a33 : Theme.card);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.line2;
+    animate background, border-color { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.active;
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px;
+        Text {
+            text: root.text; color: root.active ? #7ee6d8 : Theme.ink2;
+            font-size: 10px; font-weight: 600; vertical-alignment: center;
+            animate color { duration: 120ms; }
+        }
+    }
+    pb-ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// A thin 0..1 slider used for the video scrubber and volume. Reports the new
+// fraction via `changed` on click or drag, and `released` when the pointer
+// lets go (the scrubber lands frame-accurately then).
+export component Scrubber inherits Rectangle {
+    in property <float> value;     // 0..1
+    in property <string> label: "Position";
+    callback changed(float);
+    callback released();
+    min-height: 18px;
+    max-height: 18px;
+    horizontal-stretch: 1;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: Math.round(root.value * 100) + "%";
+    Rectangle {
+        y: parent.height / 2 - 3px;
+        height: 6px;
+        border-radius: 3px;
+        background: Theme.line;
+        Rectangle {
+            x: 0;
+            width: parent.width * Math.clamp(root.value, 0, 1);
+            height: parent.height;
+            border-radius: 3px;
+            background: Theme.accent;
+            // Linear 90ms: interpolates the ~100ms playback poll into a
+            // continuous glide instead of a stepping bar.
+            animate width { duration: 90ms; easing: linear; }
+        }
+    }
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: sta.has-hover || sta.pressed ? #e6fffb : white;
+        border-width: 2px;
+        border-color: Theme.accent;
+        y: parent.height / 2 - 6px;
+        x: (root.width - 12px) * Math.clamp(root.value, 0, 1);
+        animate x { duration: 90ms; easing: linear; }
+        animate background { duration: 100ms; }
+    }
+    sta := TouchArea {
+        function emit(mx: length) { root.changed(Math.clamp(mx / root.width, 0, 1)); }
+        moved => { sta.emit(sta.mouse-x); }
+        clicked => { sta.emit(sta.mouse-x); }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.up) { root.released(); }
+        }
+    }
+}
+
+// Labelled slider for the inspector: value ranges over [min, max] and the
+// current value is shown on the right. `changed` fires live during a drag.
+export component InspSlider inherits Rectangle {
+    in property <string> label;
+    in property <float> min: 0;
+    in property <float> max: 100;
+    in property <string> suffix: "";
+    in-out property <float> value: 0;
+    callback changed();
+    height: 38px;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: Math.round(root.value) + root.suffix;
+    property <float> frac: (root.max - root.min) > 0
+        ? Math.clamp((root.value - root.min) / (root.max - root.min), 0, 1) : 0;
+    VerticalLayout {
+        spacing: 5px;
+        HorizontalLayout {
+            Text { text: root.label; color: Theme.muted2; font-size: 9.5px; font-weight: 600; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: Math.round(root.value) + root.suffix; color: #cfd6e2; font-size: 9.5px; font-weight: 600; }
+        }
+        Rectangle {
+            height: 12px;
+            track := Rectangle {
+                y: parent.height / 2 - 3px;
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.line;
+                Rectangle {
+                    x: 0; width: parent.width * root.frac; height: parent.height;
+                    border-radius: 3px;
+                    background: @linear-gradient(90deg, #3f7df5 0%, Theme.accent 100%);
+                    // Glides when a different clip is selected and its values load.
+                    animate width { duration: 80ms; easing: ease-out; }
+                }
+            }
+            knob := Rectangle {
+                width: 12px; height: 12px; border-radius: 6px;
+                background: kta.has-hover || kta.pressed ? #e6fffb : white;
+                border-width: 2px; border-color: Theme.accent;
+                y: parent.height / 2 - 6px;
+                x: (parent.width - 12px) * root.frac;
+                animate x { duration: 80ms; easing: ease-out; }
+                animate background { duration: 100ms; }
+            }
+            kta := TouchArea {
+                function emit(mx: length) {
+                    root.value = root.min + Math.clamp(mx / self.width, 0, 1) * (root.max - root.min);
+                    root.changed();
+                }
+                moved => { kta.emit(kta.mouse-x); }
+                clicked => { kta.emit(kta.mouse-x); }
+            }
+        }
+    }
+}

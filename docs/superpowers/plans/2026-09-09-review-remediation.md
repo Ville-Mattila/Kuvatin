@@ -264,4 +264,52 @@
 
 ## §6 Structure — M5, M6, M27, M35, L2, L4–L6, L12, L13
 
-(Phases §1–§6 are filled in as they are executed.)
+- **M5** `process_image` / `encode` / `apply_crop` / `resample` take the
+  image by value, so the default preset's no-op path hands one buffer
+  through (it made four full-size copies per file); the lossy-PNG path views
+  the RGBA8 bytes as libimagequant's pixel type in place; `flatten_onto_white`
+  passes an RGB8 image through.
+- **M6** An RGBA image with any transparency is resampled with
+  premultiplied alpha (and un-premultiplied after) — straight-alpha Lanczos
+  averaged transparent black into every soft edge.
+- **M27** The preview callback receives a borrowed `FrameView` over the
+  mapped GStreamer plane; the GUI copies once, straight into the
+  `SharedPixelBuffer` it displays, and the UI thread only wraps it.
+- **M35** `gui.rs` (2,794 lines) is `gui/{mod, image_mode, presets,
+  video/{mod, import, timeline, export}, win_drop}.rs`: `run()` is 80
+  lines that build `ImageState`, `VideoState`, `ImportState`, `ExportState`
+  and the timer bag and call each module's `wire()`. Handler bodies moved
+  verbatim (the split was assembled from line ranges, not retyped). Delete
+  preset asks for confirmation.
+- **L2** The 32768 px ceiling scales both sides together (a 4:1 panorama
+  stayed 4:1).
+- **L4** GIF encodes at NeuQuant speed 10; a still GIF comes out of the
+  animation-check pass instead of a second decode.
+- **L5** The dead `preset_name` parameter is gone from `process_file` and
+  every batch entry point.
+- **L6** Tests: `process_file_to`, `run_jobs_to`, an EXIF-rotated JPEG
+  fixture (orientation 6 spliced in as an APP1 segment — the rotation is
+  observed on the pixels), the portrait aspect-crop branch, height-only /
+  no-aspect / fit-both resizes, BMP/TIFF/GIF round trips, the still-GIF
+  path, the fringe and ceiling behaviours (core 67).
+- **L12** The five timers are owned by `run()` and dropped before the
+  project is dropped explicitly, so the pipeline reaches NULL at exit; the
+  import timer returns early while idle.
+- **L13** `app.slint` is `theme.slint` (a `Theme` global: the palette + the
+  two shared sizes), `widgets.slint` (every shared control), `modal.slint`
+  (backdrop/rise/card, used by all five modals), `progress.slint`
+  (`ProgressWindow`, now on `DialogButton`) and `app.slint` (the window).
+  `ClipKind`, `DragMode` and `EditMode` are enums (the clip kind crosses to
+  Rust as `ClipKind`); the "0 = bottom" / "placeholder" comments are fixed;
+  the 44 px row and 30 px track heights are `Theme` sizes. `@tr` is not
+  introduced (single-language app).
+- Not done, deliberately: the review's suggestion to build the preview
+  `SharedPixelBuffer` inside the video crate would tie the engine to Slint;
+  the borrowed-view API gets the same single copy without the dependency.
+
+## Release gate for 2.7.0
+
+Every phase above is on master; CI (fmt, clippy, deny, core + gui + video
+suites, smoke render) is green; the MSI was built locally (ICE-clean) and
+the tag run additionally install-tests it. The landing page and README
+describe the new behaviour.

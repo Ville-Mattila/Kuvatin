@@ -6,7 +6,7 @@ pub(super) mod export;
 pub(super) mod import;
 mod timeline;
 
-use super::{show_error, AppWindow, TimelineClip, VideoAsset};
+use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
 use export::ExportState;
 use import::ImportState;
 use slint::{
@@ -429,7 +429,11 @@ fn add_to_timeline(
                 duration: info.duration.as_secs_f32(),
                 inpoint: 0.0,
                 name,
-                kind: if is_img { 1 } else { 0 },
+                kind: if is_img {
+                    ClipKind::Image
+                } else {
+                    ClipKind::Video
+                },
                 selected: false,
                 thumb,
             });
@@ -481,7 +485,7 @@ fn add_sequence_to_timeline(
                 duration: info.duration.as_secs_f32(),
                 inpoint: 0.0,
                 name: clip_name.into(),
-                kind: 2,
+                kind: ClipKind::Sequence,
                 selected: false,
                 thumb,
             });

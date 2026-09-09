@@ -2,7 +2,7 @@
 //! magnetic snapping, track rows and clip removal.
 
 use super::VideoState;
-use crate::gui::{AppWindow, TimelineClip};
+use crate::gui::{AppWindow, ClipKind, TimelineClip};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,7 +29,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             sel_idx.set(i);
             let mut name = SharedString::new();
             let mut sel_id = SharedString::new();
-            let mut sel_kind = 0;
+            let mut sel_kind = ClipKind::Video;
             for idx in 0..tl_clips.row_count() {
                 if let Some(mut c) = tl_clips.row_data(idx) {
                     c.selected = idx as i32 == i;
@@ -43,7 +43,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             }
             ui.set_inspector_name(name);
             // Only real videos carry audio — stills and image sequences don't.
-            ui.set_insp_has_audio(sel_kind == 0);
+            ui.set_insp_has_audio(sel_kind == ClipKind::Video);
             // Give a fresh clip an aspect-correct default, then reflect its
             // current layout into the sliders.
             {
