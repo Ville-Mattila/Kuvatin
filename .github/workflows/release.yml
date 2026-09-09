@@ -246,7 +246,9 @@ jobs:
           Copy-Item "target\smoke\frames\frame_*.png" "$work\frames"
           # 1) a preset conversion (image pipeline)
           Copy-Item "$work\frames\frame_0000.png" "$work\photo.png"
-          $p = Start-Process -FilePath $exe -ArgumentList "--preset","Convert to WebP","--quiet","`"$work\photo.png`"" -Wait -NoNewWindow -PassThru
+          # Start-Process joins the list with spaces and does NOT quote, so the
+          # preset name must carry its own quotes (it arrived as `Convert`).
+          $p = Start-Process -FilePath $exe -ArgumentList "--preset","`"Convert to WebP`"","--quiet","`"$work\photo.png`"" -Wait -NoNewWindow -PassThru
           if ($p.ExitCode -ne 0) { throw "installed --preset exited $($p.ExitCode)" }
           $webp = Get-ChildItem "$work\*.webp" | Select-Object -First 1
           if (-not $webp -or $webp.Length -lt 100) { throw "installed exe produced no WebP" }
