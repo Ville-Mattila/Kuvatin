@@ -17,6 +17,9 @@ directories = { workspace = true }
 webp = "0.3"
 oxipng = { version = "9", default-features = false, features = ["parallel"] }
 imagequant = "4"
+# Same crate imagequant uses for its pixel type: lets an RGBA8 buffer be viewed
+# as its input in place (see pipeline::quantize_png).
+rgb = "0.8"
 png = "0.17"
 
 [dev-dependencies]

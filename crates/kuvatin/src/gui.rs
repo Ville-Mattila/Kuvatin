@@ -170,16 +170,22 @@ fn remove_timeline_clip(
 /// Create a GES editing project whose composited preview frames are pushed to
 /// the UI's `video-frame` (from a GStreamer thread, hopped to the UI thread).
 fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Project> {
-    let pending: Arc<Mutex<Option<kuvatin_video::Frame>>> = Arc::new(Mutex::new(None));
+    // The newest frame waiting for the UI thread; if the UI lags, a later
+    // frame simply replaces it (no queue to drain).
+    let pending: Arc<Mutex<Option<SharedPixelBuffer<Rgba8Pixel>>>> = Arc::new(Mutex::new(None));
     let ui_for_frame = ui_weak.clone();
-    match kuvatin_video::Project::new(move |frame| {
-        *pending.lock().unwrap() = Some(frame);
+    match kuvatin_video::Project::new(move |view| {
+        // ONE copy, on the GStreamer thread, straight from the mapped buffer
+        // into the pixel buffer the UI will display (SharedPixelBuffer is
+        // Send; only slint::Image is not). The UI thread just wraps it.
+        let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(view.width, view.height);
+        view.copy_packed_into(buf.make_mut_bytes());
+        *pending.lock().unwrap() = Some(buf);
         let ui_for_frame = ui_for_frame.clone();
         let pending = pending.clone();
         let _ = slint::invoke_from_event_loop(move || {
-            if let (Some(ui), Some(f)) = (ui_for_frame.upgrade(), pending.lock().unwrap().take()) {
-                let buf =
-                    SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&f.rgba, f.width, f.height);
+            if let (Some(ui), Some(buf)) = (ui_for_frame.upgrade(), pending.lock().unwrap().take())
+            {
                 ui.set_video_frame(Image::from_rgba8(buf));
             }
         });
@@ -354,6 +360,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
 
     let ui = AppWindow::new()?;
+    // Every repeating timer lives here, owned by run(): a forgotten timer kept
+    // its closure — and the Rc<RefCell<Option<Project>>> inside — alive past
+    // the window, so the project was never dropped and GStreamer threads were
+    // still running at process exit.
+    let mut timers: Vec<slint::Timer> = Vec::new();
 
     // Initialize the preset-names model and the format/quality controls from the
     // first preset so they reflect (and can override) what will actually be applied.
@@ -509,7 +520,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             },
         );
         // Keep the timer alive for the lifetime of the window.
-        std::mem::forget(setup_timer);
+        timers.push(setup_timer);
 
         // Drain dropped paths on the UI thread. Images go to the file list;
         // media is queued for the import worker (discovered off-thread, then
@@ -540,7 +551,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 }
             },
         );
-        std::mem::forget(drain_timer);
+        timers.push(drain_timer);
     }
 
     // Custom window-frame controls. On Windows these drive the native move/
@@ -1267,6 +1278,12 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 slint::TimerMode::Repeated,
                 std::time::Duration::from_millis(60),
                 move || {
+                    // Idle (no file import, no sequence import): nothing can
+                    // be waiting — two Cell reads instead of two mutex locks
+                    // sixteen times a second for the life of the window.
+                    if import_q.total.get() == 0 && !seq_active.get() {
+                        return;
+                    }
                     loop {
                         let next = ready.lock().unwrap().pop_front();
                         let Some((item_gen, path, thumb_frame, err)) = next else {
@@ -1378,7 +1395,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     }
                 },
             );
-            std::mem::forget(timer);
+            timers.push(timer);
         }
 
         // Media-bin item "add": append that file to the timeline as a new clip.
@@ -2025,7 +2042,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     }
                 },
             );
-            std::mem::forget(timer);
+            timers.push(timer);
         }
 
         // Delete a timeline clip: the × on the selected clip.
@@ -2168,11 +2185,15 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     ui.set_video_time(format!("{} / {}", fmt(pos), fmt(dur)).into());
                 },
             );
-            std::mem::forget(timer);
+            timers.push(timer);
         }
     }
 
     ui.run()?;
+    // Orderly teardown: stop the timers (their closures hold the project), then
+    // drop the project explicitly so its pipeline reaches NULL before exit.
+    drop(timers);
+    video_project.borrow_mut().take();
     Ok(())
 }
 

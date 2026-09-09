@@ -3037,6 +3037,7 @@ dependencies = [
  "oxipng",
  "png 0.17.16",
  "rayon",
+ "rgb",
  "serde",
  "tempfile",
  "thiserror 1.0.69",

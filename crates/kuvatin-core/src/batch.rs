@@ -46,16 +46,11 @@ pub const CANCELLED: &str = "cancelled";
 /// Run `job` over every input in parallel. `on_progress` is called once per
 /// finished file (from worker threads — it must be `Sync`). A single failing
 /// file never aborts the batch; its error is captured in the returned results.
-pub fn run_batch<F>(
-    inputs: &[PathBuf],
-    job: &Job,
-    preset_name: &str,
-    on_progress: F,
-) -> Vec<FileResult>
+pub fn run_batch<F>(inputs: &[PathBuf], job: &Job, on_progress: F) -> Vec<FileResult>
 where
     F: Fn(Progress) + Sync,
 {
-    run_batch_until(inputs, job, preset_name, on_progress, || false)
+    run_batch_until(inputs, job, on_progress, || false)
 }
 
 /// Like [`run_batch`], but stops picking up inputs once `cancelled()` returns
@@ -64,7 +59,6 @@ where
 pub fn run_batch_until<F, C>(
     inputs: &[PathBuf],
     job: &Job,
-    preset_name: &str,
     on_progress: F,
     cancelled: C,
 ) -> Vec<FileResult>
@@ -73,23 +67,22 @@ where
     C: Fn() -> bool + Sync,
 {
     let items: Vec<(PathBuf, Job)> = inputs.iter().map(|p| (p.clone(), job.clone())).collect();
-    run_jobs_until(&items, preset_name, on_progress, cancelled)
+    run_jobs_until(&items, on_progress, cancelled)
 }
 
 /// Like `run_batch`, but each input carries its own `Job` (e.g. a per-image
 /// crop). Runs in parallel with the same failure isolation and progress
 /// semantics as `run_batch`.
-pub fn run_jobs<F>(items: &[(PathBuf, Job)], preset_name: &str, on_progress: F) -> Vec<FileResult>
+pub fn run_jobs<F>(items: &[(PathBuf, Job)], on_progress: F) -> Vec<FileResult>
 where
     F: Fn(Progress) + Sync,
 {
-    run_jobs_until(items, preset_name, on_progress, || false)
+    run_jobs_until(items, on_progress, || false)
 }
 
 /// [`run_jobs`] with the cancellation semantics of [`run_batch_until`].
 pub fn run_jobs_until<F, C>(
     items: &[(PathBuf, Job)],
-    preset_name: &str,
     on_progress: F,
     cancelled: C,
 ) -> Vec<FileResult>
@@ -108,8 +101,7 @@ where
                     outcome: Err(CANCELLED.into()),
                 };
             }
-            let outcome =
-                isolate(|| process_file(input, job, preset_name).map_err(|e| e.to_string()));
+            let outcome = isolate(|| process_file(input, job).map_err(|e| e.to_string()));
             let result = FileResult {
                 input: input.clone(),
                 outcome,
@@ -176,7 +168,7 @@ mod tests {
             ..Job::default()
         };
         let calls = AtomicUsize::new(0);
-        let results = run_batch(&[good.clone(), bad.clone()], &job, "t", |_p| {
+        let results = run_batch(&[good.clone(), bad.clone()], &job, |_p| {
             calls.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -218,7 +210,6 @@ mod tests {
             run_batch_until(
                 &inputs,
                 &job,
-                "t",
                 |_p| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     stop.store(true, Ordering::SeqCst); // cancel after the first finish
@@ -256,6 +247,41 @@ mod tests {
         );
     }
 
+    /// The GUI's real path: explicit targets, parents created, progress per
+    /// item, failures isolated.
+    #[test]
+    fn run_jobs_to_writes_each_items_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        RgbaImage::from_pixel(12, 12, Rgba([9, 9, 9, 255]))
+            .save(&a)
+            .unwrap();
+        let bad = dir.path().join("bad.png");
+        std::fs::write(&bad, b"nope").unwrap();
+        let out_a = dir.path().join("out").join("nested").join("a.webp");
+        let out_bad = dir.path().join("out").join("bad.webp");
+        let job = Job {
+            format: OutputFormat::Webp,
+            ..Job::default()
+        };
+        let items = vec![
+            (a.clone(), job.clone(), out_a.clone()),
+            (bad.clone(), job, out_bad.clone()),
+        ];
+        let calls = AtomicUsize::new(0);
+        let results = run_jobs_to(&items, |p| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(p.total, 2);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let ra = results.iter().find(|r| r.input == a).unwrap();
+        assert_eq!(ra.outcome.as_ref().unwrap(), &out_a);
+        assert!(out_a.exists(), "parents created, file written");
+        let rb = results.iter().find(|r| r.input == bad).unwrap();
+        assert!(rb.outcome.is_err());
+        assert!(!out_bad.exists());
+    }
+
     #[test]
     fn run_jobs_uses_each_files_own_job() {
         use crate::format::OutputFormat;
@@ -284,7 +310,7 @@ mod tests {
                 },
             ),
         ];
-        let results = run_jobs(&items, "t", |_p| {});
+        let results = run_jobs(&items, |_p| {});
         let ra = results
             .iter()
             .find(|r| r.input == a)

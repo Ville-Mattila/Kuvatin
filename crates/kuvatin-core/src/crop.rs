@@ -105,12 +105,17 @@ fn place(anchor: Anchor, src_w: u32, src_h: u32, w: u32, h: u32) -> (u32, u32, u
     (x, y, w, h)
 }
 
-/// Apply a crop, returning a new image. `None` returns a clone.
-pub fn apply_crop(img: &DynamicImage, mode: CropMode) -> DynamicImage {
+/// Apply a crop. `None` — or a rectangle that covers the whole image — hands
+/// the image back untouched (no copy; the default preset used to clone every
+/// input here for nothing).
+pub fn apply_crop(img: DynamicImage, mode: CropMode) -> DynamicImage {
     if let CropMode::None = mode {
-        return img.clone();
+        return img;
     }
     let (x, y, w, h) = compute_crop_rect(mode, img.width(), img.height());
+    if (x, y, w, h) == (0, 0, img.width(), img.height()) {
+        return img;
+    }
     img.crop_imm(x, y, w, h)
 }
 
@@ -164,6 +169,38 @@ mod tests {
             anchor: Anchor::Center,
         };
         assert_eq!(compute_crop_rect(m, 800, 600), (100, 0, 600, 600));
+    }
+
+    /// The portrait branch of the aspect crop: the ratio is limited by the
+    /// width, so the crop spans the full width and is centred vertically.
+    #[test]
+    fn aspect_square_from_portrait() {
+        let m = CropMode::AspectRatio {
+            w: 1,
+            h: 1,
+            anchor: Anchor::Center,
+        };
+        assert_eq!(compute_crop_rect(m, 600, 800), (0, 100, 600, 600));
+        let bottom = CropMode::AspectRatio {
+            w: 1,
+            h: 1,
+            anchor: Anchor::Bottom,
+        };
+        assert_eq!(compute_crop_rect(bottom, 600, 800), (0, 200, 600, 600));
+    }
+
+    /// A crop that covers the whole image is a no-op that returns the image
+    /// itself — no pixels copied.
+    #[test]
+    fn full_image_crop_is_identity() {
+        let img = DynamicImage::ImageRgba8(image::RgbaImage::new(8, 6));
+        let m = CropMode::FixedSize {
+            width: 999,
+            height: 999,
+            anchor: Anchor::Center,
+        };
+        let out = apply_crop(img, m);
+        assert_eq!((out.width(), out.height()), (8, 6));
     }
 
     #[test]

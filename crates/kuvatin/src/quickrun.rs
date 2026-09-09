@@ -51,7 +51,6 @@ pub fn run(
     let results = run_batch_until(
         &images,
         &preset.job,
-        &preset.name,
         |p| {
             let _ = writeln!(
                 std::io::stdout(),

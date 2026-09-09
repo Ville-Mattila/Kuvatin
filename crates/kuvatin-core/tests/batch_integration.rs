@@ -39,7 +39,7 @@ fn full_batch_resizes_converts_and_reports_failures() {
     };
 
     let progress_calls = AtomicUsize::new(0);
-    let results = run_batch(&inputs, &job, "itest", |_p| {
+    let results = run_batch(&inputs, &job, |_p| {
         progress_calls.fetch_add(1, Ordering::SeqCst);
     });
 

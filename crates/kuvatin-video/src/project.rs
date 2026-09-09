@@ -71,42 +71,81 @@ fn find_by_factory(bin: &gst::Bin, factory: &str) -> Option<gst::Element> {
     None
 }
 
-/// Extract an RGBA `Frame` from a GStreamer sample, honoring the plane stride.
-/// Buffers from GPU-download paths carry padded rows (VideoMeta); a raw
-/// `map.as_slice()` copy of those yields a sheared/oversized frame.
-fn sample_to_frame(sample: &gst::Sample) -> Option<Frame> {
+/// A borrowed RGBA video frame straight from the mapped GStreamer buffer.
+/// Rows are `stride` bytes apart (GPU-download paths pad them; VideoMeta),
+/// of which the first `width * 4` are pixels. The preview callback receives
+/// this so the GUI copies the pixels ONCE, into the buffer it will display —
+/// a 4K canvas is 33 MB per frame, and the old owned `Frame` cost a second
+/// copy of that on the UI thread.
+pub struct FrameView<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub data: &'a [u8],
+}
+
+impl FrameView<'_> {
+    /// Copy the pixels, tightly packed, into `dst` (`width * height * 4`
+    /// bytes; extra bytes are left alone).
+    pub fn copy_packed_into(&self, dst: &mut [u8]) {
+        let row_bytes = self.width as usize * 4;
+        let rows = self.height as usize;
+        if self.stride == row_bytes {
+            let n = row_bytes * rows;
+            dst[..n].copy_from_slice(&self.data[..n]);
+        } else {
+            for row in 0..rows {
+                let src = row * self.stride;
+                dst[row * row_bytes..(row + 1) * row_bytes]
+                    .copy_from_slice(&self.data[src..src + row_bytes]);
+            }
+        }
+    }
+
+    /// An owned, tightly packed copy.
+    pub fn to_frame(&self) -> Frame {
+        let mut rgba = vec![0u8; self.width as usize * self.height as usize * 4];
+        self.copy_packed_into(&mut rgba);
+        Frame {
+            width: self.width,
+            height: self.height,
+            rgba,
+        }
+    }
+}
+
+/// Map a sample's video buffer and hand it to `f` as a [`FrameView`].
+fn with_frame_view<R>(sample: &gst::Sample, f: impl FnOnce(FrameView<'_>) -> R) -> Option<R> {
     use gstreamer_video::VideoFrameExt;
     let caps = sample.caps()?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer_owned()?;
     let vframe = gstreamer_video::VideoFrame::from_buffer_readable(buffer, &info).ok()?;
-    let (width, height) = (info.width(), info.height());
     let stride = vframe.plane_stride()[0] as usize;
     let data = vframe.plane_data(0).ok()?;
-    let row_bytes = width as usize * 4;
-    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
-    if stride == row_bytes {
-        rgba.extend_from_slice(&data[..row_bytes * height as usize]);
-    } else {
-        for row in 0..height as usize {
-            let start = row * stride;
-            rgba.extend_from_slice(&data[start..start + row_bytes]);
-        }
+    let (width, height) = (info.width(), info.height());
+    if data.len() < stride * (height as usize - 1) + width as usize * 4 {
+        return None;
     }
-    Some(Frame {
+    Some(f(FrameView {
         width,
         height,
-        rgba,
-    })
+        stride,
+        data,
+    }))
+}
+
+/// Extract an owned RGBA `Frame` from a GStreamer sample (thumbnails).
+fn sample_to_frame(sample: &gst::Sample) -> Option<Frame> {
+    with_frame_view(sample, |v| v.to_frame())
 }
 
 /// Push one RGBA video sample to the frame callback.
 fn emit_sample(
     sample: &gst::Sample,
-    cb: &(dyn Fn(Frame) + Send + Sync),
+    cb: &(dyn Fn(FrameView<'_>) + Send + Sync),
 ) -> std::result::Result<gst::FlowSuccess, gst::FlowError> {
-    let frame = sample_to_frame(sample).ok_or(gst::FlowError::Error)?;
-    cb(frame);
+    with_frame_view(sample, cb).ok_or(gst::FlowError::Error)?;
     Ok(gst::FlowSuccess::Ok)
 }
 
@@ -477,8 +516,9 @@ pub struct Project {
 
 impl Project {
     /// Build an empty project whose preview pushes RGBA frames to `on_frame`
-    /// (called from a GStreamer thread — the GUI must hop to the UI thread).
-    pub fn new(on_frame: impl Fn(Frame) + Send + Sync + 'static) -> Result<Self> {
+    /// (called from a GStreamer thread with the buffer mapped — copy what you
+    /// need and hop to the UI thread; the view does not outlive the call).
+    pub fn new(on_frame: impl Fn(FrameView<'_>) + Send + Sync + 'static) -> Result<Self> {
         gst::init()?;
         ges::init()?;
         ensure_encoder_ranks();
@@ -509,7 +549,7 @@ impl Project {
             .drop(true)
             .build();
 
-        let cb: Arc<dyn Fn(Frame) + Send + Sync> = Arc::new(on_frame);
+        let cb: Arc<dyn Fn(FrameView<'_>) + Send + Sync> = Arc::new(on_frame);
         let cb_sample = cb.clone();
         let cb_preroll = cb;
         appsink.set_callbacks(
@@ -1233,7 +1273,7 @@ mod tests {
         let count = Arc::new(AtomicU32::new(0));
         let c2 = count.clone();
         let mut project = Project::new(move |f| {
-            assert_eq!(f.rgba.len() as u32, f.width * f.height * 4);
+            assert!(f.data.len() as u32 >= f.width * f.height * 4);
             c2.fetch_add(1, Ordering::SeqCst);
         })
         .expect("project");

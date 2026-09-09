@@ -62,26 +62,26 @@ impl Job {
     }
 }
 
-/// Apply the op pipeline (crop -> resize) to an in-memory image. Returns the
-/// transformed image and its final (w, h).
+/// Apply the op pipeline (crop -> resize) to an in-memory image.
 ///
 /// Crop runs first so a crop rectangle expressed in the *source* image's pixels
 /// (e.g. an interactive per-image crop) selects the right region; the resize
-/// then scales that cropped region to the target dimensions.
-pub fn process_image(img: &DynamicImage, job: &Job) -> (DynamicImage, u32, u32) {
+/// then scales that cropped region to the target dimensions. Takes the image
+/// by value: the no-op path (the default preset) hands the same buffer
+/// through — it used to make four full-size copies per file.
+pub fn process_image(img: DynamicImage, job: &Job) -> DynamicImage {
     let cropped = apply_crop(img, job.crop);
     let (tw, th) = compute_target_dimensions(job.resize, cropped.width(), cropped.height());
-    let resized = resample(&cropped, tw, th);
-    let (w, h) = (resized.width(), resized.height());
-    (resized, w, h)
+    resample(cropped, tw, th)
 }
 
 /// Encode an image to bytes in the requested format/quality.
 ///
 /// `png` selects PNG-only size optimization (lossless via oxipng or lossy via
-/// libimagequant); it is ignored for non-PNG formats.
+/// libimagequant); it is ignored for non-PNG formats. Consumes the image so
+/// an already-RGBA8 buffer is reused rather than copied.
 pub fn encode(
-    img: &DynamicImage,
+    img: DynamicImage,
     format: OutputFormat,
     quality: u8,
     png: PngOptimize,
@@ -104,7 +104,7 @@ pub fn encode(
             Ok(buf)
         }
         OutputFormat::Webp => {
-            let rgba = img.to_rgba8();
+            let rgba = img.into_rgba8();
             let (w, h) = (rgba.width(), rgba.height());
             let encoder = webp::Encoder::from_rgba(&rgba, w, h);
             // encode() unwraps internally and panics on inputs libwebp rejects
@@ -117,12 +117,25 @@ pub fn encode(
             Ok(mem.to_vec())
         }
         OutputFormat::Png => encode_png(img, png, quality),
-        other => {
-            let fmt = match other {
-                OutputFormat::Bmp => image::ImageFormat::Bmp,
-                OutputFormat::Tiff => image::ImageFormat::Tiff,
-                OutputFormat::Gif => image::ImageFormat::Gif,
-                OutputFormat::Png | OutputFormat::Jpeg | OutputFormat::Webp => unreachable!(),
+        OutputFormat::Gif => {
+            // NeuQuant at speed 10 (the fastest setting) instead of the
+            // default 1 ("at any cost"); the visual difference is nil for
+            // screenshots and the encode is an order of magnitude quicker.
+            let rgba = img.into_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            let mut buf = Vec::new();
+            {
+                let mut enc = image::codecs::gif::GifEncoder::new_with_speed(&mut buf, 10);
+                enc.encode(rgba.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+                    .map_err(|e| CoreError::Encode(e.to_string()))?;
+            }
+            Ok(buf)
+        }
+        OutputFormat::Bmp | OutputFormat::Tiff => {
+            let fmt = if format == OutputFormat::Bmp {
+                image::ImageFormat::Bmp
+            } else {
+                image::ImageFormat::Tiff
             };
             let mut buf = Vec::new();
             img.write_to(&mut Cursor::new(&mut buf), fmt)
@@ -140,32 +153,40 @@ fn encode_png_plain(img: &DynamicImage) -> CoreResult<Vec<u8>> {
     Ok(buf)
 }
 
+fn oxipng_squeeze(raw: &[u8]) -> CoreResult<Vec<u8>> {
+    let opts = oxipng::Options::from_preset(2);
+    oxipng::optimize_from_memory(raw, &opts).map_err(|e| CoreError::Encode(e.to_string()))
+}
+
 /// Encode a PNG with the requested size-optimization mode. Alpha is preserved in
 /// all modes.
-fn encode_png(img: &DynamicImage, mode: PngOptimize, quality: u8) -> CoreResult<Vec<u8>> {
+fn encode_png(img: DynamicImage, mode: PngOptimize, quality: u8) -> CoreResult<Vec<u8>> {
     match mode {
-        PngOptimize::None => encode_png_plain(img),
-        PngOptimize::Lossless => {
-            let raw = encode_png_plain(img)?;
-            let opts = oxipng::Options::from_preset(2);
-            oxipng::optimize_from_memory(&raw, &opts).map_err(|e| CoreError::Encode(e.to_string()))
-        }
+        PngOptimize::None => encode_png_plain(&img),
+        PngOptimize::Lossless => oxipng_squeeze(&encode_png_plain(&img)?),
         PngOptimize::Lossy => encode_png_lossy(img, quality),
     }
 }
 
 /// Lossy PNG: quantize to an 8-bit palette via libimagequant (preserving alpha
 /// through a tRNS chunk), encode an indexed PNG via the `png` crate, then run a
-/// final lossless oxipng pass.
-fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+/// final lossless oxipng pass. Falls back to a lossless PNG when even a
+/// floorless quantization is refused.
+fn encode_png_lossy(img: DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
+    let rgba = img.into_rgba8();
+    match quantize_png(&rgba, quality)? {
+        Some(bytes) => Ok(bytes),
+        None => oxipng_squeeze(&encode_png_plain(&DynamicImage::ImageRgba8(rgba))?),
+    }
+}
 
-    // Build the RGBA pixel buffer libimagequant expects (rgb::Rgba<u8>).
-    let pixels: Vec<imagequant::RGBA> = rgba
-        .pixels()
-        .map(|p| imagequant::RGBA::new(p[0], p[1], p[2], p[3]))
-        .collect();
+/// `Ok(None)` when libimagequant can't meet even a zero quality floor.
+fn quantize_png(rgba: &image::RgbaImage, quality: u8) -> CoreResult<Option<Vec<u8>>> {
+    use rgb::FromSlice;
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+    // The image crate's RGBA8 bytes ARE libimagequant's pixel layout — view
+    // them in place instead of rebuilding the whole image pixel by pixel.
+    let pixels: &[imagequant::RGBA] = rgba.as_raw().as_rgba();
 
     let mut liq = imagequant::new();
     // Best quantization quality (slowest) — closest to pngquant output.
@@ -180,7 +201,7 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
 
     // Borrow the pixels so a second attempt can reuse them without a copy.
     let mut qimg = liq
-        .new_image_borrowed(&pixels, w, h, 0.0)
+        .new_image_borrowed(pixels, w, h, 0.0)
         .map_err(|e| CoreError::Encode(e.to_string()))?;
     let mut res = match liq.quantize(&mut qimg) {
         Ok(r) => r,
@@ -191,16 +212,14 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
             liq.set_quality(0, qmax)
                 .map_err(|e| CoreError::Encode(e.to_string()))?;
             let mut retry = liq
-                .new_image_borrowed(&pixels, w, h, 0.0)
+                .new_image_borrowed(pixels, w, h, 0.0)
                 .map_err(|e| CoreError::Encode(e.to_string()))?;
             match liq.quantize(&mut retry) {
                 Ok(r) => {
                     qimg = retry;
                     r
                 }
-                Err(imagequant::Error::QualityTooLow) => {
-                    return encode_png(img, PngOptimize::Lossless, quality)
-                }
+                Err(imagequant::Error::QualityTooLow) => return Ok(None),
                 Err(e) => return Err(CoreError::Encode(e.to_string())),
             }
         }
@@ -230,14 +249,16 @@ fn encode_png_lossy(img: &DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
     }
 
     // Final lossless squeeze.
-    let opts = oxipng::Options::from_preset(2);
-    oxipng::optimize_from_memory(&buf, &opts).map_err(|e| CoreError::Encode(e.to_string()))
+    oxipng_squeeze(&buf).map(Some)
 }
 
 /// Composite an image over an opaque white background (for formats without
-/// alpha, i.e. JPEG). Fully-opaque images pass through at no extra cost.
-fn flatten_onto_white(img: &DynamicImage) -> image::RgbImage {
-    let rgba = img.to_rgba8();
+/// alpha, i.e. JPEG). An RGB8 image passes through as it is — no copy.
+fn flatten_onto_white(img: DynamicImage) -> image::RgbImage {
+    if let DynamicImage::ImageRgb8(rgb) = img {
+        return rgb;
+    }
+    let rgba = img.into_rgba8();
     let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
     for (src, dst) in rgba.pixels().zip(rgb.pixels_mut()) {
         let a = src[3] as u32;
@@ -271,19 +292,32 @@ pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
         .map_err(io_err)?;
     // Animated GIF: converting would silently drop every frame after the
     // first — refuse with a clear message instead. (Animation support is a
-    // separate feature, not a side effect.)
+    // separate feature, not a side effect.) A still GIF is returned from the
+    // same decoder pass — it used to be decoded a second time below.
     if reader.format() == Some(image::ImageFormat::Gif) {
         let file = std::fs::File::open(input).map_err(io_err)?;
         let gif = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file))
             .map_err(decode_err)?;
         use image::AnimationDecoder;
-        if gif.into_frames().take(2).count() > 1 {
+        let mut frames = gif.into_frames();
+        let first = match frames.next() {
+            Some(Ok(frame)) => frame,
+            Some(Err(e)) => return Err(decode_err(e)),
+            None => {
+                return Err(CoreError::InvalidJob(format!(
+                    "{} is a GIF with no frames",
+                    input.display()
+                )))
+            }
+        };
+        if frames.next().is_some() {
             return Err(CoreError::InvalidJob(format!(
                 "{} is an animated GIF — converting it would keep only the first frame, \
                  so animated inputs are not supported",
                 input.display()
             )));
         }
+        return Ok(DynamicImage::ImageRgba8(first.into_buffer()));
     }
     let mut decoder = reader.into_decoder().map_err(decode_err)?;
     // EXIF orientation: without this, portrait phone photos convert lying on
@@ -351,10 +385,10 @@ fn write_unique(base: PathBuf, bytes: &[u8]) -> CoreResult<PathBuf> {
 
 /// Full single-file pipeline: decode -> process -> encode -> write. Returns the
 /// path written.
-pub fn process_file(input: &Path, job: &Job, _preset_name: &str) -> CoreResult<PathBuf> {
+pub fn process_file(input: &Path, job: &Job) -> CoreResult<PathBuf> {
     let img = decode_oriented(input)?;
-    let (out_img, _w, _h) = process_image(&img, job);
-    let bytes = encode(&out_img, job.format, job.quality, job.png)?;
+    let out_img = process_image(img, job);
+    let bytes = encode(out_img, job.format, job.quality, job.png)?;
     let target = render_output_path(&job.output, input, job.format);
     // The policy may point at a subfolder that doesn't exist yet.
     if let Some(parent) = target.parent() {
@@ -376,8 +410,8 @@ pub fn process_file(input: &Path, job: &Job, _preset_name: &str) -> CoreResult<P
 /// or an output folder. Overwrites `output` if it already exists.
 pub fn process_file_to(input: &Path, job: &Job, output: &Path) -> CoreResult<PathBuf> {
     let img = decode_oriented(input)?;
-    let (out_img, _w, _h) = process_image(&img, job);
-    let bytes = encode(&out_img, job.format, job.quality, job.png)?;
+    let out_img = process_image(img, job);
+    let bytes = encode(out_img, job.format, job.quality, job.png)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| CoreError::Io {
@@ -448,8 +482,8 @@ mod tests {
             ..Job::default()
         };
         // crop 100x100 first, then scale by 0.5 -> 50x50
-        let (_img, w, h) = process_image(&sample(800, 600), &job);
-        assert_eq!((w, h), (50, 50));
+        let img = process_image(sample(800, 600), &job);
+        assert_eq!((img.width(), img.height()), (50, 50));
     }
 
     #[test]
@@ -469,8 +503,8 @@ mod tests {
             },
             ..Job::default()
         };
-        let (_img, w, h) = process_image(&sample(800, 600), &job);
-        assert_eq!((w, h), (200, 150));
+        let img = process_image(sample(800, 600), &job);
+        assert_eq!((img.width(), img.height()), (200, 150));
     }
 
     /// A non-trivial RGBA image: a smooth color gradient with a fully
@@ -493,21 +527,21 @@ mod tests {
 
     #[test]
     fn encode_jpeg_roundtrips() {
-        let bytes = encode(&sample(16, 16), OutputFormat::Jpeg, 80, PngOptimize::None).unwrap();
+        let bytes = encode(sample(16, 16), OutputFormat::Jpeg, 80, PngOptimize::None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
 
     #[test]
     fn encode_webp_roundtrips() {
-        let bytes = encode(&sample(16, 16), OutputFormat::Webp, 80, PngOptimize::None).unwrap();
+        let bytes = encode(sample(16, 16), OutputFormat::Webp, 80, PngOptimize::None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
 
     #[test]
     fn encode_png_none_roundtrips() {
-        let bytes = encode(&sample(16, 16), OutputFormat::Png, 90, PngOptimize::None).unwrap();
+        let bytes = encode(sample(16, 16), OutputFormat::Png, 90, PngOptimize::None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
@@ -515,7 +549,7 @@ mod tests {
     #[test]
     fn encode_png_lossless_is_valid_png() {
         let src = gradient_with_alpha(64, 64);
-        let bytes = encode(&src, OutputFormat::Png, 90, PngOptimize::Lossless).unwrap();
+        let bytes = encode(src.clone(), OutputFormat::Png, 90, PngOptimize::Lossless).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (64, 64));
         // Alpha preserved: still has the fully-transparent quadrant.
@@ -526,8 +560,8 @@ mod tests {
     #[test]
     fn encode_png_lossy_preserves_alpha_and_shrinks() {
         let src = gradient_with_alpha(256, 256);
-        let lossy = encode(&src, OutputFormat::Png, 80, PngOptimize::Lossy).unwrap();
-        let none = encode(&src, OutputFormat::Png, 80, PngOptimize::None).unwrap();
+        let lossy = encode(src.clone(), OutputFormat::Png, 80, PngOptimize::Lossy).unwrap();
+        let none = encode(src.clone(), OutputFormat::Png, 80, PngOptimize::None).unwrap();
 
         let decoded = image::load_from_memory(&lossy).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (256, 256));
@@ -555,7 +589,7 @@ mod tests {
             format: OutputFormat::Webp,
             ..Job::default()
         };
-        let out = process_file(&input, &job, "test").unwrap();
+        let out = process_file(&input, &job).unwrap();
         assert!(out.exists());
         assert_eq!(out.extension().unwrap(), "webp");
     }
@@ -565,7 +599,7 @@ mod tests {
     #[test]
     fn webp_oversize_errors_instead_of_panicking() {
         let wide = DynamicImage::ImageRgba8(RgbaImage::new(16_384, 1));
-        let res = encode(&wide, OutputFormat::Webp, 80, PngOptimize::None);
+        let res = encode(wide, OutputFormat::Webp, 80, PngOptimize::None);
         assert!(res.is_err(), "expected Err for 16384-px WebP");
     }
 
@@ -573,7 +607,7 @@ mod tests {
     /// encode choke point rather than panicking deep inside libwebp.
     #[test]
     fn webp_out_of_range_quality_is_clamped() {
-        let bytes = encode(&sample(16, 16), OutputFormat::Webp, 150, PngOptimize::None).unwrap();
+        let bytes = encode(sample(16, 16), OutputFormat::Webp, 150, PngOptimize::None).unwrap();
         assert!(image::load_from_memory(&bytes).is_ok());
     }
 
@@ -585,7 +619,7 @@ mod tests {
             img.put_pixel(0, y, Rgba([0, 0, 0, 0])); // transparent column
         }
         let bytes = encode(
-            &DynamicImage::ImageRgba8(img),
+            DynamicImage::ImageRgba8(img),
             OutputFormat::Jpeg,
             95,
             PngOptimize::None,
@@ -621,12 +655,12 @@ mod tests {
             }
         }
         let job = Job::default();
-        let err = process_file(&path, &job, "t").unwrap_err().to_string();
+        let err = process_file(&path, &job).unwrap_err().to_string();
         assert!(err.contains("animated"), "unexpected error: {err}");
         // A single-frame GIF still converts fine.
         let single = dir.path().join("still.gif");
         sample(8, 8).to_rgba8().save(&single).unwrap();
-        assert!(process_file(&single, &Job::default(), "t").is_ok());
+        assert!(process_file(&single, &Job::default()).is_ok());
     }
 
     /// Two parallel writers racing to the same output stem must produce two
@@ -646,7 +680,7 @@ mod tests {
         };
         let outs: Vec<_> = [a, b]
             .par_iter()
-            .map(|p| process_file(p, &job, "t").unwrap())
+            .map(|p| process_file(p, &job).unwrap())
             .collect();
         assert_ne!(outs[0], outs[1], "outputs must not share a path");
         assert!(outs[0].exists() && outs[1].exists());
@@ -669,7 +703,7 @@ mod tests {
             *px = Rgba([b[0], b[1], b[2], 255]);
         }
         let bytes = encode(
-            &DynamicImage::ImageRgba8(img),
+            DynamicImage::ImageRgba8(img),
             OutputFormat::Png,
             100,
             PngOptimize::Lossy,
@@ -709,6 +743,109 @@ mod tests {
         sample(20, 10).to_rgb8().save(&p).unwrap();
         let img = decode_oriented(&p).unwrap();
         assert_eq!((img.width(), img.height()), (20, 10));
+    }
+
+    /// A JPEG carrying EXIF orientation 6 (rotate 90° clockwise — the way a
+    /// portrait phone photo is stored) comes out rotated: 20×10 becomes 10×20,
+    /// and the pixel that was top-left ends up top-right.
+    #[test]
+    fn decode_oriented_applies_exif_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        // Left half red, right half blue, so the rotation is observable.
+        let mut img = image::RgbImage::new(20, 10);
+        for (x, _y, p) in img.enumerate_pixels_mut() {
+            *p = if x < 10 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            };
+        }
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut jpeg), 100)
+            .encode_image(&img)
+            .unwrap();
+        // Splice an APP1 EXIF segment right after SOI: TIFF header (II, 42,
+        // IFD at 8) + one IFD entry (0x0112 Orientation, SHORT, 1, value 6).
+        let tiff: Vec<u8> = [
+            b"II".as_slice(),
+            &[42, 0, 8, 0, 0, 0],
+            &[1, 0],
+            &[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0],
+            &[0, 0, 0, 0],
+        ]
+        .concat();
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let len = (payload.len() + 2) as u16;
+        let mut with_exif = vec![0xFF, 0xD8, 0xFF, 0xE1, (len >> 8) as u8, len as u8];
+        with_exif.extend_from_slice(&payload);
+        with_exif.extend_from_slice(&jpeg[2..]);
+        let p = dir.path().join("rotated.jpg");
+        std::fs::write(&p, &with_exif).unwrap();
+
+        let out = decode_oriented(&p).unwrap();
+        assert_eq!((out.width(), out.height()), (10, 20), "rotated 90°");
+        let rgb = out.to_rgb8();
+        let top = rgb.get_pixel(5, 2);
+        let bottom = rgb.get_pixel(5, 17);
+        assert!(
+            top[0] > 200 && top[2] < 60,
+            "red half rotated to the top: {top:?}"
+        );
+        assert!(
+            bottom[2] > 200 && bottom[0] < 60,
+            "blue half rotated to the bottom: {bottom:?}"
+        );
+    }
+
+    /// The remaining encoders round-trip through the image crate.
+    #[test]
+    fn bmp_tiff_gif_roundtrip() {
+        for f in [OutputFormat::Bmp, OutputFormat::Tiff, OutputFormat::Gif] {
+            let bytes = encode(gradient_with_alpha(24, 16), f, 90, PngOptimize::None)
+                .unwrap_or_else(|e| panic!("{f:?}: {e}"));
+            let decoded = image::load_from_memory(&bytes).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+            assert_eq!((decoded.width(), decoded.height()), (24, 16), "{f:?}");
+        }
+    }
+
+    /// `process_file_to` writes exactly the requested path (creating parents)
+    /// and overwrites an existing file there.
+    #[test]
+    fn process_file_to_writes_the_given_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.png");
+        sample(30, 20).save(&input).unwrap();
+        let out = dir.path().join("deep").join("er").join("pic.jpg");
+        let job = Job {
+            format: OutputFormat::Jpeg,
+            resize: ResizeMode::Percent { factor: 0.5 },
+            ..Job::default()
+        };
+        assert_eq!(process_file_to(&input, &job, &out).unwrap(), out);
+        let img = image::open(&out).unwrap();
+        assert_eq!((img.width(), img.height()), (15, 10));
+        // Second run replaces the file rather than making a -1 sibling.
+        process_file_to(&input, &job, &out).unwrap();
+        assert!(!dir
+            .path()
+            .join("deep")
+            .join("er")
+            .join("pic-1.jpg")
+            .exists());
+    }
+
+    /// A still GIF decodes (once) and converts; an empty container is refused.
+    #[test]
+    fn still_gif_decodes_from_the_frame_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let single = dir.path().join("still.gif");
+        gradient_with_alpha(16, 12)
+            .to_rgba8()
+            .save(&single)
+            .unwrap();
+        let img = decode_oriented(&single).unwrap();
+        assert_eq!((img.width(), img.height()), (16, 12));
     }
 
     #[test]
