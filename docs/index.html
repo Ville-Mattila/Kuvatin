@@ -3,24 +3,26 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Kuvatin — batch image tools & video editor for Windows</title>
-<meta name="description" content="Kuvatin is a compact native Windows app to compress, convert, resize, crop and batch images — and edit video on a layered timeline with image-sequence import and hardware-accelerated export. Built in Rust." />
+<title>Kuvatin: batch image tools & video editor for Windows</title>
+<meta name="description" content="Kuvatin is a compact native Windows app to compress, convert, resize, crop and batch images, and edit video on a layered timeline with image-sequence import and hardware-accelerated export. Built in Rust." />
 <link rel="canonical" href="https://ville-mattila.github.io/Kuvatin/" />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://ville-mattila.github.io/Kuvatin/" />
 <meta property="og:site_name" content="Kuvatin" />
-<meta property="og:title" content="Kuvatin — batch image tools & video editor for Windows" />
-<meta property="og:description" content="Compress, convert, resize & crop images — and cut video on a layered timeline with hardware export. Right from the Windows right-click menu. Built in Rust." />
+<meta property="og:title" content="Kuvatin: batch image tools & video editor for Windows" />
+<meta property="og:description" content="Compress, convert, resize & crop images, and cut video on a layered timeline with hardware export. Right from the Windows right-click menu. Built in Rust." />
 <meta property="og:image" content="https://ville-mattila.github.io/Kuvatin/assets/og-image.png" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
-<meta property="og:image:alt" content="Kuvatin — shrink images and cut video without the busywork" />
+<meta property="og:image:alt" content="Kuvatin: shrink images and cut video without the busywork" />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="Kuvatin — batch image tools & video editor for Windows" />
-<meta name="twitter:description" content="Compress, convert, resize & crop images — and cut video on a layered timeline with hardware export. Built in Rust." />
+<meta name="twitter:title" content="Kuvatin: batch image tools & video editor for Windows" />
+<meta name="twitter:description" content="Compress, convert, resize & crop images, and cut video on a layered timeline with hardware export. Built in Rust." />
 <meta name="twitter:image" content="https://ville-mattila.github.io/Kuvatin/assets/og-image.png" />
 <meta name="theme-color" content="#0a0c10" />
 <link rel="icon" href="assets/kuvatin-icon.svg" type="image/svg+xml" />
+<link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin />
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -33,33 +35,33 @@
   "softwareVersion": "2.7.0",
   "license": "https://www.gnu.org/licenses/gpl-3.0.html",
   "author": { "@type": "Person", "name": "Ville Mattila" },
-  "description": "Compact native Windows app to compress, convert, resize, crop and batch images — and edit video on a layered timeline with hardware-accelerated export. Built in Rust."
+  "description": "Compact native Windows app to compress, convert, resize, crop and batch images, and edit video on a layered timeline with hardware-accelerated export. Built in Rust."
 }
 </script>
 <style>
   /* Self-hosted (SIL OFL, see fonts/OFL-*.txt): no third-party request per
      visitor. Variable latin subsets; the weight ranges cover every use below. */
   @font-face{font-family:"Inter";font-style:normal;font-weight:400 600;font-display:swap;
-    src:url("fonts/inter-latin.woff2") format("woff2");
-    unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+    src:url("fonts/inter-latin.woff2") format("woff2")}
   @font-face{font-family:"Space Grotesk";font-style:normal;font-weight:400 700;font-display:swap;
-    src:url("fonts/space-grotesk-latin.woff2") format("woff2");
-    unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+    src:url("fonts/space-grotesk-latin.woff2") format("woff2")}
   :root{
     --teal:#00d4bf; --teal-2:#19e6cf; --teal-dim:#0a8f82;
     --bg:#0a0c10; --bg-2:#0d1016; --panel:#13171f; --panel-2:#181d27;
     --ink:#eef2f7; --muted:#8b95a6; --line:#222a36; --dark:#191f27;
     --maxw:1180px;
+    --font-ui:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --font-display:"Space Grotesk","Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html{overflow-x:clip}
   body{background:var(--bg);color:var(--ink);overflow-x:clip;
-    font-family:"Inter",system-ui,-apple-system,Segoe UI,sans-serif;-webkit-font-smoothing:antialiased}
+    font-family:var(--font-ui);-webkit-font-smoothing:antialiased}
   html.lenis,html.lenis body{height:auto}
   .lenis.lenis-smooth{scroll-behavior:auto!important}
   .lenis.lenis-stopped{overflow:hidden}
   a{color:inherit;text-decoration:none}
-  h1,h2,h3{font-family:"Space Grotesk",sans-serif;font-weight:700;line-height:1.04;letter-spacing:-.02em}
+  h1,h2,h3{font-family:var(--font-display);font-weight:700;line-height:1.04;letter-spacing:-.02em}
   ::selection{background:var(--teal);color:#04201d}
 
   /* fixed background ambience */
@@ -83,14 +85,14 @@
   nav.scrolled{background:#0a0c10cc;backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
   nav .brand{display:flex;align-items:center;gap:10px}
   nav .brand img{height:28px;width:28px}
-  nav .brand span{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:18px;letter-spacing:-.01em;color:var(--ink)}
+  nav .brand span{font-family:var(--font-display);font-weight:600;font-size:18px;letter-spacing:-.01em;color:var(--ink)}
   nav .links{display:flex;gap:26px;align-items:center;font-size:14px;color:var(--muted);font-weight:500}
   nav .links a{position:relative}
   nav .links a::after{content:"";position:absolute;left:0;right:100%;bottom:-7px;height:2px;border-radius:1px;
     background:linear-gradient(90deg,var(--teal),var(--teal-2));transition:right .28s cubic-bezier(.4,0,.2,1)}
   nav .links a:hover{color:var(--ink)}
   nav .links a:hover::after{right:0}
-  .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-family:"Space Grotesk",sans-serif;
+  .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-family:var(--font-display);
     padding:11px 20px;border-radius:12px;font-size:14px;border:1px solid transparent;cursor:pointer;transition:transform .15s,box-shadow .25s,background .2s}
   .btn-primary{background:linear-gradient(135deg,var(--teal),var(--teal-2));color:#04201d;box-shadow:0 8px 30px -8px #00d4bf99;
     position:relative;overflow:hidden}
@@ -103,7 +105,7 @@
   .btn-ghost:hover{background:#ffffff12;border-color:#38414f}
   .btn svg{width:16px;height:16px;flex:none}
   .dl-text{display:flex;flex-direction:column;align-items:flex-start;line-height:1.18;text-align:left}
-  .dl-file{font-family:"Space Grotesk",sans-serif;font-weight:500;font-size:11.5px;opacity:.72;letter-spacing:0}
+  .dl-file{font-family:var(--font-display);font-weight:500;font-size:11.5px;opacity:.72;letter-spacing:0}
 
   /* ============ INTRO (pinned horizontal pan) ============ */
   .intro{position:relative;height:100vh;overflow:hidden}
@@ -115,7 +117,7 @@
   .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 0 #00d4bf;animation:pulse 2.4s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 #00d4bf88}70%{box-shadow:0 0 0 9px #00d4bf00}100%{box-shadow:0 0 0 0 #00d4bf00}}
   .hero-logo{display:block;width:clamp(320px,62vw,900px);height:auto;filter:drop-shadow(0 24px 70px #00d4bf2e)}
-  .hero-tag{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:clamp(22px,3.4vw,40px);
+  .hero-tag{font-family:var(--font-display);font-weight:600;font-size:clamp(22px,3.4vw,40px);
     letter-spacing:-.02em;line-height:1.12;margin:26px 0 22px}
   .hero-tag .accent{color:var(--teal)}
   .sub{font-size:clamp(16px,2vw,21px);color:var(--muted);max-width:60ch;line-height:1.6;margin-bottom:34px}
@@ -136,7 +138,7 @@
      vocabulary with the video mockup so both read as the same app). A live
      loop: the file list flips queued→done row by row while the progress bar
      fills, the viewer shows a marching-ants crop on a "photo". ---- */
-  .im{display:flex;flex-direction:column;aspect-ratio:1320/840;background:#101319;font-family:"Space Grotesk",sans-serif}
+  .im{display:flex;flex-direction:column;aspect-ratio:1320/840;background:#101319;font-family:var(--font-display)}
   .im *{min-width:0}
   .im-body{flex:1;min-height:0;display:grid;grid-template-columns:.68fr 1.5fr .74fr;gap:8px;padding:8px}
   .im-files{display:flex;flex-direction:column;overflow:hidden}
@@ -241,7 +243,7 @@
   .card .ic{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;
     background:#00d4bf18;border:1px solid #00d4bf30;color:var(--teal);margin-bottom:16px}
   .card .ic svg{width:24px;height:24px}
-  .card .step{font-family:"Space Grotesk";font-size:12px;letter-spacing:.16em;color:var(--teal);font-weight:600;margin-bottom:8px}
+  .card .step{font-family:var(--font-display);font-size:12px;letter-spacing:.16em;color:var(--teal);font-weight:600;margin-bottom:8px}
   .card h3{font-size:23px;margin-bottom:10px}
   .card p{color:var(--muted);font-size:14.5px;line-height:1.6}
   .card .tag{display:inline-block;margin-top:14px;font-size:12px;font-weight:600;color:var(--ink);
@@ -253,15 +255,15 @@
   .demo-grid{display:grid;grid-template-columns:1fr 1fr;gap:50px;align-items:center;margin-top:60px}
   .bar-row{margin-bottom:26px}
   .bar-row .lab{display:flex;justify-content:space-between;font-size:14px;margin-bottom:9px;color:var(--muted)}
-  .bar-row .lab b{color:var(--ink);font-family:"Space Grotesk";font-weight:600}
+  .bar-row .lab b{color:var(--ink);font-family:var(--font-display);font-weight:600}
   .bar{height:30px;border-radius:9px;background:#ffffff0a;overflow:hidden;position:relative}
   .bar i{display:block;height:100%;border-radius:9px}
   .bar.before i{background:linear-gradient(90deg,#3a4453,#566173);width:100%}
   .bar.after i{background:linear-gradient(90deg,var(--teal-dim),var(--teal));width:100%;box-shadow:0 0 24px #00d4bf66}
-  .savings{font-family:"Space Grotesk";font-weight:700;letter-spacing:-.02em}
+  .savings{font-family:var(--font-display);font-weight:700;letter-spacing:-.02em}
   .savings .big{display:block;font-size:clamp(64px,11vw,128px);line-height:.9;
     background:linear-gradient(135deg,#fff,var(--teal));-webkit-background-clip:text;background-clip:text;color:transparent}
-  .savings .cap{color:var(--muted);font-family:"Inter";font-weight:500;font-size:17px;margin-top:18px;max-width:42ch;line-height:1.6}
+  .savings .cap{color:var(--muted);font-family:var(--font-ui);font-weight:500;font-size:17px;margin-top:18px;max-width:42ch;line-height:1.6}
 
   .rclick{padding:40px 0 120px}
   .rcard{max-width:980px;margin:0 auto;background:linear-gradient(135deg,var(--panel),#0e1218);
@@ -287,7 +289,7 @@
   .final .relnote a{color:var(--teal);text-decoration:underline;text-underline-offset:3px;text-decoration-color:#0a8f8288}
   .final .relnote a:hover{text-decoration-color:var(--teal)}
   .install{margin:46px auto 0;max-width:560px;text-align:left;background:#0d1016;border:1px solid var(--line);border-radius:14px;
-    font-family:"Space Grotesk";font-size:14px;color:#cdd5e0;overflow:hidden}
+    font-family:var(--font-display);font-size:14px;color:#cdd5e0;overflow:hidden}
   .install .top{padding:11px 16px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px;letter-spacing:.05em;display:flex;gap:7px;align-items:center}
   .install .top .d{width:11px;height:11px;border-radius:50%}
   .install code{display:block;padding:18px 20px;line-height:1.9;white-space:pre-wrap}
@@ -302,7 +304,7 @@
 
   /* the CSS-built editor mockup */
   .vm{max-width:980px;margin:56px auto 0;border-radius:18px;overflow:hidden;position:relative;
-    background:#101319;border:1px solid #2a323f;font-family:"Space Grotesk",sans-serif;
+    background:#101319;border:1px solid #2a323f;font-family:var(--font-display);
     box-shadow:0 60px 130px -40px #000,0 0 0 1px #ffffff07,0 0 110px -30px #3f7df555}
   .vm *{min-width:0}
   .vm-title{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#0d1016;border-bottom:1px solid #1c222c}
@@ -423,7 +425,7 @@
   @keyframes iconfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
 
   /* Windows High Contrast / forced colours: gradient-filled text is painted
-     with `color:transparent`, which those modes keep — the headings vanished. */
+     with `color:transparent`, which those modes keep, so the headings vanished. */
   @media (forced-colors:active){
     .features-title,.video .features-title,.savings .big{background:none;color:CanvasText;-webkit-text-fill-color:CanvasText}
     .glow,.grid-fx,.noise,.cursor-glow{display:none}
@@ -433,7 +435,7 @@
     nav .links{gap:0}
     nav .links a:not(.gh){display:none}
     /* three blurred fixed layers + a blend-mode noise layer recomposite every
-       frame — far too heavy for a phone GPU, and invisible at that size anyway */
+       frame: far too heavy for a phone GPU, and invisible at that size anyway */
     .glow,.grid-fx,.noise{display:none}
     .demo-grid,.rcard{grid-template-columns:1fr;gap:30px}
     .rcard{padding:32px}
@@ -473,7 +475,7 @@
     .im-set .pb i{width:38%}
   }
   /* Static fallback (JS adds .no-anim when GSAP is unavailable or the user
-     prefers reduced motion): the intro must stack vertically — otherwise the
+     prefers reduced motion): the intro must stack vertically, otherwise the
      screenshot panel sits off-screen on a 200vw stage behind overflow:hidden
      and is unreachable without the scroll-driven pan. */
   html.no-anim .intro{height:auto;overflow:visible}
@@ -530,8 +532,8 @@
     <div class="intro-panel" id="introLogo">
       <span class="pill"><span class="dot"></span> Free &amp; open source<span class="pill-x"> · Native Windows · Built in Rust</span></span>
       <h1 style="margin:0"><img class="hero-logo" src="assets/kuvatin-logo-anim.svg" alt="Kuvatin" /></h1>
-      <p class="hero-tag">Shrink images <span class="accent">and cut video</span> — without the busywork.</p>
-      <p class="sub">A compact native Windows app for <b style="color:var(--ink)">batch</b> image work — compression, conversion, resizing, cropping — and now a <b style="color:var(--ink)">layered video timeline</b> with hardware-accelerated export. Right from your Explorer right-click menu.</p>
+      <p class="hero-tag">Shrink images <span class="accent">and cut video</span>. No busywork.</p>
+      <p class="sub">A compact native Windows app for <b style="color:var(--ink)">batch</b> image work: compression, conversion, resizing, cropping. Now with a <b style="color:var(--ink)">layered video timeline</b> and hardware-accelerated export. Right from your Explorer right-click menu.</p>
       <div class="cta">
         <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest/download/kuvatin-x86_64.msi">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
@@ -553,7 +555,7 @@
           <div class="vm-title">
             <img src="assets/kuvatin-icon.svg" alt="" /><span class="t">Kuvatin</span>
             <span class="seg"><span class="on">Images</span><span>Videos</span></span>
-            <span class="winb">—&ensp;□&ensp;✕</span>
+            <span class="winb">&minus;&ensp;□&ensp;✕</span>
           </div>
           <div class="im-body">
             <div class="vm-panel im-files">
@@ -617,7 +619,7 @@
     <div class="feat right"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m7.5 4.2 9 5.2M3.3 7 12 12l8.7-5M12 22V12"/></svg></span>
       <div class="step">STOP 01</div><h3>Compress PNG</h3>
-      <p>The default. Lossy compression via libimagequant, finished with an oxipng pass — or go fully lossless. Big size drops, no visible loss.</p>
+      <p>The default. Lossy compression via libimagequant, finished with an oxipng pass, or fully lossless if you prefer. Big size drops, no visible loss.</p>
       <span class="tag">libimagequant + oxipng</span>
     </div></div>
 
@@ -645,14 +647,14 @@
     <div class="feat right"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
       <div class="step">STOP 05</div><h3>Batch in parallel</h3>
-      <p>Drop a whole folder or a multi-selection. Kuvatin runs every file across all your cores and saves next to the originals — never overwriting.</p>
+      <p>Drop a whole folder or a multi-selection. Kuvatin runs every file across all your cores and saves next to the originals, never overwriting.</p>
       <span class="tag">rayon · multi-core</span>
     </div></div>
 
     <div class="feat left"><span class="node"></span><div class="card tilt">
       <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18M3 12h18M3 19h18"/></svg></span>
       <div class="step">STOP 06</div><h3>Right-click presets</h3>
-      <p>Reusable presets live in the Windows Explorer menu. Select images, right-click, pick a preset — done, no window needed.</p>
+      <p>Reusable presets live in the Windows Explorer menu. Select images, right-click, pick a preset. Done, no window needed.</p>
       <span class="tag">Explorer integration</span>
     </div></div>
   </div>
@@ -664,7 +666,7 @@
   <div class="features-head reveal">
     <div class="eyebrow">The video editor</div>
     <h2 class="features-title">VIDEO</h2>
-    <p class="section-sub">The same no-busywork idea, pointed at footage: drop clips — or a rendered <b>image sequence</b> — on a <b>layered timeline</b>, arrange them with <b>magnetic snapping</b>, overlay stills, transform anything right in the preview — then export with <b>hardware acceleration</b>.</p>
+    <p class="section-sub">The same no-busywork idea, pointed at footage: drop clips (or a rendered <b>image sequence</b>) on a <b>layered timeline</b>, arrange them with <b>magnetic snapping</b>, overlay stills, transform anything right in the preview, then export with <b>hardware acceleration</b>.</p>
   </div>
   <div class="wrap">
     <!-- CSS-built mockup of the actual editor -->
@@ -672,7 +674,7 @@
       <div class="vm-title">
         <img src="assets/kuvatin-icon.svg" alt="" /><span class="t">Kuvatin</span>
         <span class="seg"><span>Images</span><span class="on">Videos</span></span>
-        <span class="winb">—&ensp;□&ensp;✕</span>
+        <span class="winb">&minus;&ensp;□&ensp;✕</span>
       </div>
       <div class="vm-body">
         <div class="vm-panel vm-media">
@@ -710,32 +712,32 @@
       <div class="vfeat fade">
         <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7h8M3 12h13M3 17h10"/><rect x="14" y="5" width="7" height="4" rx="1.5"/><rect x="16" y="15" width="5" height="4" rx="1.5"/></svg></span>
         <h3>Layered timeline</h3>
-        <p>Drag files straight onto the timeline. Slide, edge-trim and stack clips across tracks — with magnetic snapping and an elastic, weighty feel.</p>
+        <p>Drag files straight onto the timeline. Slide, edge-trim and stack clips across tracks, with magnetic snapping and an elastic, weighty feel.</p>
       </div>
       <div class="vfeat fade">
         <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="14" rx="2"/><rect x="12" y="9" width="7" height="5" rx="1"/><path d="M8 21h8"/></svg></span>
         <h3>Edit in the preview</h3>
-        <p>Grab a clip right on the canvas — move it, resize it from a corner. Position, scale, opacity and volume also live in the inspector.</p>
+        <p>Grab a clip right on the canvas: move it, resize it from a corner. Position, scale, opacity and volume also live in the inspector.</p>
       </div>
       <div class="vfeat fade">
         <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="6" width="12" height="12" rx="2"/><path d="M19 3v4M21 5h-4M19 14v7M15 21h8" opacity=".55"/></svg></span>
         <h3>Any canvas</h3>
-        <p>16:9, vertical, square, 4K or fully custom — and the export resolution is independent, so edit at 1080p and ship a 720p cut.</p>
+        <p>16:9, vertical, square, 4K or fully custom. The export resolution is independent, so edit at 1080p and ship a 720p cut.</p>
       </div>
       <div class="vfeat fade">
         <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></span>
         <h3>Hardware export</h3>
-        <p>H.264 MP4 encoded on your NVIDIA GPU (NVENC), with an automatic software fallback — plus VP9 and VP8 WebM.</p>
+        <p>H.264 MP4 encoded on your NVIDIA GPU (NVENC), with an automatic software fallback. VP9 and VP8 WebM too.</p>
       </div>
       <div class="vfeat fade">
         <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 18V6m5.5 12V6M15 18V6m5.5 12V6" opacity=".5"/><path d="M2 12h20"/><circle cx="15" cy="12" r="2.6" fill="currentColor" stroke="none"/></svg></span>
         <h3>Bitrate &amp; resolution control</h3>
-        <p>Quality presets from quick-and-small to max fidelity — or type the exact kbps and pixel dimensions you want.</p>
+        <p>Quality presets from quick-and-small to max fidelity, or type the exact kbps and pixel dimensions you want.</p>
       </div>
       <div class="vfeat fade">
         <span class="vic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></span>
         <h3>Everything bundled</h3>
-        <p>The GStreamer engine ships inside the installer. No codec packs, no runtimes to hunt down — install and edit.</p>
+        <p>The GStreamer engine ships inside the installer. No codec packs, no runtimes to hunt down: install and edit.</p>
       </div>
     </div>
   </div>
@@ -756,7 +758,7 @@
       </div>
       <div class="savings tilt fade">
         <span class="big"><span id="pct">0</span>%</span>
-        <span class="cap">smaller on a typical screenshot-heavy folder — with no visible quality loss. Your numbers vary by image; this is illustrative.</span>
+        <span class="cap">smaller on a typical screenshot-heavy folder, with no visible quality loss. Your numbers vary by image; this is illustrative.</span>
       </div>
     </div>
   </div>
@@ -769,7 +771,7 @@
       <div>
         <div class="eyebrow">Zero friction</div>
         <h2 style="font-size:clamp(26px,4vw,40px);margin-bottom:14px">It lives in your right-click menu</h2>
-        <p style="color:var(--muted);font-size:16px;line-height:1.65">Install once and Kuvatin registers a per-user Explorer submenu on images and folders alike — every preset you save shows up in it. No launching, no drag-and-drop — select files, or a whole folder, and convert them as one batch. Uninstalling cleans it back up for the user who uninstalls.</p>
+        <p style="color:var(--muted);font-size:16px;line-height:1.65">Install once and Kuvatin registers a per-user Explorer submenu on images and folders alike; every preset you save shows up in it. No launching, no drag-and-drop: select files, or a whole folder, and convert them as one batch. Uninstalling cleans it back up for the user who uninstalls.</p>
       </div>
       <div style="display:flex;justify-content:center">
         <div class="ctxmenu">
@@ -793,7 +795,7 @@
     <div class="tilt fade">
       <div class="iconbig"><img src="assets/kuvatin-icon.svg" alt="Kuvatin icon" /></div>
       <h2>Get Kuvatin</h2>
-      <p>One self-contained <b style="color:var(--ink)">.msi</b> — images, the video editor and its bundled engine included. Adds a Start-menu shortcut, wires up the right-click menu, and upgrades any older version in place.</p>
+      <p>One self-contained <b style="color:var(--ink)">.msi</b> with images, the video editor and its bundled engine included. Adds a Start-menu shortcut, wires up the right-click menu, and upgrades any older version in place.</p>
       <div class="cta">
         <a class="btn btn-primary dl" href="https://github.com/Ville-Mattila/Kuvatin/releases/latest/download/kuvatin-x86_64.msi">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
@@ -801,10 +803,10 @@
         </a>
         <a class="btn btn-ghost" href="https://github.com/Ville-Mattila/Kuvatin/releases" target="_blank" rel="noopener">All releases</a>
       </div>
-      <p class="relnote" id="relnote">Version <span id="relver"></span> · unsigned installer: Windows SmartScreen shows “unknown publisher” — choose <i>More info → Run anyway</i>, and compare the SHA-256 on the <a href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">release page</a>.</p>
+      <p class="relnote" id="relnote">Version <span id="relver"></span> · The installer is unsigned, so Windows SmartScreen shows “unknown publisher”. Choose <i>More info</i>, then <i>Run anyway</i>, and compare the SHA-256 on the <a href="https://github.com/Ville-Mattila/Kuvatin/releases/latest" target="_blank" rel="noopener">release page</a>.</p>
       <div class="install">
         <div class="top">prefer to build it yourself?</div>
-        <code><span class="m"># clone, build, run — needs Rust (MSVC) + the GStreamer MSVC dev SDK</span>
+        <code><span class="m"># clone, build, run (needs Rust MSVC + the GStreamer MSVC dev SDK)</span>
 git clone https://github.com/Ville-Mattila/Kuvatin
 cargo run <span class="c">-p</span> kuvatin</code>
       </div>
@@ -815,7 +817,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
 <footer>
   <img class="fbrand" src="assets/kuvatin-logo.svg" alt="Kuvatin" />
   <p>Built in Rust with <a href="https://slint.dev" target="_blank" rel="noopener">Slint</a> · compression by <a href="https://pngquant.org/lib/" target="_blank" rel="noopener">libimagequant</a> &amp; <a href="https://github.com/shssoichiro/oxipng" target="_blank" rel="noopener">oxipng</a> · video by <a href="https://gstreamer.freedesktop.org/" target="_blank" rel="noopener">GStreamer</a> · <a href="https://github.com/Ville-Mattila/Kuvatin" target="_blank" rel="noopener">source on GitHub</a> · GPL-3.0</p>
-  <p style="margin-top:10px;opacity:.6">Kuvatin — from Finnish <i>kuva</i>, “image.”</p>
+  <p style="margin-top:10px;opacity:.6">Kuvatin, from Finnish <i>kuva</i>: “image”.</p>
 </footer>
 </div><!-- /#below -->
 
@@ -836,7 +838,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
     // Static mode: stack the intro (see html.no-anim CSS) and show everything.
     document.documentElement.classList.add("no-anim");
     document.querySelectorAll(".reveal,.fade").forEach(function(el){ el.style.opacity=1; el.style.transform="none"; });
-    // The compression demo never animates here — show its end state, not "0%".
+    // The compression demo never animates here; show its end state, not "0%".
     var pctEl = document.getElementById("pct"), afterBar = document.getElementById("afterBar");
     if(pctEl){ pctEl.textContent = "80"; }             // = round(1 - 0.47/2.41)
     if(afterBar){ afterBar.style.width = "19.5%"; }    // = 0.47/2.41 of the bar
@@ -861,7 +863,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
   gsap.to("#progress", { scaleX:1, ease:"none", scrollTrigger:{ start:0, end:"max", scrub:0.3 } });
 
   /* wrap the hero tagline's words so they can stagger in individually
-     (only in animated mode — the static page keeps the plain markup) */
+     (only in animated mode; the static page keeps the plain markup) */
   (function wrapWords(el){
     if(!el) return;
     Array.prototype.slice.call(el.childNodes).forEach(function(node){
@@ -890,7 +892,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
   function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
   /* Run `fn` on GSAP's ticker only while something is happening (a scroll,
      a resize, or whatever else calls the returned `poke`), plus a short tail
-     so eased values settle — an idle page burns no frames. */
+     so eased values settle; an idle page burns no frames. */
   function runWhile(fn, tail){
     var left = 0, on = false;
     function tick(){ fn(); if(--left <= 0){ gsap.ticker.remove(tick); on = false; } }
@@ -943,7 +945,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
     // One-shot driven by an IntersectionObserver on the bars themselves, NOT a
     // ScrollTrigger on the section: ScrollTrigger start positions below the
     // pinned intro came out short by the whole pin distance (~2.4 viewports),
-    // and the section's top also crosses the viewport well before the bars do —
+    // and the section's top also crosses the viewport well before the bars do;
     // either way the tween finished off-screen. IO fires on the grid's real
     // rendered position, immune to pin-spacer math. -22% bottom margin ≈ fire
     // when the bars enter the top 78% of the viewport.
@@ -957,7 +959,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
     }
   })();
 
-  /* ============ MOBILE: stacked layout — no pin/path, but keep the motion ============ */
+  /* ============ MOBILE: stacked layout, no pin/path, but keep the motion ============ */
   if(MOBILE){
     // the app screenshot tilts + fades into view
     gsap.from("#shotFrame", { opacity:0, scale:0.9, rotateX:12, transformPerspective:1000, duration:1, ease:"power3.out",
@@ -981,8 +983,8 @@ cargo run <span class="c">-p</span> kuvatin</code>
     return;
   }
 
-  /* ============ PHASE 1: pinned horizontal pan — travel LEFT, screenshot tilts in ============ */
-  // scrub:true, not a lagged scrub — Lenis already smooths the scroll itself, and
+  /* ============ PHASE 1: pinned horizontal pan, travel LEFT, screenshot tilts in ============ */
+  // scrub:true, not a lagged scrub; Lenis already smooths the scroll itself, and
   // a lagged scrub keeps catching up for ~a second AFTER the pin releases, which
   // piles leftover tween motion on top of native scrolling (a visible hitch).
   var introTl = gsap.timeline({
@@ -997,7 +999,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
          // the handoff visibly snags (it used to exit at ~0.16 px/px, then jump
          // to 1.0). expo.in's end slope is 10·ln2 ≈ 6.93, and the pin spans
          // 240vh, so a travel of 240/6.93 ≈ 34.62vh gives d(y)/d(scroll) = 1.0
-         // at release — the stage is already scrolling at full speed when GSAP
+         // at release; the stage is already scrolling at full speed when GSAP
          // lets go. expo.in also stays near zero for most of the pin, so the
          // screenshot holds centered until it accelerates away.
          .fromTo("#introStage", { yPercent:0 }, { yPercent:-34.62, ease:"expo.in" }, 0)
@@ -1076,7 +1078,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
   buildJourney();
 
   // once the ball reaches the path end, scrolling on balloons it into the
-  // background (×75) and fades it out — a zoom-through into the next section.
+  // background (×75) and fades it out: a zoom-through into the next section.
   // Scale and opacity are separate so the ball stays visible a while as it grows.
   gsap.fromTo(traveler, { scale:1 },
     { scale:75, ease:"power2.in", transformOrigin:"50% 50%",
@@ -1215,7 +1217,7 @@ cargo run <span class="c">-p</span> kuvatin</code>
 </script>
 <script>
 /* Version labels come from the JSON-LD stamp above (CI checks it against the
-   tag on every release) — no per-visitor GitHub API call, no rate limit, no
+   tag on every release): no per-visitor GitHub API call, no rate limit, no
    visitor IP handed to a third party. The download links are static: the
    release always carries a fixed-name kuvatin-x86_64.msi next to the
    versioned one. */
