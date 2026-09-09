@@ -13,6 +13,7 @@ export struct FileRow {
     thumb: image,
     dims: string,
     cropped: bool,
+    result: string,    // after a run: "410 KB (-66%)", else empty
 }
 
 // What a timeline clip is (drives its colour and whether it has audio).
@@ -154,6 +155,8 @@ export component AppWindow inherits Window {
     in-out property <bool> error-visible: false;
     in property <string> error-title: "Something went wrong";
     in property <string> error-detail: "";
+    // The same dialog in its neutral form (a batch summary): no red, a check.
+    in-out property <bool> dialog-info: false;
     callback video-mode-changed(int);          // 0 = Images, 1 = Videos
     callback inspector-changed();              // any inspector slider moved
     callback timeline-select(int);            // clip index
@@ -450,6 +453,16 @@ export component AppWindow inherits Window {
                                             padding-left: 6px; padding-right: 6px;
                                             Text { text: "crop"; color: Theme.on-accent; font-size: 9px; font-weight: 700; vertical-alignment: center; }
                                         }
+                                    }
+                                    // Output size + change, once the file is done.
+                                    if row.result != "" : Text {
+                                        text: row.result;
+                                        color: Theme.accent;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        opacity: 0;
+                                        animate opacity { duration: 200ms; }
+                                        init => { self.opacity = 1; }
                                     }
                                     Text {
                                         text: row.status;
@@ -1843,7 +1856,7 @@ export component AppWindow inherits Window {
         card-width: 460px;
         card-padding: 24px;
         card-spacing: 12px;
-        card-border: #4a2a30;
+        card-border: root.dialog-info ? Theme.line : #4a2a30;
         backdrop: #000000c0;
         card-height: Math.min(root.height - 80px, Math.max(200px, self.chrome + err-detail.preferred-height + 8px));
         accessible-role: text;
@@ -1851,8 +1864,13 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             spacing: 10px;
             Rectangle {
-                width: 26px; height: 26px; border-radius: 13px; background: #ff547022;
-                Text { text: "!"; color: #ff7088; font-size: 16px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                width: 26px; height: 26px; border-radius: 13px;
+                background: root.dialog-info ? #2dd4bf22 : #ff547022;
+                Text {
+                    text: root.dialog-info ? "✓" : "!";
+                    color: root.dialog-info ? Theme.accent : #ff7088;
+                    font-size: 16px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center;
+                }
             }
             Text { text: root.error-title; color: Theme.ink; font-size: 15px; font-weight: 700; vertical-alignment: center; overflow: elide; }
         }

@@ -80,6 +80,7 @@ pub fn run(
             Err(e) if e == CANCELLED => cancelled_count += 1,
             Err(e) => {
                 let _ = writeln!(std::io::stderr(), "FAILED {}: {}", r.input.display(), e);
+                crate::applog::log(&format!("FAILED {}: {e}", r.input.display()));
                 failures.push((r.input.clone(), e.to_string()));
             }
             Ok(_) => {}

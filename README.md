@@ -148,6 +148,24 @@ cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging"
 # produces target/wix/kuvatin-<version>-x86_64.msi (~33 MB with the trimmed bundled runtime + licenses)
 ```
 
+## Cutting a release
+
+```powershell
+scripts\release.ps1 2.8.0 -Push
+```
+
+Bumps the version in `Cargo.toml`, `Cargo.lock` and the landing page's
+JSON-LD (CI cross-checks all three against the tag), commits, tags `v2.8.0`
+and pushes. The tag run tests, builds the MSI, installs it on the runner and
+exercises the installed exe, then publishes the release; add notes with
+`gh release edit v2.8.0 --notes-file notes.md`.
+
+## Diagnostics
+
+Headless runs (the Explorer menu) append to `%LOCALAPPDATA%\Kuvatin\kuvatin.log`
+(1 MB, one older generation kept); a crash writes `crash.log` next to it and,
+in the GUI, shows the error dialog.
+
 ## Architecture
 
 - **`crates/kuvatin-core`** — OS-agnostic image engine: formats, PNG optimization

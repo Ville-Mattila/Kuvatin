@@ -2,9 +2,9 @@
 //! its inline crop editor, thumbnails, and the Convert batch.
 
 use super::presets::current_job;
-use super::{AppWindow, FileRow};
+use super::{name_list, show_error, show_info, AppWindow, FileRow};
 use crate::collect::collect_images;
-use kuvatin_core::batch::run_jobs_to;
+use kuvatin_core::batch::{file_result_line, run_jobs_to, summarize};
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::naming::{output_file_name, subfolder_name};
 use kuvatin_core::pipeline::{decode_oriented, plan_unique_outputs, Job};
@@ -423,16 +423,34 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
 
             ui.set_running(true);
             ui.set_progress(0.0);
+            // A fresh run: every row goes back to "queued" (a previous run's
+            // "done" / sizes used to linger on rows the new run hadn't reached).
+            {
+                let model = ui.get_files();
+                for i in 0..model.row_count() {
+                    if let Some(mut row) = model.row_data(i) {
+                        row.status = "queued".into();
+                        row.result = "".into();
+                        model.set_row_data(i, row);
+                    }
+                }
+            }
 
             let ui_weak2 = ui_weak.clone();
             let total = items_to.len();
             let rows_paths = inputs.clone();
             std::thread::spawn(move || {
                 let ui_for_progress = ui_weak2.clone();
-                run_jobs_to(&items_to, move |p| {
+                let results = run_jobs_to(&items_to, move |p| {
                     let frac = p.done as f32 / total as f32;
                     let idx = rows_paths.iter().position(|x| *x == p.last.input);
                     let ok = p.last.outcome.is_ok();
+                    // "410 KB (-66%)" for the row, read here on the worker so the
+                    // UI thread never touches the filesystem.
+                    let result = match &p.last.outcome {
+                        Ok(out) => file_result_line(&p.last.input, out),
+                        Err(_) => String::new(),
+                    };
                     let ui3 = ui_for_progress.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = ui3.upgrade() {
@@ -441,16 +459,58 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                                 let model = ui.get_files();
                                 if let Some(mut row) = model.row_data(i) {
                                     row.status = if ok { "done".into() } else { "error".into() };
+                                    row.result = result.into();
                                     model.set_row_data(i, row);
                                 }
                             }
                         }
                     });
                 });
+                // The summary: counts, bytes in vs out, and which files failed.
+                let summary = summarize(&results);
+                let failed: Vec<String> = results
+                    .iter()
+                    .filter_map(|r| match &r.outcome {
+                        Err(e) if e != kuvatin_core::batch::CANCELLED => Some(format!(
+                            "{}: {e}",
+                            r.input
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| r.input.display().to_string())
+                        )),
+                        _ => None,
+                    })
+                    .collect();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_running(false);
                         ui.set_progress(1.0);
+                        let title = if summary.failed == 0 {
+                            format!(
+                                "Converted {} file{}",
+                                summary.ok,
+                                if summary.ok == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("Converted {} of {} files", summary.ok, summary.total())
+                        };
+                        let mut detail = summary.size_line();
+                        if !failed.is_empty() {
+                            if !detail.is_empty() {
+                                detail.push_str("\n\n");
+                            }
+                            detail.push_str(&format!(
+                                "{} file{} failed:\n{}",
+                                failed.len(),
+                                if failed.len() == 1 { "" } else { "s" },
+                                name_list(&failed)
+                            ));
+                        }
+                        if summary.failed == 0 {
+                            show_info(&ui, &title, detail);
+                        } else {
+                            show_error(&ui, &title, detail);
+                        }
                     }
                 });
             });
@@ -493,6 +553,7 @@ fn row_for(p: &Path, crops: &CropMap, cache: &HashMap<PathBuf, ThumbData>) -> Fi
             .to_string()
             .into(),
         status: "queued".into(),
+        result: "".into(),
         thumb,
         dims,
         cropped: crops.contains_key(p),

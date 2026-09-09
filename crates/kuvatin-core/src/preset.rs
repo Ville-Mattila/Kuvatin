@@ -68,6 +68,20 @@ mod name_tests {
         assert!(validate_preset_name("trailing\\").is_err());
         assert!(validate_preset_name("two\nlines").is_err());
     }
+
+    #[test]
+    fn find_ignores_case_and_surrounding_space() {
+        let store = super::PresetStore::builtin();
+        assert_eq!(
+            store.find("convert to webp").map(|p| p.name.as_str()),
+            Some("Convert to WebP")
+        );
+        assert_eq!(
+            store.find("  CONVERT TO WEBP ").map(|p| p.name.as_str()),
+            Some("Convert to WebP")
+        );
+        assert!(store.find("convert to avif").is_none());
+    }
 }
 
 impl PresetStore {
@@ -137,8 +151,13 @@ impl PresetStore {
         self.version = Self::CURRENT_VERSION;
     }
 
+    /// Look a preset up by name, case-insensitively: "webp" and "WebP" are
+    /// one preset (the Explorer menu and the CLI pass the stored spelling).
     pub fn find(&self, name: &str) -> Option<&Preset> {
-        self.presets.iter().find(|p| p.name == name)
+        let wanted = name.trim().to_lowercase();
+        self.presets
+            .iter()
+            .find(|p| p.name.to_lowercase() == wanted)
     }
 
     /// Default on-disk location: %APPDATA%\Kuvatin\presets.toml (or platform equiv,

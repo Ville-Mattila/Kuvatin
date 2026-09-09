@@ -33,6 +33,11 @@ on:
       - master
     tags:
       - "v*"
+  # Pull requests (Dependabot's included) get the same gates; the workflow
+  # is read-only, so a fork's PR gets no more than that.
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 # Superseded master runs are cancelled; a tag run is never cancelled.

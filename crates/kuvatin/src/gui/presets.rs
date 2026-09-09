@@ -58,9 +58,17 @@ pub(super) fn wire(ui: &AppWindow, store: &Arc<Mutex<PresetStore>>, store_path: 
 
             let job = current_job(&ui, &store);
 
-            // Upsert: overwrite an existing preset's job, or push a new one.
-            if let Some(existing) = store.presets.iter_mut().find(|p| p.name == name) {
+            // Upsert, matching names case-insensitively so "webp" can't sit
+            // next to "WebP" as a second preset (and a second menu entry);
+            // the stored spelling wins.
+            let wanted = name.to_lowercase();
+            if let Some(existing) = store
+                .presets
+                .iter_mut()
+                .find(|p| p.name.to_lowercase() == wanted)
+            {
                 existing.job = job;
+                name = existing.name.clone();
             } else {
                 store.presets.push(kuvatin_core::preset::Preset {
                     name: name.clone(),

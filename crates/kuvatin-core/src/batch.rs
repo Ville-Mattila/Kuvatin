@@ -146,6 +146,158 @@ where
         .collect()
 }
 
+/// What a finished batch amounts to: how many files succeeded, and the bytes
+/// in versus out for those (so the GUI can say "18.4 MB to 7.0 MB, 62%
+/// smaller"). Failed and cancelled files count in `failed` / `cancelled` and
+/// contribute no bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchSummary {
+    pub ok: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+impl BatchSummary {
+    pub fn total(&self) -> usize {
+        self.ok + self.failed + self.cancelled
+    }
+
+    /// Size change of the successful files as a signed percentage (-62 = 62%
+    /// smaller), or `None` with nothing to compare.
+    pub fn percent_change(&self) -> Option<i64> {
+        if self.bytes_in == 0 {
+            return None;
+        }
+        let delta = self.bytes_out as i128 - self.bytes_in as i128;
+        Some((delta * 100 / self.bytes_in as i128) as i64)
+    }
+
+    /// One line for a dialog: "18.4 MB to 7.0 MB, 62% smaller".
+    pub fn size_line(&self) -> String {
+        match self.percent_change() {
+            None => String::new(),
+            Some(p) if p < 0 => format!(
+                "{} to {}, {}% smaller",
+                human_bytes(self.bytes_in),
+                human_bytes(self.bytes_out),
+                -p
+            ),
+            Some(0) => format!(
+                "{} to {}, same size",
+                human_bytes(self.bytes_in),
+                human_bytes(self.bytes_out)
+            ),
+            Some(p) => format!(
+                "{} to {}, {}% larger",
+                human_bytes(self.bytes_in),
+                human_bytes(self.bytes_out),
+                p
+            ),
+        }
+    }
+}
+
+/// Tally a batch's results, reading the input and output sizes from disk.
+pub fn summarize(results: &[FileResult]) -> BatchSummary {
+    let mut s = BatchSummary::default();
+    for r in results {
+        match &r.outcome {
+            Ok(out) => {
+                s.ok += 1;
+                s.bytes_in += std::fs::metadata(&r.input).map(|m| m.len()).unwrap_or(0);
+                s.bytes_out += std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+            }
+            Err(e) if e == CANCELLED => s.cancelled += 1,
+            Err(_) => s.failed += 1,
+        }
+    }
+    s
+}
+
+/// "410 KB", "7.0 MB", "1.2 GB" (decimal units, one decimal from MB up).
+pub fn human_bytes(n: u64) -> String {
+    const KB: f64 = 1000.0;
+    let f = n as f64;
+    if f < KB {
+        format!("{n} B")
+    } else if f < KB * KB {
+        format!("{:.0} KB", f / KB)
+    } else if f < KB * KB * KB {
+        format!("{:.1} MB", f / (KB * KB))
+    } else {
+        format!("{:.2} GB", f / (KB * KB * KB))
+    }
+}
+
+/// "410 KB (-66%)" for one finished file, or "" when the sizes can't be read.
+pub fn file_result_line(input: &std::path::Path, output: &std::path::Path) -> String {
+    let (Ok(i), Ok(o)) = (std::fs::metadata(input), std::fs::metadata(output)) else {
+        return String::new();
+    };
+    let (i, o) = (i.len(), o.len());
+    if i == 0 {
+        return human_bytes(o);
+    }
+    let pct = (o as i128 - i as i128) * 100 / i as i128;
+    format!(
+        "{} ({}{}%)",
+        human_bytes(o),
+        if pct > 0 { "+" } else { "" },
+        pct
+    )
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn human_bytes_picks_a_unit() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(999), "999 B");
+        assert_eq!(human_bytes(410_300), "410 KB");
+        assert_eq!(human_bytes(7_040_000), "7.0 MB");
+        assert_eq!(human_bytes(1_234_000_000), "1.23 GB");
+    }
+
+    #[test]
+    fn summary_counts_and_compares_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_in = dir.path().join("a.png");
+        let a_out = dir.path().join("a.webp");
+        let b_in = dir.path().join("b.png");
+        std::fs::write(&a_in, vec![0u8; 1000]).unwrap();
+        std::fs::write(&a_out, vec![0u8; 380]).unwrap();
+        std::fs::write(&b_in, vec![0u8; 500]).unwrap();
+        let results = vec![
+            FileResult {
+                input: a_in.clone(),
+                outcome: Ok(a_out.clone()),
+            },
+            FileResult {
+                input: b_in.clone(),
+                outcome: Err("boom".into()),
+            },
+            FileResult {
+                input: b_in,
+                outcome: Err(CANCELLED.into()),
+            },
+        ];
+        let s = summarize(&results);
+        assert_eq!((s.ok, s.failed, s.cancelled, s.total()), (1, 1, 1, 3));
+        assert_eq!((s.bytes_in, s.bytes_out), (1000, 380));
+        assert_eq!(s.percent_change(), Some(-62));
+        assert_eq!(s.size_line(), "1 KB to 380 B, 62% smaller");
+        assert_eq!(file_result_line(&a_in, &a_out), "380 B (-62%)");
+        // Nothing succeeded: no size line, no percentage.
+        let none = summarize(&results[1..]);
+        assert_eq!(none.percent_change(), None);
+        assert_eq!(none.size_line(), "");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

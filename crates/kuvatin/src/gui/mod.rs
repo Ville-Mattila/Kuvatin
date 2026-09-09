@@ -31,6 +31,16 @@ slint::include_modules!();
 fn show_error(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
     ui.set_error_title(title.into());
     ui.set_error_detail(detail.as_ref().into());
+    ui.set_dialog_info(false);
+    ui.set_error_visible(true);
+}
+
+/// The same dialog in its neutral, informational form (a batch summary): no
+/// red, a check mark instead of the exclamation.
+fn show_info(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
+    ui.set_error_title(title.into());
+    ui.set_error_detail(detail.as_ref().into());
+    ui.set_dialog_info(true);
     ui.set_error_visible(true);
 }
 

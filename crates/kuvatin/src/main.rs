@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod applog;
 mod cli;
 mod collect;
 mod gui;
@@ -64,6 +65,11 @@ fn fail_and_exit(title: &str, intro: String, failures: &[(PathBuf, String)]) -> 
     if failures.len() > 10 {
         msg.push_str(&format!("\u{2026}and {} more.\n", failures.len() - 10));
     }
+    applog::log(&format!(
+        "FAIL {title}: {} failure(s): {}",
+        failures.len(),
+        msg.replace('\n', " | ")
+    ));
     shell::notify_error(title, &msg);
     std::process::exit(1);
 }
@@ -75,6 +81,7 @@ fn fail_and_exit(title: &str, intro: String, failures: &[(PathBuf, String)]) -> 
 /// `--register`, a progress window that couldn't open, or a GUI that couldn't
 /// start were all silent exits.
 fn fail(title: &str, err: anyhow::Error) -> ! {
+    applog::log(&format!("FAIL {title}: {err:#}"));
     shell::notify_error(title, &format!("{err:#}"));
     std::process::exit(1);
 }
@@ -105,6 +112,7 @@ fn main() {
     // A windowed exe run from a terminal joins that terminal's console, so
     // `--register` / errors print where the user is looking.
     shell::attach_parent_console();
+    applog::install_panic_hook();
     configure_bundled_gstreamer();
     let args: Vec<std::ffi::OsString> = std::env::args_os()
         .map(|a| cli::repair_drive_root(&a))
@@ -115,20 +123,30 @@ fn main() {
         shell::set_quiet(true);
     }
     match cli.into_mode() {
-        Mode::Register => or_fail(
-            "Kuvatin \u{2014} could not register the context menu",
-            shell::register(),
-        ),
-        Mode::Unregister => or_fail(
-            "Kuvatin \u{2014} could not remove the context menu",
-            shell::unregister(),
-        ),
+        Mode::Register => {
+            applog::log("register context menu");
+            or_fail(
+                "Kuvatin \u{2014} could not register the context menu",
+                shell::register(),
+            )
+        }
+        Mode::Unregister => {
+            applog::log("unregister context menu");
+            or_fail(
+                "Kuvatin \u{2014} could not remove the context menu",
+                shell::unregister(),
+            )
+        }
         Mode::Invalid(reason) => fail("Kuvatin", anyhow::anyhow!("{reason}")),
         Mode::QuickRun { preset, paths } => {
             // One group per preset, so two different presets never merge.
             let Some(paths) = coalesce(&format!("preset:{preset}"), paths) else {
                 return;
             };
+            applog::log(&format!(
+                "quick run: preset {preset:?}, {} input(s), quiet={quiet}",
+                paths.len()
+            ));
             let heading = preset.clone();
             let outcome = run_job(quiet, &heading, move |sink| {
                 quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| {
@@ -148,7 +166,10 @@ fn main() {
                     ),
                     &report.failures,
                 ),
-                Ok(_) => {}
+                Ok(report) => applog::log(&format!(
+                    "quick run done: {} file(s) converted",
+                    report.total - report.failure_count() - report.cancelled
+                )),
                 Err(e) => fail("Kuvatin \u{2014} quick run failed", e),
             }
         }
@@ -158,6 +179,10 @@ fn main() {
             let Some(paths) = coalesce("sequence-mp4", paths) else {
                 return;
             };
+            applog::log(&format!(
+                "sequence render: {} path(s), {fps} fps, quiet={quiet}",
+                paths.len()
+            ));
             let outcome = run_job(quiet, "Render image sequence to MP4", move |sink| {
                 sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
             });
@@ -180,7 +205,10 @@ fn main() {
                     ),
                     &report.failures,
                 ),
-                Ok(_) => {}
+                Ok(report) => applog::log(&format!(
+                    "sequence render done: {} MP4(s) written",
+                    report.rendered.len()
+                )),
                 Err(e) => fail("Kuvatin \u{2014} sequence render failed", e),
             }
         }
