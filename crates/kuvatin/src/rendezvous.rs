@@ -29,8 +29,12 @@ pub enum Role {
     Follower,
 }
 
-/// Arrivals must be quiet for this long before the leader closes the batch.
+/// Arrivals must be quiet for this long before the leader closes the batch —
+/// once a SECOND arrival has shown up. A lone arrival only waits
+/// [`FIRST_ARRIVAL_GRACE`]: Explorer launches a burst within tens of
+/// milliseconds, so a single-file right-click shouldn't pay the full window.
 pub const QUIET: Duration = Duration::from_millis(600);
+const FIRST_ARRIVAL_GRACE: Duration = Duration::from_millis(250);
 /// A lock or spool entry older than this is debris from a crashed run.
 const STALE: Duration = Duration::from_secs(30);
 const LOCK: &str = "leader.lock";
@@ -56,15 +60,24 @@ pub fn gather_in(root: &Path, group: &str, mine: &[PathBuf], quiet: Duration) ->
     if !acquire_lock(&dir) {
         return Role::Follower;
     }
-    // Let the burst settle: the clock restarts whenever a new entry lands.
+    // Let the burst settle: the clock restarts whenever a new entry lands. A
+    // lone arrival (still just our own entry after the grace period) goes
+    // straight ahead instead of waiting out the whole quiet window.
+    let started = Instant::now();
     let mut last_change = Instant::now();
     let mut seen = spool_count(&dir);
-    while last_change.elapsed() < quiet {
+    loop {
         std::thread::sleep(Duration::from_millis(40));
         let n = spool_count(&dir);
         if n != seen {
             seen = n;
             last_change = Instant::now();
+        }
+        if seen <= 1 && started.elapsed() >= FIRST_ARRIVAL_GRACE.min(quiet) {
+            break;
+        }
+        if last_change.elapsed() >= quiet {
+            break;
         }
     }
     let claim_dir = dir.join(format!(
@@ -95,10 +108,43 @@ fn group_dir(group: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// One spool line per path. Valid-Unicode paths go verbatim (Windows forbids
+/// control characters in paths, so `\n` can't occur inside one; a leading `#`
+/// is escaped as `#u:`). A path that is NOT valid Unicode — an unpaired
+/// surrogate in an NTFS name — is written as `#w:` + hex UTF-16 units, so the
+/// leader converts exactly the file the user clicked instead of a lossy
+/// `U+FFFD` look-alike that doesn't exist.
+fn encode_path(p: &Path) -> String {
+    if let Some(s) = p.to_str() {
+        return if s.starts_with('#') { format!("#u:{s}") } else { s.to_string() };
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let hex: String = p.as_os_str().encode_wide().map(|u| format!("{u:04x}")).collect();
+        return format!("#w:{hex}");
+    }
+    #[allow(unreachable_code)]
+    p.to_string_lossy().into_owned()
+}
+
+fn decode_path(line: &str) -> PathBuf {
+    if let Some(s) = line.strip_prefix("#u:") {
+        return PathBuf::from(s);
+    }
+    #[cfg(windows)]
+    if let Some(hex) = line.strip_prefix("#w:") {
+        use std::os::windows::ffi::OsStringExt;
+        let units: Vec<u16> = (0..hex.len() / 4)
+            .filter_map(|i| u16::from_str_radix(&hex[i * 4..i * 4 + 4], 16).ok())
+            .collect();
+        return PathBuf::from(std::ffi::OsString::from_wide(&units));
+    }
+    PathBuf::from(line)
+}
+
 /// Write this process' paths as one spool entry. Written under a temporary
 /// name and renamed into place so a half-written entry is never claimed.
-/// Paths are newline-separated — Windows forbids control characters in paths,
-/// so `\n` can't occur inside one.
 fn spool(dir: &Path, paths: &[PathBuf]) -> std::io::Result<()> {
     let stem = format!(
         "{}-{}-{}",
@@ -110,11 +156,7 @@ fn spool(dir: &Path, paths: &[PathBuf]) -> std::io::Result<()> {
             .unwrap_or(0)
     );
     let tmp = dir.join(format!("{stem}.tmp"));
-    let body: String = paths
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body: String = paths.iter().map(|p| encode_path(p)).collect::<Vec<_>>().join("\n");
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, dir.join(format!("{stem}.{SPOOL_EXT}")))
 }
@@ -135,7 +177,13 @@ fn age_of(p: &Path) -> Option<Duration> {
 }
 
 /// Try to become the leader. A lock left by a crashed leader (older than
-/// [`STALE`]) is removed and the race re-run once.
+/// [`STALE`]) is retired and the race re-run once.
+///
+/// Retirement is an atomic RENAME to a unique name, not a delete: with a
+/// delete, two arrivals that both judged the lock stale could each remove
+/// and recreate it — the second `remove_file` deleted the first's FRESH lock
+/// and produced two leaders. Only one process can win the rename; the other
+/// finds a fresh lock on its retry and follows.
 fn acquire_lock(dir: &Path) -> bool {
     let lock = dir.join(LOCK);
     for attempt in 0..2 {
@@ -150,7 +198,15 @@ fn acquire_lock(dir: &Path) -> bool {
                 if !stale || attempt == 1 {
                     return false;
                 }
-                let _ = std::fs::remove_file(&lock);
+                let retired = dir.join(format!(
+                    "stale-{}-{}",
+                    std::process::id(),
+                    SEQ.fetch_add(1, Ordering::Relaxed)
+                ));
+                if std::fs::rename(&lock, &retired).is_ok() {
+                    let _ = std::fs::remove_file(&retired);
+                }
+                // Whether or not we won the rename, retry create_new once.
             }
             // Can't coordinate at all — better to run alone than to drop the action.
             Err(_) => return true,
@@ -183,7 +239,7 @@ fn claim(dir: &Path, claim_dir: &Path, out: &mut Vec<PathBuf>) {
             continue; // another leader got it first
         }
         if let Ok(body) = std::fs::read_to_string(&dst) {
-            out.extend(body.lines().filter(|l| !l.is_empty()).map(PathBuf::from));
+            out.extend(body.lines().filter(|l| !l.is_empty()).map(decode_path));
         }
         let _ = std::fs::remove_file(&dst);
     }
@@ -237,6 +293,44 @@ mod tests {
         let dir = root.path().join(group_dir("preset:test"));
         assert_eq!(spool_count(&dir), 0, "spool drained");
         assert!(!dir.join(LOCK).exists(), "lock released");
+    }
+
+    /// A single right-click shouldn't wait out the whole quiet window: with
+    /// no second arrival, the leader goes ahead after the grace period.
+    #[test]
+    fn a_lone_arrival_does_not_wait_the_full_quiet_window() {
+        let root = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        let role = gather_in(root.path(), "g", &[p("only.png")], Duration::from_millis(1500));
+        let took = t0.elapsed();
+        assert_eq!(role, Role::Leader(vec![p("only.png")]));
+        assert!(took < Duration::from_millis(900), "waited {took:?} for a lone arrival");
+    }
+
+    /// Two processes that both judge a lock stale must not both lead: only
+    /// the rename winner retires it, the other follows.
+    #[test]
+    fn a_stale_lock_is_retired_by_exactly_one_process() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(group_dir("g"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = std::fs::File::create(dir.join(LOCK)).unwrap();
+        lock.set_modified(SystemTime::now() - Duration::from_secs(120)).unwrap();
+        drop(lock);
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let root = root.path().to_path_buf();
+                std::thread::spawn(move || {
+                    gather_in(&root, "g", &[p(&format!("{i}.png"))], Duration::from_millis(200))
+                })
+            })
+            .collect();
+        let roles: Vec<Role> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let leaders = roles
+            .iter()
+            .filter(|r| leader_paths(r).map_or(false, |v| !v.is_empty()))
+            .count();
+        assert_eq!(leaders, 1, "one leader despite the stale lock: {roles:?}");
     }
 
     /// Sequential runs are independent batches — nothing carries over.
@@ -297,14 +391,29 @@ mod tests {
         assert!(!debris.exists(), "debris deleted");
     }
 
-    /// Non-ASCII paths (and several per process) survive the spool round trip.
+    /// Non-ASCII paths (and several per process) survive the spool round trip,
+    /// as does a name starting with the escape character.
     #[test]
     fn paths_round_trip_verbatim() {
         let root = tempfile::tempdir().unwrap();
-        let mine = [p("C:/Työt/kuva ä.png"), p("D:/render/frame_0001.exr")];
+        let mine = [p("C:/Työt/kuva ä.png"), p("D:/render/frame_0001.exr"), p("#w:not-hex.png")];
         let role = gather_in(root.path(), "g", &mine, Duration::from_millis(50));
         let mut expect = mine.to_vec();
         expect.sort();
         assert_eq!(role, Role::Leader(expect));
+    }
+
+    /// A path that isn't valid Unicode (an unpaired surrogate in an NTFS name)
+    /// used to come back as a `U+FFFD` look-alike that doesn't exist.
+    #[cfg(windows)]
+    #[test]
+    fn a_non_unicode_path_survives_the_spool() {
+        use std::os::windows::ffi::OsStringExt;
+        let units: Vec<u16> = "C:\\odd\\".encode_utf16().chain([0xD800, 'x' as u16]).collect();
+        let odd = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        assert!(odd.to_str().is_none(), "fixture must be non-Unicode");
+        let root = tempfile::tempdir().unwrap();
+        let role = gather_in(root.path(), "g", &[odd.clone()], Duration::from_millis(50));
+        assert_eq!(role, Role::Leader(vec![odd]));
     }
 }

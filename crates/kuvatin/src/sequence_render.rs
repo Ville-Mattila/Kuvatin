@@ -5,13 +5,11 @@
 use anyhow::{anyhow, Result};
 use kuvatin_core::naming::ensure_unique;
 use kuvatin_video::{
-    detect_sequence, parse_frame_path, render_to_mp4, RenderProgress, SequenceSpec,
+    detect_sequence, is_frame_file, parse_frame_path, render_to_mp4, RenderProgress,
+    SequenceSpec,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-
-/// Frame formats the sequence engine accepts.
-const FRAME_EXTS: &[&str] = &["png", "jpg", "jpeg", "exr"];
 
 /// Outcome of a sequence render over a selection.
 pub struct SequenceReport {
@@ -21,13 +19,6 @@ pub struct SequenceReport {
     pub failures: Vec<(PathBuf, String)>,
     /// The user cancelled; `rendered` holds what finished before that.
     pub cancelled: bool,
-}
-
-fn is_frame_file(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| FRAME_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
 }
 
 /// Resolve `paths` into distinct sequences. A selected frame contributes the
@@ -53,6 +44,12 @@ pub fn resolve_sequences(paths: &[PathBuf]) -> (Vec<SequenceSpec>, Vec<(PathBuf,
             if candidates.len() == before {
                 failures.push((p.clone(), "no numbered image frames in this folder".into()));
             }
+        } else if !is_frame_file(p) {
+            // A selected .tif/.bmp frame used to fail late inside GStreamer.
+            failures.push((
+                p.clone(),
+                format!("not a sequence frame format ({})", kuvatin_video::FRAME_EXTENSIONS.join(", ")),
+            ));
         } else {
             match parse_frame_path(p) {
                 Ok(spec) => candidates.push(spec),
@@ -155,7 +152,7 @@ pub fn run(
 mod tests {
     use super::*;
 
-    fn touch(dir: &Path, name: &str) -> PathBuf {
+    fn touch(dir: &std::path::Path, name: &str) -> PathBuf {
         let p = dir.join(name);
         std::fs::write(&p, b"x").unwrap();
         p
@@ -198,11 +195,14 @@ mod tests {
         let lone = touch(t.path(), "single_7.png");
         let empty = t.path().join("empty");
         std::fs::create_dir(&empty).unwrap();
-        let (specs, failures) = resolve_sequences(&[photo.clone(), lone.clone(), empty.clone()]);
+        let tif = touch(t.path(), "scan_0001.tif");
+        let (specs, failures) =
+            resolve_sequences(&[photo.clone(), lone.clone(), empty.clone(), tif.clone()]);
         assert!(specs.is_empty());
-        let failed: Vec<&Path> = failures.iter().map(|(p, _)| p.as_path()).collect();
-        assert_eq!(failed, [photo.as_path(), empty.as_path(), lone.as_path()]);
-        assert!(failures[2].1.contains("only one frame"));
+        let failed: Vec<&std::path::Path> = failures.iter().map(|(p, _)| p.as_path()).collect();
+        assert_eq!(failed, [photo.as_path(), empty.as_path(), tif.as_path(), lone.as_path()]);
+        assert!(failures[2].1.contains("not a sequence frame format"));
+        assert!(failures[3].1.contains("only one frame"));
     }
 
     /// Output naming: trimmed prefix, folder name for bare numbers, never

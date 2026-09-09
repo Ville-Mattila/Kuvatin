@@ -193,17 +193,20 @@
           flags. These run as deferred custom actions sequenced around
           InstallFiles / RemoveFiles so the exe exists when registering and is
           still present when unregistering. Return='ignore' keeps a
-          registration hiccup from aborting the install/uninstall.
+          registration hiccup from aborting the install/uninstall, and
+          the quiet flag keeps the exe from popping an error dialog inside the
+          install (a deferred action's message box would block it); the
+          failure is still visible as the exe's exit code in the MSI log.
         -->
         <CustomAction Id='KuvatinRegister'
                       FileKey='exe0'
-                      ExeCommand='--register'
+                      ExeCommand='--register --quiet'
                       Execute='deferred'
                       Impersonate='yes'
                       Return='ignore' />
         <CustomAction Id='KuvatinUnregister'
                       FileKey='exe0'
-                      ExeCommand='--unregister'
+                      ExeCommand='--unregister --quiet'
                       Execute='deferred'
                       Impersonate='yes'
                       Return='ignore' />

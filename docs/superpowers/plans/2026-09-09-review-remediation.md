@@ -99,6 +99,63 @@
   keeps a fresh temp dir; cancels are typed and leave no temp dir.
 
 ## §3 Explorer & CLI — H8–H10, M12, M13, M15–M17, M34, L7–L10
+
+- **H8** `ensure_registered` no longer re-points the menu at whatever exe is
+  running. Debug builds never touch the registry; a release build
+  (re)registers only when nothing owns the menu, the registered exe no longer
+  exists, or the menu is ours with an older key set (`Schema`). Seen live on
+  the dev machine before the fix: the installed 2.6.0's menu had been
+  hijacked by a `target\release` run.
+- **H9** The submenu is generated from the `PresetStore` — every preset in
+  store order (Explorer sorts subcommands by key name, so the key carries the
+  position), then a separator and the fixed items; a name containing `"`
+  stays GUI-only. Save/delete in the GUI call `sync_menu`, which rewrites the
+  stores only when the menu is ours. README no longer claims a fixed trio.
+- **H10** The verb is registered per extension
+  (`SystemFileAssociations\.<ext>`) for every canonical input plus `.exr`,
+  which gets a sequence-only store (the presets can't read it); the
+  perceived-type root (`…\image`, which carried `.dib/.ico/.wmf` the engine
+  rejected and lacked `.exr`) is deleted on every (un)register.
+- **M12 / M17** Every fatal path in `main` goes through `fail` →
+  `notify_error` → exit 1: a failed `--register`, a progress window that
+  could not open, a GUI that could not start. `notify_error` prints to
+  stderr when there is a console or a stderr handle (a windowed exe run from
+  a terminal now attaches to that console, so `--register` / `--version`
+  print where the user is looking; a script with redirected output gets text
+  instead of a dialog it can't dismiss), pops a dialog otherwise, and is
+  muted by `--quiet`, which the MSI custom actions pass.
+- **M13** `%V` for a drive root reaches the process as `C:"` (MSVC argv
+  rules); `repair_drive_root` fixes exactly that shape at argv level.
+- **M15** A stale lock is retired by atomic rename; only the rename winner
+  recreates it, the loser finds a fresh lock and follows.
+- **M16** clap: `--version`; the modes conflict with each other; `--fps`
+  requires `--sequence-mp4`; a headless mode without a PATH is an explicit
+  error instead of a silent no-op.
+- **M34** One `INPUT_EXTENSIONS` list in `kuvatin-core` (now with `.tif`,
+  `.jfif`, `.jpe`) feeds the folder scanner, both file dialogs, the
+  video-mode still classifier and the registration; `FRAME_EXTENSIONS` in
+  `kuvatin-video` feeds the sequence dialog, the headless resolver (a `.tif`
+  frame is rejected up front instead of failing inside GStreamer) and the
+  `.exr` registration.
+- **L7** A lone arrival waits 250 ms, not the full 600 ms quiet window; the
+  window still restarts on every further arrival.
+- **L8** `MB_SETFOREGROUND` dropped (topmost, but no focus steal).
+- **L9** Spool encoding is lossless: a non-Unicode NTFS name is hex-encoded
+  UTF-16 instead of a `U+FFFD` look-alike. Claimed entries are still deleted
+  when claimed, deliberately: keeping them for the run's duration would need
+  a guard threaded through `Role` and a sweep for crashed leaders' claim
+  dirs, with nothing ever reading them back — a retry is one right-click away.
+- **L10** Folder scans skip hidden/system files and dot-files (`._foo.png`
+  sidecars, thumbnail caches); an explicitly selected hidden file still runs.
+- Tests: menu mirrors the store (order, separator, unquotable name); verb
+  roots and their stores follow the canonical lists; command lines; CLI
+  conflicts/dangling flags/missing PATH; drive-root repair; lone-arrival
+  timing; stale lock retired by exactly one of four; non-Unicode spool round
+  trip; hidden/dot-file skipping; `.tif`/`.jfif` accepted; `.tif` frame
+  rejected up front. Live-checked on the dev machine: the new build's
+  `--register` writes the per-extension roots + three stores and deletes the
+  legacy root, `--unregister` removes everything, `--version` prints.
+
 ## §4 Editor UX — H5, H6, M11, M18–M26, L11
 ## §5 Ship pipeline — H12, H13, M28–M33, L16, L17
 ## §6 Structure — M5, M6, M27, M35, L2, L4–L6, L12, L13

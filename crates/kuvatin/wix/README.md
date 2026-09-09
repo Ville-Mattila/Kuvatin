@@ -77,11 +77,14 @@ context-menu registration necessarily lives in **HKCU** (per user). The custom
 actions run `--register`/`--unregister` impersonated as the installing user, so
 out of the box only that user gets the menu. Two mitigations keep this sane:
 
-- **Self-healing at launch:** the GUI calls `shell::ensure_registered()` on
-  every startup — a single registry read that re-runs the full registration
-  when it is missing or points at a stale exe path. Any user who launches the
-  app once gets (and keeps) the context menu, including after upgrades that
-  move the install directory.
+- **Self-healing at launch:** the release GUI calls `shell::ensure_registered()`
+  on every startup — two registry reads that re-run the full registration
+  only when nothing owns the menu, the registered exe no longer exists (an
+  upgrade moved the install directory) or the registered key set is older
+  than this build's. Any user who launches the app once gets (and keeps) the
+  context menu. It never hijacks: a menu owned by another Kuvatin that still
+  exists is left alone, and debug builds never touch the registry at all —
+  run `--register` explicitly from the copy that should own the menu.
 - **Uninstall is best-effort:** `--unregister` on uninstall cleans the menu
   for the uninstalling user only. Other users' HKCU entries die on their next
   launch attempt (the exe is gone, Explorer ignores dead verbs) — accepted

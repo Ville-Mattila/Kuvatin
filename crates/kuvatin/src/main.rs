@@ -14,18 +14,6 @@ use clap::Parser;
 use cli::{Cli, Mode};
 use std::path::PathBuf;
 
-/// Fold the processes Explorer launches for a multi-item selection (one per
-/// item) into a single batch: the leader gets every path, followers get
-/// `None` and should exit silently. `None` also when another leader already
-/// claimed this process' paths.
-fn coalesce(group: &str, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
-    match rendezvous::gather(group, &paths, rendezvous::QUIET) {
-        rendezvous::Role::Follower => None,
-        rendezvous::Role::Leader(all) if all.is_empty() => None,
-        rendezvous::Role::Leader(all) => Some(all),
-    }
-}
-
 /// In an installed build the GStreamer **plugins** are bundled next to the exe
 /// (the core DLLs sit alongside the exe so the loader finds them at startup;
 /// plugins load later, at `gst::init`, via this path). In a dev build the
@@ -51,6 +39,18 @@ fn configure_bundled_gstreamer() {
     // already set that variable.
 }
 
+/// Fold the processes Explorer launches for a multi-item selection (one per
+/// item) into a single batch: the leader gets every path, followers get
+/// `None` and should exit silently. `None` also when another leader already
+/// claimed this process' paths.
+fn coalesce(group: &str, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+    match rendezvous::gather(group, &paths, rendezvous::QUIET) {
+        rendezvous::Role::Follower => None,
+        rendezvous::Role::Leader(all) if all.is_empty() => None,
+        rendezvous::Role::Leader(all) => Some(all),
+    }
+}
+
 /// Show a headless run's per-file failures (capped at ten) and exit non-zero.
 fn fail_and_exit(title: &str, intro: String, failures: &[(PathBuf, String)]) -> ! {
     let mut msg = intro;
@@ -69,20 +69,57 @@ fn fail_and_exit(title: &str, intro: String, failures: &[(PathBuf, String)]) -> 
     std::process::exit(1);
 }
 
-fn main() -> anyhow::Result<()> {
+/// Report a fatal error the way the current launch can show it (stderr with a
+/// console, a dialog from Explorer, nothing under `--quiet`) and exit 1.
+/// Every fatal path goes through here: a `?` out of `main` printed only to
+/// stderr, which the windowed release build doesn't have — a failed
+/// `--register`, a progress window that couldn't open, or a GUI that couldn't
+/// start were all silent exits.
+fn fail(title: &str, err: anyhow::Error) -> ! {
+    shell::notify_error(title, &format!("{err:#}"));
+    std::process::exit(1);
+}
+
+fn or_fail<T>(title: &str, result: anyhow::Result<T>) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => fail(title, e),
+    }
+}
+
+fn main() {
+    // A windowed exe run from a terminal joins that terminal's console, so
+    // `--register` / errors print where the user is looking.
+    shell::attach_parent_console();
     configure_bundled_gstreamer();
-    match Cli::parse().into_mode() {
-        Mode::Register => shell::register()?,
-        Mode::Unregister => shell::unregister()?,
+    let args: Vec<std::ffi::OsString> =
+        std::env::args_os().map(|a| cli::repair_drive_root(&a)).collect();
+    let cli = Cli::parse_from(args);
+    if cli.quiet {
+        shell::set_quiet(true);
+    }
+    match cli.into_mode() {
+        Mode::Register => or_fail(
+            "Kuvatin \u{2014} could not register the context menu",
+            shell::register(),
+        ),
+        Mode::Unregister => or_fail(
+            "Kuvatin \u{2014} could not remove the context menu",
+            shell::unregister(),
+        ),
+        Mode::Invalid(reason) => fail("Kuvatin", anyhow::anyhow!("{reason}")),
         Mode::QuickRun { preset, paths } => {
             // One group per preset, so two different presets never merge.
             let Some(paths) = coalesce(&format!("preset:{preset}"), paths) else {
-                return Ok(());
+                return;
             };
             let heading = preset.clone();
-            let outcome = progress_ui::run_with_progress(&heading, move |sink| {
-                quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| sink.cancelled())
-            })?;
+            let outcome = or_fail(
+                "Kuvatin \u{2014} could not start",
+                progress_ui::run_with_progress(&heading, move |sink| {
+                    quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| sink.cancelled())
+                }),
+            );
             match outcome {
                 // The user cancelled — no dialog, even if some files had
                 // already failed before that.
@@ -97,23 +134,21 @@ fn main() -> anyhow::Result<()> {
                     &report.failures,
                 ),
                 Ok(_) => {}
-                Err(e) => {
-                    // Windowed release build has no stderr, so the returned Err
-                    // would be silent — surface it before propagating.
-                    shell::notify_error("Kuvatin \u{2014} quick run failed", &e.to_string());
-                    return Err(e);
-                }
+                Err(e) => fail("Kuvatin \u{2014} quick run failed", e),
             }
         }
         Mode::SequenceMp4 { paths, fps } => {
             // Selecting several frames of one run launches one process per
             // frame; coalesced, they resolve to that single sequence.
             let Some(paths) = coalesce("sequence-mp4", paths) else {
-                return Ok(());
+                return;
             };
-            let outcome = progress_ui::run_with_progress("Render image sequence to MP4", move |sink| {
-                sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
-            })?;
+            let outcome = or_fail(
+                "Kuvatin \u{2014} could not start",
+                progress_ui::run_with_progress("Render image sequence to MP4", move |sink| {
+                    sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
+                }),
+            );
             // The EXR→PNG cache must be swept from this path too — a
             // right-click-only user never starts the GUI, whose startup sweep
             // used to be the only one.
@@ -134,10 +169,7 @@ fn main() -> anyhow::Result<()> {
                     &report.failures,
                 ),
                 Ok(_) => {}
-                Err(e) => {
-                    shell::notify_error("Kuvatin \u{2014} sequence render failed", &e.to_string());
-                    return Err(e);
-                }
+                Err(e) => fail("Kuvatin \u{2014} sequence render failed", e),
             }
         }
         Mode::Gui { paths } => {
@@ -148,11 +180,10 @@ fn main() -> anyhow::Result<()> {
             } else {
                 match coalesce("open", paths) {
                     Some(all) => all,
-                    None => return Ok(()),
+                    None => return,
                 }
             };
-            gui::run(paths)?
+            or_fail("Kuvatin \u{2014} could not start", gui::run(paths))
         }
     }
-    Ok(())
 }

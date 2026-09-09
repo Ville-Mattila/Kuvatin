@@ -23,8 +23,9 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
 - **Batch** whole folders / multi-selections in parallel, with reusable **presets**
   (stored in `%APPDATA%\Kuvatin\presets.toml`) — one bad file can't take down a
   run, and **EXIF orientation** is applied automatically on decode
-- **Explorer context menu**: right-click images **or folders** for quick preset
-  actions (Convert to WebP, Resize to 1080p, Resize to 50%), "Open in Kuvatin…",
+- **Explorer context menu**: right-click images **or folders** for **every
+  preset in your store** (the built-ins and the ones you save — the submenu
+  is rewritten whenever presets change), "Open in Kuvatin…",
   or **Render image sequence to MP4** (right-click any `frame_0001.png`-style
   frame — or a folder of them — and the whole numbered run becomes an H.264
   MP4 next to it, at native resolution) — a multi-selection runs as **one
@@ -103,8 +104,12 @@ cargo run -p kuvatin -- --unregister   # remove it
 ```
 
 On Windows 11 the entries appear under "Show more options"; on Windows 10 directly in
-the context menu. The submenu is attached to image files, to folders, and to a
-folder's background (right-click inside an open folder). Explorer launches a
+the context menu. The submenu is attached to every accepted image extension, to
+folders, and to a folder's background (right-click inside an open folder).
+Registration is explicit: a debug build never touches the menu, and a release
+build only self-registers when nothing owns the menu yet or the registered exe
+no longer exists — so a portable or test copy can't hijack an installed one.
+Run `--register` from the copy you want the menu to use. Explorer launches a
 classic verb once per selected item; Kuvatin folds those launches into a single
 batch at startup (a short rendezvous in `%TEMP%\kuvatin\rendezvous`), so
 selecting fifty files runs one conversion with one summary — and "Open in

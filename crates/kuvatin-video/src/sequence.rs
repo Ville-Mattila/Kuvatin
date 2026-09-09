@@ -29,6 +29,19 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// Frame formats the sequence engine accepts (lower-case, no dot) — the ONE
+/// list the sequence dialog, the headless resolver and the Explorer
+/// registration read.
+pub const FRAME_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "exr"];
+
+/// Whether `path` has a sequence-frame extension (any case).
+pub fn is_frame_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| FRAME_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// EXR→PNG cache policy: entries unused for this long are swept …
 pub const CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// … and the cache as a whole is kept under this many bytes (oldest-used

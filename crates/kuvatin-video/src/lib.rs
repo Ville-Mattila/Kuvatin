@@ -17,7 +17,7 @@ pub use project::{
     CANVAS_W,
 };
 pub use sequence::{
-    convert_exr_sequence, detect_sequence, parse_frame_path, render_to_mp4,
+    convert_exr_sequence, detect_sequence, is_frame_file, parse_frame_path, render_to_mp4,
     sweep_sequence_cache, Cancelled, RenderProgress, SequenceSpec, CACHE_MAX_AGE,
-    CACHE_MAX_BYTES,
+    CACHE_MAX_BYTES, FRAME_EXTENSIONS,
 };

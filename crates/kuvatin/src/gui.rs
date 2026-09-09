@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 
 slint::include_modules!();
 
+/// Video containers the media dialog offers (what GStreamer demuxes here).
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv"];
+
 /// Show the app's error dialog with `title` + `detail`. The one place failures
 /// become visible — in the release windowed build there is no stderr.
 fn show_error(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
@@ -119,7 +122,7 @@ fn add_to_timeline(
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif");
+    let is_img = kuvatin_core::format::is_input_extension(&ext);
     let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
     // GES composites lower layer indices ON TOP, so images (overlays) go on
     // layer 0 and videos on layer 1 (the base, underneath).
@@ -296,7 +299,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 return;
             }
             if let Some(picked) = rfd::FileDialog::new()
-                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "gif"])
+                .add_filter("Images", kuvatin_core::format::INPUT_EXTENSIONS)
                 .pick_files()
             {
                 add_paths(picked, &files, &rows, &crops, &thumbs, &ui_weak);
@@ -522,6 +525,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 .unwrap_or(0);
             refresh_presets(&ui, &store, idx);
             ui.set_preset_name(name.into());
+            // The Explorer submenu mirrors the store.
+            crate::shell::sync_menu();
         });
     }
 
@@ -558,6 +563,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             if let Some(p) = store.presets.get(select) {
                 ui.set_preset_name(p.name.clone().into());
             }
+            // A deleted preset leaves the menu too (no "unknown preset" ghosts).
+            crate::shell::sync_menu();
         });
     }
 
@@ -912,14 +919,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
             let import_cancel = import_cancel.clone();
             let import_seen = import_seen.clone();
             ui.on_video_open(move || {
+                // Videos plus every image input (stills become overlays).
+                let mut media: Vec<&str> = VIDEO_EXTENSIONS.to_vec();
+                media.extend_from_slice(kuvatin_core::format::INPUT_EXTENSIONS);
                 let Some(paths) = rfd::FileDialog::new()
-                    .add_filter(
-                        "Media",
-                        &[
-                            "mp4", "mov", "mkv", "webm", "avi", "m4v", "wmv", "png", "jpg", "jpeg",
-                            "webp", "bmp", "gif",
-                        ],
-                    )
+                    .add_filter("Media", &media)
                     .pick_files()
                 else {
                     return;
@@ -955,7 +959,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     return;
                 };
                 let Some(path) = rfd::FileDialog::new()
-                    .add_filter("First frame of a sequence", &["png", "jpg", "jpeg", "exr"])
+                    .add_filter("First frame of a sequence", kuvatin_video::FRAME_EXTENSIONS)
                     .pick_file()
                 else {
                     return;
