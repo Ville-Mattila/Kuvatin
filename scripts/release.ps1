@@ -34,7 +34,8 @@ $cargo = 'Cargo.toml'
 $page = 'docs/index.html'
 $c = [IO.File]::ReadAllText((Resolve-Path $cargo))
 $p = [IO.File]::ReadAllText((Resolve-Path $page))
-$cNew = [regex]::Replace($c, '(?m)^version = "\d+\.\d+\.\d+"$', "version = `"$Version`"", 1)
+# (?=\r?$): git's autocrlf can leave Cargo.toml with CRLF endings.
+$cNew = [regex]::Replace($c, '(?m)^version = "\d+\.\d+\.\d+"(?=\r?$)', "version = `"$Version`"", 1)
 $pNew = [regex]::Replace($p, '"softwareVersion": "\d+\.\d+\.\d+"', "`"softwareVersion`": `"$Version`"", 1)
 if ($cNew -eq $c) { throw "no workspace version line found in $cargo" }
 if ($pNew -eq $p) { throw "no softwareVersion found in $page" }
