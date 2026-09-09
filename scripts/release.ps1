@@ -47,8 +47,7 @@ $utf8 = New-Object Text.UTF8Encoding $false
 # "Locking N packages" line) becomes a terminating error when redirected.
 cmd /c "cargo update --workspace --offline >nul 2>nul"
 if ($LASTEXITCODE -ne 0) { cmd /c "cargo update --workspace >nul 2>nul" }
-if ($LASTEXITCODE -ne 0) { throw "cargo update failed" }| Out-Null
-if ($LASTEXITCODE -ne 0) { cargo update --workspace | Out-Null }
+if ($LASTEXITCODE -ne 0) { throw "cargo update failed" }
 
 git add Cargo.toml Cargo.lock docs/index.html
 git commit -q -m "release: bump workspace version to $Version"
