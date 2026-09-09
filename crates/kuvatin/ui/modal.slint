@@ -1,0 +1,42 @@
+import { Theme } from "theme.slint";
+
+// A modal: dimmed, click-swallowing backdrop over the whole window and a
+// centred card that fades in and rises into place. The card's contents are
+// the children; `card-width` / `card-height` size it (height may be an
+// expression over the contents, see the error dialog).
+export component Modal inherits Rectangle {
+    in property <length> card-width: 440px;
+    in property <length> card-height: 200px;
+    in property <color> card-border: Theme.line;
+    in property <color> backdrop: #000000b0;
+    in property <length> card-padding: 22px;
+    in property <length> card-spacing: 11px;
+    /// Exposed so a caller can size the card from its children (see the
+    /// error dialog); `card` is the card itself.
+    out property <length> card-inner-width: root.card-width - 2 * root.card-padding;
+
+    background: root.backdrop;
+    opacity: 0;
+    animate opacity { duration: 150ms; easing: ease-out; }
+    init => { self.opacity = 1; }
+    // Swallow clicks behind the modal.
+    TouchArea {}
+    card := Rectangle {
+        property <length> rise: 14px;
+        animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
+        init => { self.rise = 0px; }
+        width: root.card-width;
+        height: root.card-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2 + self.rise;
+        background: Theme.dialog;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: root.card-border;
+        VerticalLayout {
+            padding: root.card-padding;
+            spacing: root.card-spacing;
+            @children
+        }
+    }
+}

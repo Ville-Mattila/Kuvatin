@@ -1,0 +1,33 @@
+// The palette. Every colour the UI paints comes from here (one place to
+// retune the look); the few one-off tints that remain inline are alpha
+// variants of these.
+export global Theme {
+    // Surfaces
+    out property <color> window: #16181d;      // window background
+    out property <color> card: #20242c;        // panels
+    out property <color> well: #181b21;        // sunken areas inside a card (lists)
+    out property <color> dialog: #1b1f27;      // modal cards
+    out property <color> hover: #2b313c;       // hovered secondary surface
+    out property <color> disabled: #191d24;    // disabled button surface
+    // Lines
+    out property <color> line: #2c313b;        // card + control borders
+    out property <color> line-2: #343b46;      // dialog control borders
+    // Text
+    out property <color> ink: #f2f4f8;         // primary text
+    out property <color> ink-2: #cdd3dc;       // secondary text (dialog buttons, values)
+    out property <color> muted: #9aa3b2;       // captions, status
+    out property <color> muted-2: #8b95a6;     // section eyebrows
+    out property <color> hint: #6b7585;        // empty-state hints
+    out property <color> disabled-ink: #5b6472;
+    // Accent
+    out property <color> accent: #2dd4bf;
+    out property <color> accent-2: #22c9b0;    // primary buttons at rest
+    out property <color> accent-pressed: #14b8a6;
+    out property <color> on-accent: #08110f;   // text on an accent surface
+    // Signals
+    out property <color> danger: #f87171;
+    out property <color> danger-2: #ff5470;    // hover/active red (remove, playhead)
+    // Sizes that several places must agree on
+    out property <length> file-row-h: 44px;    // Images-mode list row
+    out property <length> track-h: 30px;       // one timeline track row
+}
