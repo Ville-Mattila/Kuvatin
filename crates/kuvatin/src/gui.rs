@@ -219,7 +219,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // Sweep stale EXR→PNG sequence-conversion cache entries (best-effort;
     // entries untouched for a week go — a reuse re-stamps its entry).
     std::thread::spawn(|| {
-        kuvatin_video::sweep_sequence_cache(std::time::Duration::from_secs(7 * 24 * 3600));
+        kuvatin_video::sweep_sequence_cache(
+            kuvatin_video::CACHE_MAX_AGE,
+            kuvatin_video::CACHE_MAX_BYTES,
+        );
     });
 
     let store_path = PresetStore::default_path().ok_or_else(|| anyhow!("no config dir"))?;
@@ -1743,7 +1746,13 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             }
                         }
                         kuvatin_video::RenderStatus::Done => {
-                            let _ = p.end_render();
+                            // A preview that fails to come back is otherwise a
+                            // silently black viewer for the rest of the session.
+                            if let Err(e) = p.end_render() {
+                                if let Some(ui) = ui_weak.upgrade() {
+                                    show_error(&ui, "Preview could not be restored", e.to_string());
+                                }
+                            }
                             drop(slot);
                             export_active.set(false);
                             export_path.borrow_mut().take();
@@ -1753,7 +1762,11 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                             }
                         }
                         kuvatin_video::RenderStatus::Failed(e) => {
-                            let _ = p.end_render();
+                            if let Err(restore) = p.end_render() {
+                                if let Some(ui) = ui_weak.upgrade() {
+                                    show_error(&ui, "Preview could not be restored", restore.to_string());
+                                }
+                            }
                             drop(slot);
                             export_active.set(false);
                             stall.set((0.0, 0));

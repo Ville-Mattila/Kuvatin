@@ -70,6 +70,34 @@
   a preset entry parse cleanly; save twice leaves no temp files.
 
 ## §2 Engine guards — H3, H4, M7–M10, M14, L14, L15
+
+- **H3** `Project` carries a `rendering` flag (set by `begin_render`, cleared
+  by `end_render`); play/pause/seek/refresh and every edit (add, remove,
+  slide, trim, move, layout, canvas) are inert while it is set, and the
+  Slint key scope ignores Space/Delete while `exporting`. Found while
+  testing it: `end_render` returned while the preview was still prerolling
+  asynchronously, and an edit landing in that window (Delete right after an
+  export) made GES dereference a freed source asset — an access violation.
+  `end_render` now waits for the preroll before clearing the flag.
+- **H4** `pattern_name` escapes `%` as `%%` (printf directive → literal).
+- **M7** `ExportSettings::normalized()` / `normalize_render_size` (even
+  dimensions, NVENC floor with aspect kept, fps 1..=240) applied inside
+  `encoding_profile`, so the GUI export and the headless render share it.
+- **M8** The EXR cache key hashes every frame's `(mtime, len)`.
+- **M9** Conversions build in `<key>.tmp-<pid>` and publish by one rename
+  (losing a race keeps the other process' complete entry); the sweep gained a
+  byte cap (`CACHE_MAX_BYTES`, LRU eviction) and crashed-temp cleanup, and
+  runs from the headless path too.
+- **M10** `thumbnail_uri` treats `Ok(Async)` as failure and pulls the preroll
+  with a 5 s timeout — one stalled file can no longer block the import worker.
+- **M14** `Cancelled` is a typed error; callers use `err.is::<Cancelled>()`.
+- **L14** The headless render drops its `Project` instead of `end_render`.
+- **L15** `end_render` failures surface via the error dialog.
+- Tests: size/fps normalization; transport + edits inert while rendering
+  (and working again after); `%` escaping incl. the URI form; cache key
+  changes when a middle frame changes; sweep enforces age + size (LRU) and
+  keeps a fresh temp dir; cancels are typed and leave no temp dir.
+
 ## §3 Explorer & CLI — H8–H10, M12, M13, M15–M17, M34, L7–L10
 ## §4 Editor UX — H5, H6, M11, M18–M26, L11
 ## §5 Ship pipeline — H12, H13, M28–M33, L16, L17

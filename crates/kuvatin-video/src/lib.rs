@@ -12,10 +12,12 @@ pub struct Frame {
 pub mod project;
 pub mod sequence;
 pub use project::{
-    thumbnail, thumbnail_uri, warm_asset, warm_asset_uri, ClipGeom, ClipId, ClipInfo,
-    ExportSettings, Layout, Project, RenderStatus, VideoCodec, CANVAS_H, CANVAS_W,
+    normalize_render_size, thumbnail, thumbnail_uri, warm_asset, warm_asset_uri, ClipGeom,
+    ClipId, ClipInfo, ExportSettings, Layout, Project, RenderStatus, VideoCodec, CANVAS_H,
+    CANVAS_W,
 };
 pub use sequence::{
     convert_exr_sequence, detect_sequence, parse_frame_path, render_to_mp4,
-    sweep_sequence_cache, RenderProgress, SequenceSpec,
+    sweep_sequence_cache, Cancelled, RenderProgress, SequenceSpec, CACHE_MAX_AGE,
+    CACHE_MAX_BYTES,
 };

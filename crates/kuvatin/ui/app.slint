@@ -700,7 +700,9 @@ export component AppWindow inherits Window {
         key-pressed(event) => {
             if (root.error-visible && event.text == Key.Escape) { root.error-visible = false; return accept; }
             if (root.export-config && event.text == Key.Escape) { root.export-config = false; return accept; }
-            if (root.app-mode == 1) {
+            // Transport/edit keys are dead during an export (the engine ignores
+            // them too — this just keeps the play icon from flipping).
+            if (root.app-mode == 1 && !root.exporting) {
                 if (event.text == " ") { root.video-playpause(); return accept; }
                 if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return accept; }
             }

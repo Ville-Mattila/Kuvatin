@@ -160,7 +160,16 @@ pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
         let _ = pipeline.set_state(gst::State::Null);
         return None;
     }
-    if pipeline.state(gst::ClockTime::from_seconds(5)).0.is_err() {
+    // A timed-out state change comes back as Ok(Async), not Err — treating it
+    // as success used to fall through to an UNBOUNDED pull_preroll, which
+    // stalled the import worker (and every import behind it) forever.
+    let settled = |timeout: u64| {
+        matches!(
+            pipeline.state(gst::ClockTime::from_seconds(timeout)).0,
+            Ok(gst::StateChangeSuccess::Success) | Ok(gst::StateChangeSuccess::NoPreroll)
+        )
+    };
+    if !settled(5) {
         let _ = pipeline.set_state(gst::State::Null);
         return None;
     }
@@ -171,10 +180,15 @@ pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
                 gst::ClockTime::from_nseconds(target),
             );
-            let _ = pipeline.state(gst::ClockTime::from_seconds(3));
+            if !settled(3) {
+                let _ = pipeline.set_state(gst::State::Null);
+                return None;
+            }
         }
     }
-    let frame = sink.pull_preroll().ok().and_then(|s| sample_to_frame(&s));
+    let frame = sink
+        .try_pull_preroll(gst::ClockTime::from_seconds(5))
+        .and_then(|s| sample_to_frame(&s));
     let _ = pipeline.set_state(gst::State::Null);
     frame
 }
@@ -246,6 +260,37 @@ pub struct ExportSettings {
     pub bitrate_kbps: u32,
 }
 
+/// Hardware H.264 (NVENC) refuses tiny frames (its floor is around 145×49)
+/// with an opaque "stream error", and the encoder rank is fixed at init so
+/// there is no software fallback; NV12 also needs even dimensions. Every
+/// render — GUI export and headless sequence alike — goes through
+/// [`normalize_render_size`] so neither caller can hit that failure.
+pub const MIN_RENDER_W: i32 = 160;
+pub const MIN_RENDER_H: i32 = 96;
+
+/// The frame size actually encoded for a requested `w`×`h`: as requested,
+/// except sizes below the encoder floor are scaled UP (aspect kept), then
+/// rounded to even and clamped to the canvas range.
+pub fn normalize_render_size(w: i32, h: i32) -> (i32, i32) {
+    let (wf, hf) = (w.max(1) as f64, h.max(1) as f64);
+    let scale = (MIN_RENDER_W as f64 / wf).max(MIN_RENDER_H as f64 / hf).max(1.0);
+    let w = ((wf * scale).round() as i32 & !1).clamp(16, 7680);
+    let h = ((hf * scale).round() as i32 & !1).clamp(16, 4320);
+    (w, h)
+}
+
+impl ExportSettings {
+    /// These settings with the size normalized (see [`normalize_render_size`])
+    /// and the frame rate clamped to 1..=240.
+    pub fn normalized(mut self) -> Self {
+        let (w, h) = normalize_render_size(self.width, self.height);
+        self.width = w;
+        self.height = h;
+        self.fps = self.fps.clamp(1, 240);
+        self
+    }
+}
+
 /// Progress of an export/render.
 #[derive(Clone, Debug)]
 pub enum RenderStatus {
@@ -293,6 +338,7 @@ pub(crate) fn ensure_encoder_ranks() {
 /// plus the output resolution (as a video-profile restriction so encodebin scales
 /// to it) and the target bitrate (set on whichever encoder encodebin picks).
 fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile {
+    let s = s.normalized();
     let (container, video_caps, audio_caps) = match s.codec {
         VideoCodec::H264 => (
             gst::Caps::builder("video/quicktime")
@@ -332,9 +378,9 @@ fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile 
     };
     let restriction = gst::Caps::builder("video/x-raw")
         .field("format", pixfmt)
-        .field("width", s.width.max(2))
-        .field("height", s.height.max(2))
-        .field("framerate", gst::Fraction::new(s.fps.clamp(1, 240) as i32, 1))
+        .field("width", s.width)
+        .field("height", s.height)
+        .field("framerate", gst::Fraction::new(s.fps as i32, 1))
         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .build();
     let mut vb = gst_pbutils::EncodingVideoProfile::builder(&video_caps).restriction(&restriction);
@@ -414,6 +460,10 @@ pub struct Project {
     /// `set_canvas_size`; drives fit/layout and the video track restriction caps.
     canvas_w: i32,
     canvas_h: i32,
+    /// True between `begin_render` and `end_render`. Transport and edit
+    /// methods are inert while set: a Space/Delete key during an export used
+    /// to pause the RENDER pipeline or commit a removal mid-render.
+    rendering: std::cell::Cell<bool>,
 }
 
 impl Project {
@@ -481,7 +531,13 @@ impl Project {
             appsink,
             canvas_w: CANVAS_W,
             canvas_h: CANVAS_H,
+            rendering: std::cell::Cell::new(false),
         })
+    }
+
+    /// Whether an export/render is in progress (edits and transport are inert).
+    pub fn is_rendering(&self) -> bool {
+        self.rendering.get()
     }
 
     /// Current composited canvas ("viewport") size in px.
@@ -494,6 +550,9 @@ impl Project {
     /// repaints. Existing clip transforms keep their pixel coordinates, so set
     /// this before laying out clips for the cleanest result.
     pub fn set_canvas_size(&mut self, w: i32, h: i32) {
+        if self.rendering.get() {
+            return;
+        }
         let w = w.clamp(16, 7680);
         let h = h.clamp(16, 4320);
         self.canvas_w = w;
@@ -529,6 +588,9 @@ impl Project {
         inpoint: Duration,
         duration: Duration,
     ) -> Result<ClipId> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
         let uri = gst::glib::filename_to_uri(path, None)?;
         let clip = ges::UriClip::new(&uri)?;
         clip.set_start(gst::ClockTime::from_nseconds(start.as_nanos() as u64));
@@ -570,6 +632,9 @@ impl Project {
         track: usize,
         image_dur: Option<Duration>,
     ) -> Result<ClipInfo> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
         let asset = ges::UriClipAsset::request_sync(uri)?;
         let dur_ct = match image_dur {
             Some(d) => gst::ClockTime::from_nseconds(d.as_nanos() as u64),
@@ -605,6 +670,9 @@ impl Project {
     /// Slide a clip along its track by `delta_secs` (may be negative); start is
     /// clamped to >= 0. Returns the resulting geometry, or None for an unknown id.
     pub fn slide_clip(&mut self, id: &ClipId, delta_secs: f64) -> Option<ClipGeom> {
+        if self.rendering.get() {
+            return None;
+        }
         let clip = self.clips.get(&id.0)?.clone();
         let start = clip.start().nseconds() as i128;
         let delta = (delta_secs * 1e9) as i128;
@@ -620,6 +688,9 @@ impl Project {
     /// right edge (adjusts duration only). Clamped to the source bounds and a
     /// 0.2 s minimum. Returns the resulting geometry.
     pub fn trim_clip(&mut self, id: &ClipId, edge: i32, delta_secs: f64) -> Option<ClipGeom> {
+        if self.rendering.get() {
+            return None;
+        }
         let clip = self.clips.get(&id.0)?.clone();
         let start = clip.start().nseconds() as i128;
         let inpoint = clip.inpoint().nseconds() as i128;
@@ -663,6 +734,9 @@ impl Project {
     /// Move a clip to `track`, creating the layer if `track` is one past the last
     /// (a new bottom track). Returns the resulting track index.
     pub fn move_clip_to_track(&mut self, id: &ClipId, track: usize) -> Option<usize> {
+        if self.rendering.get() {
+            return None;
+        }
         let clip = self.clips.get(&id.0)?.clone();
         let target = self.layer(track);
         clip.move_to_layer(&target).ok()?;
@@ -680,6 +754,9 @@ impl Project {
     /// Empty TRAILING layers are pruned (never populated or middle ones, so
     /// remaining track indices stay stable); at least one layer always remains.
     pub fn remove_clip(&mut self, id: &ClipId) -> bool {
+        if self.rendering.get() {
+            return false;
+        }
         let Some(clip) = self.clips.remove(&id.0) else {
             return false;
         };
@@ -703,7 +780,11 @@ impl Project {
 
     /// Reorder tracks: move the track at `from` to position `to` (0 = top).
     pub fn move_track(&mut self, from: usize, to: usize) {
-        if from >= self.layers.len() || to >= self.layers.len() || from == to {
+        if self.rendering.get()
+            || from >= self.layers.len()
+            || to >= self.layers.len()
+            || from == to
+        {
             return;
         }
         let layer = self.layers[from].clone();
@@ -754,6 +835,9 @@ impl Project {
     /// derived from the source size, so the clip is never distorted. Missing child
     /// properties (e.g. volume on a still image) are ignored.
     pub fn set_clip_layout(&mut self, id: &ClipId, l: Layout) {
+        if self.rendering.get() {
+            return;
+        }
         let Some(clip) = self.clips.get(&id.0) else {
             return;
         };
@@ -786,6 +870,9 @@ impl Project {
     /// an aspect-correct, centered layout. No-op once the clip has been laid out
     /// (width child prop non-zero) or if the source size isn't known yet.
     pub fn ensure_laid_out(&mut self, id: &ClipId) {
+        if self.rendering.get() {
+            return;
+        }
         let Some(clip) = self.clips.get(&id.0) else {
             return;
         };
@@ -832,12 +919,21 @@ impl Project {
         }
     }
 
+    /// Start playback. Inert during a render (the pipeline is the encoder's).
     pub fn play(&self) -> Result<()> {
+        if self.rendering.get() {
+            return Ok(());
+        }
         self.pipeline.set_state(gst::State::Playing)?;
         Ok(())
     }
 
+    /// Pause playback. Inert during a render — pausing the render pipeline
+    /// would freeze the export until the watchdog calls it stuck.
     pub fn pause(&self) -> Result<()> {
+        if self.rendering.get() {
+            return Ok(());
+        }
         self.pipeline.set_state(gst::State::Paused)?;
         Ok(())
     }
@@ -845,6 +941,9 @@ impl Project {
     /// Fast seek (snaps to the nearest keyframe). Use DURING a scrub drag,
     /// where responsiveness beats precision; land with [`Self::seek_accurate`].
     pub fn seek(&self, pos: Duration) -> Result<()> {
+        if self.rendering.get() {
+            return Ok(());
+        }
         self.pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
@@ -856,6 +955,9 @@ impl Project {
     /// exactly (decodes from the previous keyframe). Use when a scrub drag
     /// ends, so the playhead and the picture agree.
     pub fn seek_accurate(&self, pos: Duration) -> Result<()> {
+        if self.rendering.get() {
+            return Ok(());
+        }
         self.pipeline.seek_simple(
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
@@ -869,7 +971,7 @@ impl Project {
     /// pipeline and freezes the app. Coalescing to the timer caps it to one seek
     /// per tick. No-op while actively playing (frames already flow).
     pub fn refresh_preview(&self) {
-        if !self.dirty.replace(false) {
+        if self.rendering.get() || !self.dirty.replace(false) {
             return;
         }
         let playing = self.pipeline.current_state() == gst::State::Playing;
@@ -936,6 +1038,8 @@ impl Project {
         // Drop the custom preview sink so render mode can route to encodebin.
         self.pipeline
             .preview_set_video_sink(None::<&gst::Element>);
+        // From here until end_render, transport and edits are inert.
+        self.rendering.set(true);
         let attempt = (|| -> Result<()> {
             let uri = gst::glib::filename_to_uri(path, None)?;
             let profile = encoding_profile(settings);
@@ -1008,6 +1112,12 @@ impl Project {
             .preview_set_video_sink(Some(self.appsink.upcast_ref::<gst::Element>()));
         self.pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
         self.pipeline.set_state(gst::State::Paused)?;
+        // Wait for the preview to actually preroll before handing the timeline
+        // back: an edit (a Delete keypress right after an export) landing while
+        // the composition is still mid-transition made GES dereference a freed
+        // source asset (STATUS_ACCESS_VIOLATION). Edits stay inert until then.
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(5));
+        self.rendering.set(false);
         self.dirty.set(true);
         Ok(())
     }
@@ -1403,6 +1513,80 @@ mod tests {
         let len = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
         assert!(len > 500, "sequence render produced only {len} bytes");
         let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sizes below the NVENC floor scale up (aspect kept); everything rounds
+    /// to even; the GUI's odd 1281x721 becomes 1280x720.
+    #[test]
+    fn export_settings_normalize_size_and_fps() {
+        assert_eq!(normalize_render_size(1920, 1080), (1920, 1080));
+        assert_eq!(normalize_render_size(1281, 721), (1280, 720));
+        assert_eq!(normalize_render_size(64, 36), (170, 96));
+        assert_eq!(normalize_render_size(100, 300), (160, 480));
+        let s = ExportSettings {
+            codec: VideoCodec::H264,
+            width: 17,
+            height: 9,
+            fps: 999,
+            bitrate_kbps: 0,
+        }
+        .normalized();
+        // 17x9: scale = max(160/17, 96/9) = 10.67 → 181x96 → even 180x96.
+        assert_eq!((s.width, s.height, s.fps), (180, 96, 240));
+    }
+
+    /// While a render runs, transport and edits are inert: pause() doesn't
+    /// stall the encoder and remove_clip() refuses; both work again after
+    /// end_render. Self-skips without GStreamer.
+    #[test]
+    fn transport_and_edits_are_inert_while_rendering() {
+        let mut project = match Project::new(|_f| {}) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("skipping transport_and_edits_are_inert_while_rendering: no GStreamer");
+                return;
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("kuvatin-inert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for i in 1..=12u32 {
+            image::RgbaImage::from_pixel(320, 180, image::Rgba([(i * 20) as u8, 60, 160, 255]))
+                .save(dir.join(format!("f_{i:03}.png")))
+                .expect("frame");
+        }
+        let spec = crate::sequence::detect_sequence(&dir.join("f_001.png")).expect("detect");
+        let info = project
+            .append_clip_uri(&spec.uri().unwrap(), 0, None)
+            .expect("append");
+        let out = dir.join("out.webm");
+        project
+            .begin_render(
+                &out,
+                ExportSettings { codec: VideoCodec::Vp8, width: 320, height: 180, fps: 30, bitrate_kbps: 0 },
+            )
+            .expect("begin_render");
+        assert!(project.is_rendering());
+        // Inert, not errors: the keyboard handler calls these blindly.
+        project.pause().expect("pause is a no-op while rendering");
+        assert!(!project.remove_clip(&info.id), "edits refused while rendering");
+        assert!(project.append_clip_uri(&spec.uri().unwrap(), 1, None).is_err());
+        let mut done = false;
+        for _ in 0..300 {
+            match project.render_status() {
+                RenderStatus::Done => {
+                    done = true;
+                    break;
+                }
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
+        assert!(done, "the paused-while-rendering export still finished");
+        project.end_render().expect("end_render");
+        assert!(!project.is_rendering());
+        assert!(project.remove_clip(&info.id), "edits work again after the render");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

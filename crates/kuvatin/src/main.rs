@@ -114,6 +114,13 @@ fn main() -> anyhow::Result<()> {
             let outcome = progress_ui::run_with_progress("Render image sequence to MP4", move |sink| {
                 sequence_render::run(&paths, fps, &|f, s| sink.set(f, s), sink.cancel_flag())
             })?;
+            // The EXR→PNG cache must be swept from this path too — a
+            // right-click-only user never starts the GUI, whose startup sweep
+            // used to be the only one.
+            kuvatin_video::sweep_sequence_cache(
+                kuvatin_video::CACHE_MAX_AGE,
+                kuvatin_video::CACHE_MAX_BYTES,
+            );
             match outcome {
                 // A cancelled run is the user's choice — no dialog.
                 Ok(report) if report.cancelled => {}

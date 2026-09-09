@@ -12,6 +12,29 @@ use anyhow::{anyhow, bail, Context, Result};
 use gstreamer as gst;
 use rayon::prelude::*;
 
+use crate::project::normalize_render_size;
+
+/// The user cancelled an EXR conversion or a render. A typed error so callers
+/// match on it (`err.is::<Cancelled>()`) instead of grepping messages — a
+/// GStreamer error that happens to contain the word "cancelled" must not be
+/// mistaken for a user cancel and swallowed silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// EXR→PNG cache policy: entries unused for this long are swept …
+pub const CACHE_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+/// … and the cache as a whole is kept under this many bytes (oldest-used
+/// entries go first). A 4K sequence converts to roughly 8 MB per frame.
+pub const CACHE_MAX_BYTES: u64 = 6 << 30;
+
 /// A numbered image sequence: files named `<prefix><NUMBER><suffix>` in `dir`,
 /// starting at `start`, `count` consecutive frames, played at `fps`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,11 +73,17 @@ impl SequenceSpec {
 
     /// The printf-style pattern file name (e.g. `frame_%04d.png`) — what
     /// `imagesequencesrc` consumes, and a compact display name for the GUI.
+    /// A literal `%` in the prefix or suffix is escaped as `%%`: the element
+    /// hands the pattern to `g_strdup_printf`, so `50%_off_0001.png` would
+    /// otherwise become a format string (`%_` — wrong names at best, `%s` fed
+    /// an integer at worst).
     pub fn pattern_name(&self) -> String {
+        let prefix = self.prefix.replace('%', "%%");
+        let suffix = self.suffix.replace('%', "%%");
         if self.pad > 0 {
-            format!("{}%0{}d{}", self.prefix, self.pad, self.suffix)
+            format!("{prefix}%0{}d{suffix}", self.pad)
         } else {
-            format!("{}%d{}", self.prefix, self.suffix)
+            format!("{prefix}%d{suffix}")
         }
     }
 
@@ -185,9 +214,11 @@ fn cache_root() -> PathBuf {
 /// "last used" stamp for the startup sweep.
 const CACHE_MARKER: &str = ".complete";
 
-/// Content key for a conversion: source identity + frame range + the first and
-/// last frames' mtimes (so a re-render of the frames invalidates the cache).
-/// The fps is deliberately excluded — the converted pixels don't depend on it.
+/// Content key for a conversion: source identity + frame range + EVERY frame's
+/// (mtime, size). Hashing only the first and last frame let a re-render of
+/// frames 50–100 in a 3D app serve stale PNGs as a cache hit; N stats are
+/// nothing next to N decodes. The fps is deliberately excluded — the
+/// converted pixels don't depend on it.
 fn cache_key(spec: &SequenceSpec) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -197,14 +228,16 @@ fn cache_key(spec: &SequenceSpec) -> String {
     spec.pad.hash(&mut h);
     spec.start.hash(&mut h);
     spec.count.hash(&mut h);
-    for index in [spec.start, spec.start + spec.count.saturating_sub(1)] {
-        let mtime = std::fs::metadata(spec.dir.join(spec.frame_file_name(index)))
-            .and_then(|m| m.modified())
-            .ok()
+    for index in spec.start..spec.start + spec.count {
+        let meta = std::fs::metadata(spec.dir.join(spec.frame_file_name(index))).ok();
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        mtime.hash(&mut h);
+        let len = meta.map(|m| m.len()).unwrap_or(0);
+        (mtime, len).hash(&mut h);
     }
     format!("{:016x}", h.finish())
 }
@@ -253,7 +286,8 @@ pub fn convert_exr_sequence(
     progress: impl Fn(u64, u64) + Send + Sync,
     cancel: &AtomicBool,
 ) -> Result<SequenceSpec> {
-    let out_dir = cache_root().join(cache_key(spec));
+    let key = cache_key(spec);
+    let out_dir = cache_root().join(&key);
     let converted = SequenceSpec {
         dir: out_dir.clone(),
         prefix: "f".into(),
@@ -266,7 +300,7 @@ pub fn convert_exr_sequence(
     let marker = out_dir.join(CACHE_MARKER);
 
     // Cache hit: marker written + every frame still present → reuse. Touch the
-    // marker so the startup sweep sees the entry as recently used.
+    // marker so the sweep sees the entry as recently used.
     if marker.is_file()
         && (0..spec.count).all(|i| out_dir.join(converted.frame_file_name(i)).is_file())
     {
@@ -274,20 +308,25 @@ pub fn convert_exr_sequence(
         return Ok(converted);
     }
 
-    // (Re)convert from scratch — a marker-less dir is a crashed/cancelled run.
-    let _ = std::fs::remove_dir_all(&out_dir);
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("create {}", out_dir.display()))?;
+    // Convert into a PRIVATE temp dir and publish it with one atomic rename.
+    // Two processes converting the same sequence at once (a right-click on a
+    // folder while the GUI imports it) used to remove_dir_all the shared dir
+    // under each other and still write the marker over half-deleted frames.
+    let _ = std::fs::remove_dir_all(&out_dir); // a marker-less dir is a crashed run
+    let tmp_dir = cache_root().join(format!("{key}.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir)
+        .with_context(|| format!("create {}", tmp_dir.display()))?;
 
     let done = AtomicU64::new(0);
     let result: Result<()> = (0..spec.count).into_par_iter().try_for_each(|i| {
         if cancel.load(Ordering::Relaxed) {
-            bail!("cancelled");
+            return Err(Cancelled.into());
         }
         let src = spec.dir.join(spec.frame_file_name(spec.start + i));
         let img =
             image::open(&src).with_context(|| format!("decode {}", src.display()))?;
-        let out = out_dir.join(converted.frame_file_name(i));
+        let out = tmp_dir.join(converted.frame_file_name(i));
         to_display_rgba8(img)
             .save_with_format(&out, image::ImageFormat::Png)
             .with_context(|| format!("write {}", out.display()))?;
@@ -295,28 +334,24 @@ pub fn convert_exr_sequence(
         Ok(())
     });
     if let Err(e) = result {
-        let _ = std::fs::remove_dir_all(&out_dir);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(e);
     }
-    std::fs::write(&marker, b"ok").with_context(|| format!("write {}", marker.display()))?;
+    std::fs::write(tmp_dir.join(CACHE_MARKER), b"ok")
+        .with_context(|| format!("write {}", tmp_dir.join(CACHE_MARKER).display()))?;
+    match std::fs::rename(&tmp_dir, &out_dir) {
+        Ok(()) => {}
+        // Lost the race: another process published the same key first — use
+        // theirs (complete, by the marker) and discard ours.
+        Err(_) if marker.is_file() => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(e).with_context(|| format!("publish {}", out_dir.display()));
+        }
+    }
     Ok(converted)
-}
-
-/// Hardware H.264 (NVENC) refuses tiny frames (its floor is around 145×49),
-/// and the encoder rank is fixed at init so there is no software fallback —
-/// so a sequence smaller than this is scaled UP (aspect kept) rather than
-/// failing with an opaque "stream error".
-const MIN_RENDER_W: u32 = 160;
-const MIN_RENDER_H: u32 = 96;
-
-/// The MP4 frame size for a `w`×`h` source: native, except tiny sources are
-/// upscaled to the encoder floor; even dimensions (NV12) within the canvas range.
-fn render_size(w: u32, h: u32) -> (i32, i32) {
-    let (w, h) = (w.max(1) as f64, h.max(1) as f64);
-    let scale = (MIN_RENDER_W as f64 / w).max(MIN_RENDER_H as f64 / h).max(1.0);
-    let w = ((w * scale).round() as i32 & !1).clamp(16, 7680);
-    let h = ((h * scale).round() as i32 & !1).clamp(16, 4320);
-    (w, h)
 }
 
 /// Progress of [`render_to_mp4`]: an EXR sequence converts first, then encodes.
@@ -355,7 +390,8 @@ pub fn render_to_mp4(
     let first = spec.first_path();
     let (w, h) = image::image_dimensions(&first)
         .with_context(|| format!("read the frame size of {}", first.display()))?;
-    let (w, h) = render_size(w, h);
+    // Native size, normalized exactly like a GUI export (even, NVENC floor).
+    let (w, h) = normalize_render_size(w as i32, h as i32);
     // ~0.12 bit per pixel per frame: ≈7.5 Mbit/s for 1080p30, 4–40 Mbit/s overall.
     let bitrate_kbps =
         ((w as f64 * h as f64 * spec.fps as f64 * 0.12) / 1000.0).clamp(4000.0, 40000.0) as u32;
@@ -380,7 +416,7 @@ pub fn render_to_mp4(
         if cancel.load(Ordering::Relaxed) {
             // Graceful teardown (EOS so the muxer finalizes) + partial file removed.
             let _ = project.cancel_render(out, true);
-            return Err(anyhow!("cancelled"));
+            return Err(Cancelled.into());
         }
         match project.render_status() {
             RenderStatus::Done => break Ok(()),
@@ -396,39 +432,88 @@ pub fn render_to_mp4(
             }
         }
     };
-    let _ = project.end_render();
+    // Headless: there is no preview to restore — dropping the project NULLs the
+    // pipeline. (end_render would re-attach the sink, open the audio device
+    // and preroll the timeline for a project discarded on the next line.)
+    drop(project);
     if outcome.is_err() {
         let _ = std::fs::remove_file(out);
     }
     outcome
 }
 
-/// Best-effort startup sweep of the conversion cache: remove entries whose
-/// marker (touched on every reuse) is older than `max_age`. Never errors.
-pub fn sweep_sequence_cache(max_age: Duration) {
-    let Ok(entries) = std::fs::read_dir(cache_root()) else {
+/// Best-effort sweep of the conversion cache — call from EVERY entry point
+/// (GUI start and the headless right-click path): entries unused for longer
+/// than `max_age` go, then the oldest-used entries go until the cache fits in
+/// `max_bytes`. Temp dirs of a crashed conversion older than an hour go too.
+/// Never errors.
+pub fn sweep_sequence_cache(max_age: Duration, max_bytes: u64) {
+    sweep_cache_in(&cache_root(), max_age, max_bytes);
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn sweep_cache_in(root: &Path, max_age: Duration, max_bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     let now = std::time::SystemTime::now();
+    let mut kept: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let is_tmp = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.contains(".tmp-"))
+            .unwrap_or(false);
         let stamp = std::fs::metadata(dir.join(CACHE_MARKER))
             .or_else(|_| std::fs::metadata(&dir))
             .and_then(|m| m.modified());
         let stale = match stamp {
-            Ok(t) => now.duration_since(t).map(|age| age > max_age).unwrap_or(false),
+            Ok(t) => {
+                let age = now.duration_since(t).unwrap_or_default();
+                age > max_age || (is_tmp && age > Duration::from_secs(3600))
+            }
             // Unreadable entry: treat as stale garbage.
             Err(_) => true,
         };
         if stale {
             let _ = std::fs::remove_dir_all(&dir);
+            continue;
         }
+        if let Ok(t) = stamp {
+            kept.push((t, dir_size(&dir), dir));
+        }
+    }
+    // Over budget: evict least-recently-used first.
+    kept.sort_by_key(|(t, _, _)| *t);
+    let mut total: u64 = kept.iter().map(|(_, s, _)| *s).sum();
+    for (_, size, dir) in kept {
+        if total <= max_bytes {
+            break;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        total = total.saturating_sub(size);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     /// A unique, self-cleaning temp dir for fixture files.
     struct TempDir(PathBuf);
@@ -591,12 +676,12 @@ mod tests {
     /// to the encoder floor with their aspect kept; odd sizes become even.
     #[test]
     fn render_size_keeps_native_but_lifts_tiny_frames() {
-        assert_eq!(render_size(1920, 1080), (1920, 1080));
-        assert_eq!(render_size(1921, 1081), (1920, 1080));
+        assert_eq!(normalize_render_size(1920, 1080), (1920, 1080));
+        assert_eq!(normalize_render_size(1921, 1081), (1920, 1080));
         // 64x36 (16:9) → scaled by 96/36 = 2.67 → 171x96 → even 170x96
-        assert_eq!(render_size(64, 36), (170, 96));
+        assert_eq!(normalize_render_size(64, 36), (170, 96));
         // 100x300 (portrait) → scaled by 160/100 = 1.6 → 160x480
-        assert_eq!(render_size(100, 300), (160, 480));
+        assert_eq!(normalize_render_size(100, 300), (160, 480));
     }
 
     /// Headless render: generated frames → an H.264 MP4. Two sizes: a normal
@@ -655,8 +740,72 @@ mod tests {
         let out = t.0.join("f.mp4");
         // Cancelled before the first poll: the render is torn down immediately.
         let err = render_to_mp4(&spec, &out, 24, |_| {}, &AtomicBool::new(true)).unwrap_err();
-        assert!(err.to_string().contains("cancelled"), "{err:#}");
+        assert!(err.is::<Cancelled>(), "typed cancel, got {err:#}");
         assert!(!out.exists(), "partial output removed");
+    }
+
+    /// A `%` in a frame name must not become a printf directive for
+    /// imagesequencesrc (`g_strdup_printf`).
+    #[test]
+    fn pattern_name_escapes_percent() {
+        let spec = parse_frame_path(Path::new("C:/r/50%_off_take%s_0001.png")).unwrap();
+        assert_eq!(spec.pattern_name(), "50%%_off_take%%s_%04d.png");
+        // …and the URI carries it percent-encoded on top (each % → %25).
+        assert!(spec.uri().unwrap().contains("50%25%25_off_take%25%25s_%2504d.png"));
+    }
+
+    /// Touching a MIDDLE frame changes the cache key (only first/last used to
+    /// count), so a partial re-render never serves stale PNGs.
+    #[test]
+    fn cache_key_sees_every_frame() {
+        let t = TempDir::new("key");
+        for i in 0..3u32 {
+            touch(&t.0, &format!("k_{i:03}.png"));
+        }
+        let spec = detect_sequence(&t.0.join("k_000.png")).unwrap();
+        let before = cache_key(&spec);
+        std::fs::File::options()
+            .write(true)
+            .open(t.0.join("k_001.png"))
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(30))
+            .unwrap();
+        assert_ne!(before, cache_key(&spec));
+    }
+
+    /// The sweep evicts least-recently-used entries until the cache fits the
+    /// byte cap, and removes crashed temp dirs, but keeps fresh entries.
+    #[test]
+    fn sweep_enforces_age_and_size() {
+        let root = TempDir::new("sweep");
+        let mk = |name: &str, bytes: usize, age_secs: u64| {
+            let d = root.0.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("f000000.png"), vec![0u8; bytes]).unwrap();
+            let m = d.join(CACHE_MARKER);
+            std::fs::write(&m, b"ok").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&m)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(age_secs))
+                .unwrap();
+            d
+        };
+        let old = mk("aaaa", 10, 10 * 24 * 3600); // past max age
+        let lru = mk("bbbb", 600, 3600); // oldest of the fresh ones
+        let fresh = mk("cccc", 600, 60);
+        let crashed = root.0.join("dddd.tmp-1");
+        std::fs::create_dir_all(&crashed).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&crashed)
+            .ok(); // dir mtime = now; a fresh tmp dir is left alone
+        sweep_cache_in(&root.0, Duration::from_secs(7 * 24 * 3600), 1000);
+        assert!(!old.exists(), "aged out");
+        assert!(!lru.exists(), "evicted to fit 1000 bytes (LRU first)");
+        assert!(fresh.exists(), "newest kept");
+        assert!(crashed.exists(), "a fresh temp dir may belong to a live conversion");
     }
 
     #[test]
@@ -671,7 +820,16 @@ mod tests {
         let spec = detect_sequence(&t.0.join("c_0.exr")).unwrap();
         let cancel = AtomicBool::new(true); // cancelled before the first frame
         let err = convert_exr_sequence(&spec, |_, _| {}, &cancel).unwrap_err();
-        assert!(err.to_string().contains("cancelled"));
+        assert!(err.is::<Cancelled>(), "typed cancel, got {err:#}");
         assert!(!cache_root().join(cache_key(&spec)).exists());
+        // …and no temp dir left behind either.
+        let leftovers = std::fs::read_dir(cache_root())
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(&cache_key(&spec)))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0);
     }
 }

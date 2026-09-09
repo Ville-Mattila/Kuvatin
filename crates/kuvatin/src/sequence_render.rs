@@ -142,7 +142,7 @@ pub fn run(
         };
         match render_to_mp4(spec, &out, fps, report, cancel) {
             Ok(()) => rendered.push(out),
-            Err(e) if e.to_string().contains("cancelled") => {
+            Err(e) if e.is::<kuvatin_video::Cancelled>() => {
                 return Ok(SequenceReport { rendered, failures, cancelled: true });
             }
             Err(e) => failures.push((spec.first_path(), format!("{e:#}"))),
