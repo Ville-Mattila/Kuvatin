@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use kuvatin_core::format::INPUT_EXTENSIONS;
-use kuvatin_core::preset::PresetStore;
+use kuvatin_core::preset::{validate_preset_name, PresetStore};
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::PCWSTR;
@@ -93,13 +93,14 @@ struct MenuItem {
 }
 
 /// The submenu for a preset store: every preset in store order, then a
-/// separator and the fixed actions. A preset whose name contains `"` cannot
-/// be quoted on a command line and stays GUI-only.
+/// separator and the fixed actions. A name the GUI would refuse (see
+/// `validate_preset_name`; only a hand-edited presets.toml can carry one)
+/// cannot be quoted on a command line and is left out.
 fn menu_items(store: &PresetStore) -> Vec<MenuItem> {
     let mut items: Vec<MenuItem> = store
         .presets
         .iter()
-        .filter(|p| !p.name.contains('"'))
+        .filter(|p| validate_preset_name(&p.name).is_ok())
         .enumerate()
         .map(|(i, p)| MenuItem {
             id: format!("Kuvatin.{i:02}.Preset"),

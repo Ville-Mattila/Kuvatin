@@ -28,6 +28,48 @@ pub struct PresetStore {
     pub last_load_warning: Option<String>,
 }
 
+/// Why a preset name can't be used, or `Ok` if it can. A name travels into
+/// the Explorer menu as `--preset "<name>"` on a command line, so it must be
+/// quotable under Windows argv rules: no `"` at all, and no trailing `\`
+/// (which would escape the closing quote). It must also be non-blank.
+pub fn validate_preset_name(name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("A preset needs a name.".into());
+    }
+    if trimmed.contains('"') {
+        return Err(
+            "Preset names can't contain double quotes: the name is passed to Kuvatin \
+             on the Explorer menu's command line, where a quote would end it early."
+                .into(),
+        );
+    }
+    if trimmed.ends_with('\\') {
+        return Err("Preset names can't end with a backslash.".into());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("Preset names can't contain control characters.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::validate_preset_name;
+
+    #[test]
+    fn quotable_names_pass_and_unquotable_ones_are_refused() {
+        assert!(validate_preset_name("Convert to WebP").is_ok());
+        assert!(validate_preset_name("  50% · thumbs (v2)  ").is_ok());
+        assert!(validate_preset_name("C:\\weird\\but fine").is_ok());
+        assert!(validate_preset_name("").is_err());
+        assert!(validate_preset_name("   ").is_err());
+        assert!(validate_preset_name("Say \"cheese\"").is_err());
+        assert!(validate_preset_name("trailing\\").is_err());
+        assert!(validate_preset_name("two\nlines").is_err());
+    }
+}
+
 impl PresetStore {
     /// Current on-disk schema version. Bump this whenever the presets format
     /// changes and add the corresponding step to [`PresetStore::migrate`], so

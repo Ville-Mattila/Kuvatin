@@ -48,6 +48,13 @@ pub(super) fn wire(ui: &AppWindow, store: &Arc<Mutex<PresetStore>>, store_path: 
                     None => return,
                 }
             }
+            // The name goes onto the Explorer menu's command line, so it must
+            // be quotable there; refuse (with the reason) instead of saving a
+            // preset that would silently never appear in the menu.
+            if let Err(reason) = kuvatin_core::preset::validate_preset_name(&name) {
+                show_error(&ui, "Can't use that preset name", reason);
+                return;
+            }
 
             let job = current_job(&ui, &store);
 
