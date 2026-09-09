@@ -42,8 +42,12 @@ $utf8 = New-Object Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Resolve-Path $cargo), $cNew, $utf8)
 [IO.File]::WriteAllText((Resolve-Path $page), $pNew, $utf8)
 
-# Cargo.lock carries the workspace version too.
-cargo update --workspace --offline 2>$null | Out-Null
+# Cargo.lock carries the workspace version too. Run cargo through cmd: under
+# Windows PowerShell 5.1 a native command writing to stderr (cargo's
+# "Locking N packages" line) becomes a terminating error when redirected.
+cmd /c "cargo update --workspace --offline >nul 2>nul"
+if ($LASTEXITCODE -ne 0) { cmd /c "cargo update --workspace >nul 2>nul" }
+if ($LASTEXITCODE -ne 0) { throw "cargo update failed" }| Out-Null
 if ($LASTEXITCODE -ne 0) { cargo update --workspace | Out-Null }
 
 git add Cargo.toml Cargo.lock docs/index.html
