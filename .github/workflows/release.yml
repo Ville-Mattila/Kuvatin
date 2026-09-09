@@ -1,302 +1,1220 @@
-name: release
-
-# Build + test on every push to master; build, install-test and publish the
-# Windows .msi on a version tag (v2.0.0 — attached to the GitHub Release) or on
-# manual dispatch (uploaded as a workflow artifact).
-#
-# Why master runs exist: GitHub's Actions cache is scoped by git ref — a run can
-# only restore caches saved on its own ref or on the default branch. With
-# tag-only runs, every release started from a cold cache and recompiled all
-# ~400 dependency crates (11+ minutes). Master runs save the dependency cache
-# on the default branch, tag runs restore it, and cargo's fingerprinting then
-# rebuilds only the workspace crates (and any dependency that actually changed).
-# Only master runs save (a tag-scoped cache is dead weight: nothing can read it).
-#
-# Hardening: third-party downloads (GStreamer MSIs, WiX zip) are pinned by
-# SHA-256 and the build fails on mismatch — they are executed and their DLLs are
-# harvested into the shipped installer, so an upstream/CDN compromise must not
-# flow through. Actions are pinned to commit SHAs. The toolchain is pinned by
-# rust-toolchain.toml. The workflow runs with read-only repository access; only
-# the final publish job (tags) may write, and it only ever uploads assets.
-#
-# Gates, in order: fmt, clippy (-D warnings), cargo-deny (licenses +
-# advisories), the deterministic suites (core + gui), the self-contained video
-# suite (generated frames, real GStreamer pipelines), and a headless smoke
-# render with the release exe. A tag additionally installs the built MSI and
-# converts an image + renders a sequence with the INSTALLED copy (bundled
-# runtime only), so a plugin missing from the bundle fails here, not on a
-# user's machine. The live-media video tests (fixture webm) stay advisory —
-# asset-URI resolution has been flaky on the hosted runner.
-on:
-  push:
-    branches:
-      - master
-    tags:
-      - "v*"
-  workflow_dispatch:
-
-# Superseded master runs are cancelled; a tag run is never cancelled.
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
-permissions:
-  contents: read
-
-env:
-  GST_VERSION: "1.26.11"
-  # SHA-256 of the exact pinned downloads (recompute with Get-FileHash if bumping).
-  GST_RUNTIME_SHA256: "31CBC21FA0950B5C1E79C80959B2799805CB05A7A35953A13A9F790776137605"
-  GST_DEVEL_SHA256: "AF0A0720692052AAF5FB0CF2847EF34A87016EF0F914328D516F049E6C86F587"
-  WIX_ZIP_SHA256: "6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31"
-  GST_BIN: 'C:\Program Files\gstreamer\1.0\msvc_x86_64\bin'
-  PACKAGE: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
-
-jobs:
-  build:
-    name: Build, test, package
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      # The version comes from rust-toolchain.toml; the action only makes sure
-      # rustup + the components are present.
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          toolchain: 1.96.0
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # Only master runs write the cache (tag runs restore from it); save
-          # even when tests fail so a red master still warms the next run.
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-          cache-on-failure: true
-
-      # For a tag build, the tag must match the workspace version the MSI is
-      # stamped with — otherwise we'd publish e.g. v2.0.1 carrying a 2.0.0 MSI.
-      # The landing page's JSON-LD carries the same version (its download
-      # labels come from it), so it is checked too.
-      - name: Verify tag matches Cargo.toml and the landing page
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          $tag = "${{ github.ref_name }}" -replace '^v',''
-          if ($ver -ne $tag) { throw "tag $tag != workspace version $ver" }
-          $page = (Select-String -Path docs/index.html -Pattern '"softwareVersion":\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          if ($page -ne $tag) { throw "docs/index.html softwareVersion $page != tag $tag (stamp it when bumping the version)" }
-          Write-Host "tag, workspace version and landing page agree: $ver"
-
-      - name: Format check
-        run: cargo fmt --all --check
-
-      # Licenses + RUSTSEC advisories across the whole dependency tree
-      # (deny.toml). A prebuilt, checksum-verified binary (the official
-      # cargo-deny action is a Linux container action and cannot run here).
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
-        with:
-          tool: cargo-deny@0.20.2
-      - name: cargo deny (licenses, advisories, sources)
-        run: cargo deny check
-
-      - name: Install GStreamer (runtime + devel), checksum-pinned
-        shell: pwsh
-        run: |
-          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc"
-          $files = @(
-            @{ Name = "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi";       Sha = "$env:GST_RUNTIME_SHA256" },
-            @{ Name = "gstreamer-1.0-devel-msvc-x86_64-$env:GST_VERSION.msi"; Sha = "$env:GST_DEVEL_SHA256" }
-          )
-          foreach ($f in $files) {
-            $path = "$env:TEMP\$($f.Name)"
-            Invoke-WebRequest -Uri "$base/$($f.Name)" -OutFile $path
-            $got = (Get-FileHash $path -Algorithm SHA256).Hash
-            if ($got -ne $f.Sha) { throw "checksum mismatch for $($f.Name): got $got expected $($f.Sha)" }
-            Start-Process msiexec -ArgumentList "/i", "`"$path`"", "/qn", "ADDLOCAL=ALL", "/norestart" -Wait -NoNewWindow
-          }
-          # The build env (PKG_CONFIG etc.) comes from .cargo/config.toml; add the
-          # runtime bin to PATH so the harvest, the tests, and any run find it.
-          "$env:GST_BIN" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Clippy (warnings are errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      # Deterministic suites (no media, no GStreamer runtime) gate the release:
-      # a failing tag push never ships. This is a single cargo invocation so its
-      # exit code is the step's exit code.
-      - name: Test (core + gui — gates the release)
-        run: cargo test -p kuvatin-core -p kuvatin --release
-
-      # Self-contained video tests: they generate their own frames under the
-      # workspace's target dir and drive real GES/GStreamer pipelines (encode,
-      # cancel mid-render, EXR conversion, size normalisation). Blocking. Must
-      # be single-threaded: concurrent GES pipelines deadlock.
-      - name: Test (video engine, self-contained — gates the release)
-        shell: pwsh
-        run: |
-          $env:RUST_BACKTRACE = "1"
-          cargo test -p kuvatin-video --release -- --test-threads=1 `
-            sequence:: previews_and_renders_an_image_sequence transport_and_edits_are_inert_while_rendering `
-            export_settings_normalize_size_and_fps trim_math_never_goes_negative
-
-      # The live-media tests (fixture webm + png) are environment-sensitive on
-      # the hosted runner (asset-URI resolution in particular), so they run for
-      # signal but do NOT block. Fixtures live under the workspace (a clean long
-      # path — the runner's %TEMP% is an 8.3 short path GStreamer's URI opener
-      # can choke on).
-      - name: Test (video integration — advisory, live media)
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          $env:RUST_BACKTRACE = "1"
-          $fixdir = Join-Path $env:GITHUB_WORKSPACE "target\test-fixtures"
-          New-Item -ItemType Directory -Force -Path $fixdir | Out-Null
-          $fx = Join-Path $fixdir "fixture_av.webm"
-          $img = Join-Path $fixdir "fixture.png"
-          gst-launch-1.0 -e videotestsrc num-buffers=150 ! "video/x-raw,width=320,height=180" ! vp8enc ! webmmux name=m ! filesink location=$fx audiotestsrc num-buffers=300 ! audioconvert ! vorbisenc ! m.
-          gst-launch-1.0 videotestsrc num-buffers=1 ! "video/x-raw,width=320,height=180" ! pngenc ! filesink location=$img
-          if (-not (Test-Path $fx) -or (Get-Item $fx).Length -eq 0) { throw "fixture webm not created at $fx" }
-          if (-not (Test-Path $img) -or (Get-Item $img).Length -eq 0) { throw "fixture png not created at $img" }
-          $env:GST_TEST_FILE = $fx
-          $env:GST_TEST_IMAGE = $img
-          cargo test -p kuvatin-video --release -- --test-threads=1
-
-      # The headline export path, end to end, with the shipped binary: generate
-      # 48 PNG frames, render them to H.264 MP4 through the real right-click
-      # entry point (--sequence-mp4, --quiet = no window), and discover the
-      # result. Blocking.
-      - name: Smoke render with the release exe (gates the release)
-        shell: pwsh
-        run: |
-          cargo build --release -p kuvatin
-          $frames = Join-Path $env:GITHUB_WORKSPACE "target\smoke\frames"
-          New-Item -ItemType Directory -Force -Path $frames | Out-Null
-          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$frames\frame_%04d.png"
-          $first = Join-Path $frames "frame_0000.png"
-          if (-not (Test-Path $first)) { throw "frames not generated" }
-          $p = Start-Process -FilePath "target\release\kuvatin.exe" -ArgumentList "--sequence-mp4","--fps","24","--quiet","`"$first`"" -Wait -NoNewWindow -PassThru
-          if ($p.ExitCode -ne 0) { throw "kuvatin --sequence-mp4 exited $($p.ExitCode)" }
-          $mp4 = Join-Path $frames "frame.mp4"
-          if (-not (Test-Path $mp4) -or (Get-Item $mp4).Length -lt 10KB) { throw "smoke render produced no usable MP4" }
-          $info = & gst-discoverer-1.0 $mp4 2>&1 | Out-String
-          if ($info -notmatch "H\.264") { Write-Host $info; throw "smoke render is not H.264" }
-          Write-Host "smoke render OK: $((Get-Item $mp4).Length) bytes"
-
-      # ---- MSI: tag pushes and manual dispatch only (master runs stop here) ----
-      - name: Install cargo-wix
-        if: env.PACKAGE == 'true'
-        run: cargo install cargo-wix --version 0.3.9 --locked
-
-      - name: Install WiX Toolset v3 (no-admin binaries), checksum-pinned
-        if: env.PACKAGE == 'true'
-        shell: pwsh
-        run: |
-          $dest = "$env:USERPROFILE\wix3-bin"
-          $zip = "$env:TEMP\wix314-binaries.zip"
-          Invoke-WebRequest `
-            -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" `
-            -OutFile $zip
-          $got = (Get-FileHash $zip -Algorithm SHA256).Hash
-          if ($got -ne "$env:WIX_ZIP_SHA256") { throw "checksum mismatch for wix314-binaries.zip: got $got expected $env:WIX_ZIP_SHA256" }
-          Expand-Archive $zip -DestinationPath $dest -Force
-          "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Build MSI (trimmed GStreamer runtime + third-party licenses)
-        if: env.PACKAGE == 'true'
-        shell: pwsh
-        run: |
-          # The bundle script walks kuvatin.exe's imports to compute the DLL
-          # closure; the release binary exists from the smoke step.
-          $stage = "$env:GITHUB_WORKSPACE\target\gst-staging"
-          & crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir $stage -HeatExe "$env:USERPROFILE\wix3-bin\heat.exe"
-          cd crates\kuvatin
-          cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage"
-          cd ..\..
-          # A fixed-name copy so the landing page can link the latest release
-          # statically, and a checksum file for the (unsigned) installer.
-          $msi = Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1
-          Copy-Item $msi.FullName (Join-Path $msi.DirectoryName "kuvatin-x86_64.msi")
-          $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($msi.Name)" | Out-File -FilePath "$($msi.FullName).sha256" -Encoding ascii
-          Get-ChildItem target\wix
-
-      # Install the MSI the way a user would and drive the INSTALLED exe with
-      # the runner's GStreamer hidden from PATH: only the bundled runtime may
-      # satisfy it. A plugin missing from the allow-list fails here.
-      - name: Install test (installed exe converts and renders)
-        if: env.PACKAGE == 'true'
-        shell: pwsh
-        run: |
-          $msi = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
-          $log = "$env:TEMP\kuvatin-install.log"
-          $p = Start-Process msiexec -ArgumentList "/i","`"$msi`"","/qn","/norestart","/l*v","`"$log`"" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content $log | Select-Object -Last 80; throw "msiexec /i exited $($p.ExitCode)" }
-          $exe = "C:\Program Files\kuvatin\bin\kuvatin.exe"
-          if (-not (Test-Path $exe)) { throw "installed exe missing at $exe" }
-          $env:Path = (($env:Path -split ';') | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
-          $work = Join-Path $env:GITHUB_WORKSPACE "target\smoke\installed"
-          New-Item -ItemType Directory -Force -Path "$work\frames" | Out-Null
-          Copy-Item "target\smoke\frames\frame_*.png" "$work\frames"
-          # 1) a preset conversion (image pipeline)
-          Copy-Item "$work\frames\frame_0000.png" "$work\photo.png"
-          $p = Start-Process -FilePath $exe -ArgumentList "--preset","Convert to WebP","--quiet","`"$work\photo.png`"" -Wait -NoNewWindow -PassThru
-          if ($p.ExitCode -ne 0) { throw "installed --preset exited $($p.ExitCode)" }
-          $webp = Get-ChildItem "$work\*.webp" | Select-Object -First 1
-          if (-not $webp -or $webp.Length -lt 100) { throw "installed exe produced no WebP" }
-          # 2) a sequence render (video engine, bundled encoder)
-          $p = Start-Process -FilePath $exe -ArgumentList "--sequence-mp4","--fps","24","--quiet","`"$work\frames\frame_0000.png`"" -Wait -NoNewWindow -PassThru
-          if ($p.ExitCode -ne 0) { throw "installed --sequence-mp4 exited $($p.ExitCode)" }
-          $mp4 = "$work\frames\frame.mp4"
-          if (-not (Test-Path $mp4) -or (Get-Item $mp4).Length -lt 10KB) { throw "installed exe produced no usable MP4" }
-          Write-Host "installed exe OK: $($webp.Name) ($($webp.Length) B), frame.mp4 ($((Get-Item $mp4).Length) B)"
-          $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/norestart" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
-          if (Test-Path $exe) { throw "uninstall left $exe behind" }
-
-      # Software bill of materials for the release (CycloneDX, from Cargo.lock).
-      - name: SBOM (CycloneDX)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
-          path: ./
-          format: cyclonedx-json
-          output-file: target/kuvatin-${{ github.ref_name }}-sbom.cdx.json
-          upload-artifact: false
-          upload-release-assets: false
-
-      - name: Collect release files
-        if: env.PACKAGE == 'true'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target\wix\*.msi dist
-          Copy-Item target\wix\*.sha256 dist
-          Copy-Item target\kuvatin-*-sbom.cdx.json dist
-          Get-ChildItem dist
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: env.PACKAGE == 'true'
-        with:
-          name: kuvatin-windows-msi
-          path: dist/*
-
-  # The only job that may write to the repository: it attaches the files the
-  # build job produced to the release for the tag. Nothing here compiles or
-  # executes third-party code.
-  publish:
-    name: Publish release assets
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: kuvatin-windows-msi
-          path: dist
-
-      - name: Attach to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: dist/*
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
+          # gst-launch unescapes backslashes in property values (C:x → C:x), so
+          # locations use forward slashes.
+          $loc = ($frames -replace "\\", "/") + "/frame_%04d.png"
+          gst-launch-1.0 videotestsrc num-buffers=48 ! "video/x-raw,width=320,height=180" ! pngenc ! multifilesink location="$loc"
