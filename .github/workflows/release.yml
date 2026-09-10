@@ -236,7 +236,7 @@ jobs:
           # the MSI, which trusts it machine-wide before registering. Without a
           # key the package ships unsigned: the exe logs that it could not
           # register and the classic menu is unaffected.
-          $wixSign = @()
+          $cer = ''
           if ($env:SIGN_PFX_BASE64) {
             $pfx = "$env:RUNNER_TEMP\kuvatin-sign.pfx"
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
@@ -248,8 +248,8 @@ jobs:
             $cer = "$env:GITHUB_WORKSPACE\target\msix\kuvatin-signing.cer"
             Export-Certificate -Cert $cert -FilePath $cer | Out-Null
             Remove-Item $pfx -Force
-            $wixSign = @('--compiler-arg', "-dSignCerPath=$cer", '--compiler-arg', "-dSignCerThumbprint=$($cert.Thumbprint)")
-            Write-Host "package signed as $($cert.Subject) ($($cert.Thumbprint))"
+            $thumb = $cert.Thumbprint
+            Write-Host "package signed as $($cert.Subject) ($thumb)"
             'SIGNED=true' | Out-File $env:GITHUB_ENV -Append
           } else {
             & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix
@@ -257,7 +257,16 @@ jobs:
             'SIGNED=false' | Out-File $env:GITHUB_ENV -Append
           }
           cd crates\kuvatin
-          cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage" --compiler-arg "-dMsixPath=$msix" 
+          # Two explicit command lines: splatting an argument array into a
+          # native command silently dropped the signing variables under pwsh,
+          # and the installer shipped without the certificate.
+          if ($cer) {
+            Write-Host "cargo wix with GstStageDir, MsixPath, SignCerPath=$cer, SignCerThumbprint=$thumb"
+            cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage" --compiler-arg "-dMsixPath=$msix" --compiler-arg "-dSignCerPath=$cer" --compiler-arg "-dSignCerThumbprint=$thumb"
+          } else {
+            Write-Host 'cargo wix with GstStageDir, MsixPath (unsigned package)'
+            cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage" --compiler-arg "-dMsixPath=$msix"
+          }
           cd ..\..
           # A fixed-name copy so the landing page can link the latest release
           # statically, and a checksum file for the (unsigned) installer.
@@ -296,6 +305,7 @@ jobs:
           $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
           Get-Content "$env:LOCALAPPDATA\Kuvatin\kuvatin.log" -ErrorAction SilentlyContinue | Select-String 'Windows 11 menu' | Select-Object -Last 1
           if ($build -ge 22000 -and $env:SIGNED -eq 'true') {
+            if (-not (Test-Path 'C:\Program Files\kuvatin\bin\kuvatin-signing.cer')) { throw 'signed build, but the installer did not ship kuvatin-signing.cer (SignCerPath not passed to WiX?)' }
             $pkg = Get-AppxPackage VilleMattila.Kuvatin
             if (-not $pkg) {
               Write-Host '--- Trusted People (machine):'
