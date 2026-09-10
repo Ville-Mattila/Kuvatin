@@ -11,3 +11,8 @@ crates/kuvatin/wix/gstreamer.wxs
 # Affinity source files (the exported kuvatin-icon.png is the committed master)
 *.af
 *~lock~
+
+# Stray test output at the repo root (real images live under docs/ and
+# crates/*/assets). 48 smoke-test frames were once committed from here.
+/*.png
+/*.mp4
