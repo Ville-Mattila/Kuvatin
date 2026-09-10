@@ -263,13 +263,13 @@
         -->
         <CustomAction Id='KuvatinTrustCert'
                       Directory='Bin'
-                      ExeCommand='"[SystemFolder]certutil.exe" -f -addstore TrustedPeople "[Bin]kuvatin-signing.cer"'
+                      ExeCommand='"[System64Folder]certutil.exe" -f -addstore TrustedPeople "[Bin]kuvatin-signing.cer"'
                       Execute='deferred'
                       Impersonate='no'
                       Return='ignore' />
         <CustomAction Id='KuvatinUntrustCert'
                       Directory='Bin'
-                      ExeCommand='"[SystemFolder]certutil.exe" -delstore TrustedPeople $(var.SignCerThumbprint)'
+                      ExeCommand='"[System64Folder]certutil.exe" -delstore TrustedPeople $(var.SignCerThumbprint)'
                       Execute='deferred'
                       Impersonate='no'
                       Return='ignore' />

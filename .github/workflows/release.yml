@@ -297,7 +297,13 @@ jobs:
           Get-Content "$env:LOCALAPPDATA\Kuvatin\kuvatin.log" -ErrorAction SilentlyContinue | Select-String 'Windows 11 menu' | Select-Object -Last 1
           if ($build -ge 22000 -and $env:SIGNED -eq 'true') {
             $pkg = Get-AppxPackage VilleMattila.Kuvatin
-            if (-not $pkg) { throw "signed sparse package not registered on build $build" }
+            if (-not $pkg) {
+              Write-Host '--- Trusted People (machine):'
+              Get-ChildItem Cert:\LocalMachine\TrustedPeople | ForEach-Object { "  $($_.Subject) $($_.Thumbprint)" }
+              Write-Host '--- installer log, certificate + register actions:'
+              Get-Content $log | Select-String 'KuvatinTrustCert|KuvatinRegister|certutil' | ForEach-Object { $_.Line } | Select-Object -Last 12
+              throw "signed sparse package not registered on build $build"
+            }
             Write-Host "sparse package registered: $($pkg.PackageFullName) ($($pkg.SignatureKind))"
           } else {
             Write-Host "build $build, signed=$env:SIGNED: package registration not required here"
