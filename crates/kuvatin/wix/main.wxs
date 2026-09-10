@@ -123,6 +123,40 @@
                                 Source='$(var.CargoTargetBinDir)\kuvatin.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <!-- Windows 11 top-level context menu: the IExplorerCommand
+                             handler DLL and the sparse package that gives this
+                             folder package identity (see crates\kuvatin\msix).
+                             `--register` registers the package per user, next to
+                             the classic registry menu; Windows 10 skips it. -->
+                        <Component Id='shellext' Guid='*'>
+                            <File
+                                Id='shellext_dll'
+                                Name='kuvatin_shellext.dll'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\kuvatin_shellext.dll'
+                                KeyPath='yes'/>
+                        </Component>
+                        <Component Id='msix' Guid='*'>
+                            <File
+                                Id='msix_file'
+                                Name='Kuvatin.msix'
+                                DiskId='1'
+                                Source='$(var.MsixPath)'
+                                KeyPath='yes'/>
+                        </Component>
+<?ifdef SignCerPath?>
+                        <!-- The certificate Kuvatin.msix is signed with: the
+                             installer trusts it machine-wide (Trusted People),
+                             which is what lets --register register the package. -->
+                        <Component Id='signcer' Guid='*'>
+                            <File
+                                Id='signcer_file'
+                                Name='kuvatin-signing.cer'
+                                DiskId='1'
+                                Source='$(var.SignCerPath)'
+                                KeyPath='yes'/>
+                        </Component>
+<?endif?>
                     </Directory>
                 </Directory>
             </Directory>
@@ -172,6 +206,11 @@
             <ComponentRef Id='License'/>
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='shellext'/>
+            <ComponentRef Id='msix'/>
+<?ifdef SignCerPath?>
+            <ComponentRef Id='signcer'/>
+<?endif?>
             <ComponentRef Id='StartMenuShortcut'/>
 
             <!-- Bundled GStreamer runtime (DLLs next to the exe + plugins subdir),
@@ -214,9 +253,38 @@
                       Impersonate='yes'
                       Return='ignore' />
 
+<?ifdef SignCerPath?>
+        <!--
+          The Windows 11 menu package is signed; its certificate must be in the
+          machine's Trusted People store before --register can register it (a
+          self-signed certificate is trusted only by this store, a CA-issued one
+          needs nothing but is not hurt). System context, no impersonation: the
+          store is per machine. Removed again on uninstall, by thumbprint.
+        -->
+        <CustomAction Id='KuvatinTrustCert'
+                      Directory='Bin'
+                      ExeCommand='"[SystemFolder]certutil.exe" -f -addstore TrustedPeople "[Bin]kuvatin-signing.cer"'
+                      Execute='deferred'
+                      Impersonate='no'
+                      Return='ignore' />
+        <CustomAction Id='KuvatinUntrustCert'
+                      Directory='Bin'
+                      ExeCommand='"[SystemFolder]certutil.exe" -delstore TrustedPeople $(var.SignCerThumbprint)'
+                      Execute='deferred'
+                      Impersonate='no'
+                      Return='ignore' />
+<?endif?>
+
         <InstallExecuteSequence>
+<?ifdef SignCerPath?>
+            <Custom Action='KuvatinTrustCert' After='InstallFiles'>NOT Installed</Custom>
+            <Custom Action='KuvatinRegister' After='KuvatinTrustCert'>NOT Installed</Custom>
+            <Custom Action='KuvatinUnregister' Before='RemoveFiles'>Installed AND (REMOVE="ALL")</Custom>
+            <Custom Action='KuvatinUntrustCert' After='KuvatinUnregister'>Installed AND (REMOVE="ALL")</Custom>
+<?else?>
             <Custom Action='KuvatinRegister' After='InstallFiles'>NOT Installed</Custom>
             <Custom Action='KuvatinUnregister' Before='RemoveFiles'>Installed AND (REMOVE="ALL")</Custom>
+<?endif?>
         </InstallExecuteSequence>
 
         

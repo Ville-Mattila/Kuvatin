@@ -39,6 +39,11 @@ pub struct Cli {
     #[arg(long)]
     pub quiet: bool,
 
+    /// Print the file extensions the Explorer menu attaches to, one per line,
+    /// and exit (the sparse-package build reads this).
+    #[arg(long, conflicts_with_all = ["preset", "sequence_mp4", "register", "unregister"])]
+    pub print_extensions: bool,
+
     /// Image files or folders to operate on.
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
@@ -48,6 +53,7 @@ pub struct Cli {
 pub enum Mode {
     Register,
     Unregister,
+    PrintExtensions,
     QuickRun {
         preset: String,
         paths: Vec<PathBuf>,
@@ -69,6 +75,8 @@ impl Cli {
             Mode::Register
         } else if self.unregister {
             Mode::Unregister
+        } else if self.print_extensions {
+            Mode::PrintExtensions
         } else if self.sequence_mp4 {
             if self.paths.is_empty() {
                 Mode::Invalid("--sequence-mp4 needs at least one frame or folder PATH")
@@ -149,6 +157,8 @@ mod tests {
     fn register_flag() {
         assert_eq!(mode_of(&["--register"]), Mode::Register);
         assert_eq!(mode_of(&["--unregister", "--quiet"]), Mode::Unregister);
+        assert_eq!(mode_of(&["--print-extensions"]), Mode::PrintExtensions);
+        assert!(parse_err(&["--print-extensions", "--register"]));
     }
 
     #[test]

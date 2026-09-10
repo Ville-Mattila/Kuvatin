@@ -3049,6 +3049,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kuvatin-shellext"
+version = "2.8.1"
+dependencies = [
+ "kuvatin-core",
+ "windows 0.58.0",
+ "windows-core 0.58.0",
+]
+
+[[package]]
 name = "kuvatin-video"
 version = "2.8.1"
 dependencies = [

@@ -1,10 +1,12 @@
 #[cfg(windows)]
+mod package;
+#[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    attach_parent_console, ensure_registered, notify_error, register, set_quiet, sync_menu,
-    unregister,
+    attach_parent_console, ensure_registered, menu_extensions, notify_error, register, set_quiet,
+    sync_menu, unregister,
 };
 
 /// Surface an error to the user when there's no console to print to. No-op off
@@ -37,3 +39,9 @@ pub fn set_quiet(_quiet: bool) {}
 /// Attach to a parent terminal's console; no-op off Windows.
 #[cfg(not(windows))]
 pub fn attach_parent_console() {}
+
+/// The Explorer menu's extensions; empty off Windows (no menu there).
+#[cfg(not(windows))]
+pub fn menu_extensions() -> Vec<&'static str> {
+    Vec::new()
+}

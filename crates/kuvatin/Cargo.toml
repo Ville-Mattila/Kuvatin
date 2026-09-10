@@ -38,6 +38,11 @@ windows = { version = "0.58", features = [
     "Win32_UI_HiDpi",
     "Win32_Graphics_Dwm",
     "Win32_Networking_WinHttp",
+    "Win32_System_Com",
+    "Foundation",
+    "Foundation_Collections",
+    "ApplicationModel",
+    "Management_Deployment",
 ] }
 
 [build-dependencies]

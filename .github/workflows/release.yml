@@ -177,7 +177,7 @@ jobs:
       - name: Smoke render with the release exe (gates the release)
         shell: pwsh
         run: |
-          cargo build --release -p kuvatin
+          cargo build --release -p kuvatin -p kuvatin-shellext
           $frames = Join-Path $env:GITHUB_WORKSPACE "target\smoke\frames"
           New-Item -ItemType Directory -Force -Path $frames | Out-Null
           # gst-launch unescapes backslashes in property values (C:\x -> C:x), so
@@ -216,13 +216,48 @@ jobs:
       - name: Build MSI (trimmed GStreamer runtime + third-party licenses)
         if: env.PACKAGE == 'true'
         shell: pwsh
+        env:
+          # Optional: a code-signing PFX (base64) + its password. Signs the
+          # Windows 11 context-menu package; see README, "Signing the menu package".
+          SIGN_PFX_BASE64: ${{ secrets.KUVATIN_SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.KUVATIN_SIGN_PFX_PASSWORD }}
         run: |
           # The bundle script walks kuvatin.exe's imports to compute the DLL
           # closure; the release binary exists from the smoke step.
           $stage = "$env:GITHUB_WORKSPACE\target\gst-staging"
           & crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir $stage -HeatExe "$env:USERPROFILE\wix3-bin\heat.exe"
+          # The Windows 11 context-menu package (identity for the install dir;
+          # the handler DLL is built with the exe above). Version = Cargo.toml.
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+\.\d+)"').Matches[0].Groups[1].Value
+          $msix = "$env:GITHUB_WORKSPACE\target\msix\Kuvatin.msix"
+          # Windows refuses an unsigned package that hosts a COM server, so the
+          # package is signed when the repo has a key; its Publisher must equal
+          # the certificate's Subject. The public certificate rides along in
+          # the MSI, which trusts it machine-wide before registering. Without a
+          # key the package ships unsigned: the exe logs that it could not
+          # register and the classic menu is unaffected.
+          $wixSign = @()
+          if ($env:SIGN_PFX_BASE64) {
+            $pfx = "$env:RUNNER_TEMP\kuvatin-sign.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfx, $env:SIGN_PFX_PASSWORD)
+            & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix -Publisher $cert.Subject
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object { [version]($_.Directory.Parent.Name) } | Select-Object -Last 1
+            & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGN_PFX_PASSWORD $msix
+            if ($LASTEXITCODE -ne 0) { throw "signtool exited $LASTEXITCODE" }
+            $cer = "$env:GITHUB_WORKSPACE\target\msix\kuvatin-signing.cer"
+            Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+            Remove-Item $pfx -Force
+            $wixSign = @('--compiler-arg', "-dSignCerPath=$cer", '--compiler-arg', "-dSignCerThumbprint=$($cert.Thumbprint)")
+            Write-Host "package signed as $($cert.Subject) ($($cert.Thumbprint))"
+            'SIGNED=true' | Out-File $env:GITHUB_ENV -Append
+          } else {
+            & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix
+            Write-Host '::warning::No signing key (KUVATIN_SIGN_PFX_BASE64): Kuvatin.msix ships unsigned, so the Windows 11 top-level menu will not register.'
+            'SIGNED=false' | Out-File $env:GITHUB_ENV -Append
+          }
           cd crates\kuvatin
-          cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage"
+          cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$stage" --compiler-arg "-dMsixPath=$msix" 
           cd ..\..
           # A fixed-name copy so the landing page can link the latest release
           # statically, and a checksum file for the (unsigned) installer.
@@ -255,6 +290,18 @@ jobs:
           }
           $icon = (Get-ItemProperty $verb).Icon
           if ($icon -ne $exe) { throw "Explorer verb points at '$icon', expected '$exe'" }
+          # Windows 11 top-level menu: the sparse package must be registered for
+          # this user with the install dir as its external location. Windows 10
+          # (build < 22000) has neither the menu nor unsigned-package support.
+          $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+          Get-Content "$env:LOCALAPPDATA\Kuvatin\kuvatin.log" -ErrorAction SilentlyContinue | Select-String 'Windows 11 menu' | Select-Object -Last 1
+          if ($build -ge 22000 -and $env:SIGNED -eq 'true') {
+            $pkg = Get-AppxPackage VilleMattila.Kuvatin
+            if (-not $pkg) { throw "signed sparse package not registered on build $build" }
+            Write-Host "sparse package registered: $($pkg.PackageFullName) ($($pkg.SignatureKind))"
+          } else {
+            Write-Host "build $build, signed=$env:SIGNED: package registration not required here"
+          }
           $env:Path = (($env:Path -split ';') | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
           $work = Join-Path $env:GITHUB_WORKSPACE "target\smoke\installed"
           New-Item -ItemType Directory -Force -Path "$work\frames" | Out-Null
@@ -277,6 +324,8 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
           if (Test-Path $exe) { throw "uninstall left $exe behind" }
           if (Test-Path $verb) { throw "uninstall left the Explorer verb behind" }
+          if ($build -ge 22000 -and (Get-AppxPackage VilleMattila.Kuvatin)) { throw "uninstall left the sparse package registered" }
+          if ($env:SIGNED -eq 'true' -and (Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Subject -like 'CN=Ville Mattila*' })) { throw "uninstall left the signing certificate in Trusted People" }
 
       # Software bill of materials for the release (CycloneDX, from Cargo.lock).
       - name: SBOM (CycloneDX)

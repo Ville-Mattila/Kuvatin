@@ -10,7 +10,8 @@
 
 use anyhow::{Context, Result};
 use kuvatin_core::format::INPUT_EXTENSIONS;
-use kuvatin_core::preset::{validate_preset_name, PresetStore};
+use kuvatin_core::menu::{command_line, frame_items, menu_items, MenuItem};
+use kuvatin_core::preset::PresetStore;
 use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::PCWSTR;
@@ -56,6 +57,16 @@ const SCHEMA: &str = "4";
 /// sequence-only store.
 const FRAME_ONLY_EXTENSIONS: &[&str] = &["exr"];
 
+/// Every extension the verb attaches to (image inputs, then the sequence-only
+/// frame formats), for the sparse-package build via `--print-extensions`.
+pub fn menu_extensions() -> Vec<&'static str> {
+    INPUT_EXTENSIONS
+        .iter()
+        .chain(FRAME_ONLY_EXTENSIONS.iter())
+        .copied()
+        .collect()
+}
+
 /// Every extension that carries the verb, with the store its submenu shows.
 fn extension_roots() -> Vec<(String, &'static str)> {
     let root = |e: &str| format!(r"Software\Classes\SystemFileAssociations\.{e}\shell\Kuvatin");
@@ -68,60 +79,6 @@ fn extension_roots() -> Vec<(String, &'static str)> {
                 .map(|e| (root(e), STORE_FRAMES)),
         )
         .collect()
-}
-
-/// What a store item runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Action {
-    /// A headless preset over the selection (`--preset`).
-    Preset(String),
-    /// Render the selected frames' sequence(s) to MP4 (`--sequence-mp4`).
-    SequenceMp4,
-    /// Open the selection in the GUI.
-    Gui,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MenuItem {
-    /// Registry key name under the store. Explorer lists subcommands in key
-    /// order, so the id carries the position.
-    id: String,
-    label: String,
-    action: Action,
-    /// Draw a separator above this item (CommandFlags 0x20).
-    separator_before: bool,
-}
-
-/// The submenu for a preset store: every preset in store order, then a
-/// separator and the fixed actions. A name the GUI would refuse (see
-/// `validate_preset_name`; only a hand-edited presets.toml can carry one)
-/// cannot be quoted on a command line and is left out.
-fn menu_items(store: &PresetStore) -> Vec<MenuItem> {
-    let mut items: Vec<MenuItem> = store
-        .presets
-        .iter()
-        .filter(|p| validate_preset_name(&p.name).is_ok())
-        .enumerate()
-        .map(|(i, p)| MenuItem {
-            id: format!("Kuvatin.{i:02}.Preset"),
-            label: p.name.clone(),
-            action: Action::Preset(p.name.clone()),
-            separator_before: false,
-        })
-        .collect();
-    items.push(MenuItem {
-        id: "Kuvatin.90.SequenceMp4".into(),
-        label: "Render image sequence to MP4".into(),
-        action: Action::SequenceMp4,
-        separator_before: true,
-    });
-    items.push(MenuItem {
-        id: "Kuvatin.91.Open".into(),
-        label: "Open in Kuvatin\u{2026}".into(),
-        action: Action::Gui,
-        separator_before: false,
-    });
-    items
 }
 
 /// The user's presets, or the built-ins if the store can't be read.
@@ -215,16 +172,6 @@ fn exe_path() -> Result<String> {
         .into_owned())
 }
 
-/// The command line a store item runs. `token` is Explorer's placeholder for
-/// the clicked item: `%1` (file/folder) or `%V` (background folder).
-fn command_line(exe: &str, action: &Action, token: &str) -> String {
-    match action {
-        Action::Preset(preset) => format!("\"{exe}\" --preset \"{preset}\" \"{token}\""),
-        Action::SequenceMp4 => format!("\"{exe}\" --sequence-mp4 \"{token}\""),
-        Action::Gui => format!("\"{exe}\" \"{token}\""),
-    }
-}
-
 /// (Re)write one command store (`Software\Classes\<store>\shell\<item>\command`).
 /// The old item tree is deleted first so presets removed in the GUI vanish
 /// from the menu instead of lingering as "unknown preset" entries.
@@ -275,23 +222,42 @@ fn register_quiet() -> Result<()> {
 
     write_store(STORE_ITEM, &exe, "%1", &items)?;
     write_store(STORE_BACKGROUND, &exe, "%V", &items)?;
-    let frames_only: Vec<MenuItem> = items
-        .iter()
-        .filter(|i| i.action == Action::SequenceMp4)
-        .cloned()
-        .map(|mut i| {
-            i.separator_before = false;
-            i
-        })
-        .collect();
-    write_store(STORE_FRAMES, &exe, "%1", &frames_only)?;
+    write_store(STORE_FRAMES, &exe, "%1", &frame_items(&items))?;
     Ok(())
 }
 
 pub fn register() -> Result<()> {
     register_quiet()?;
     println!("Kuvatin context menu registered.");
+    println!("{}", register_package_line());
     Ok(())
+}
+
+/// The install directory: where the exe, the handler DLL and the package live.
+fn install_dir() -> Result<std::path::PathBuf> {
+    let exe = env::current_exe().context("current_exe")?;
+    exe.parent()
+        .map(|p| p.to_path_buf())
+        .context("exe has no parent directory")
+}
+
+/// Register the Windows 11 sparse package (see `super::package`), never
+/// failing the classic registration over it. Returns the line to report.
+fn register_package_line() -> String {
+    let attempt = install_dir().and_then(|dir| super::package::register(&dir));
+    let line = match attempt {
+        Ok(super::package::Outcome::Registered) => "Windows 11 menu: registered.".to_string(),
+        Ok(super::package::Outcome::AlreadyRegistered) => {
+            "Windows 11 menu: already registered.".to_string()
+        }
+        Ok(super::package::Outcome::Unsupported) => {
+            "Windows 11 menu: not available on this Windows version (classic menu only)."
+                .to_string()
+        }
+        Err(e) => format!("Windows 11 menu: not registered ({e:#}); the classic menu still works."),
+    };
+    crate::applog::log(&line);
+    line
 }
 
 /// Rewrite the submenu after the preset store changed (save/delete in the
@@ -327,6 +293,18 @@ pub fn ensure_registered() {
         return;
     }
     let Ok(exe) = exe_path() else { return };
+    // The Windows 11 package, per user like the registry menu: another user
+    // on the machine, or a moved install, gets it on first launch. Off the UI
+    // thread, because enumerating packages takes a moment.
+    if super::package::os_supports_package() {
+        if let Ok(dir) = install_dir() {
+            std::thread::spawn(move || {
+                if let Err(e) = super::package::register(&dir) {
+                    crate::applog::log(&format!("Windows 11 menu: self-heal failed ({e:#})"));
+                }
+            });
+        }
+    }
     let registered = read_root_value("Icon");
     let schema_current = read_root_value("Schema").as_deref() == Some(SCHEMA);
     match registered.as_deref() {
@@ -339,6 +317,32 @@ pub fn ensure_registered() {
             let _ = register_quiet();
         }
     }
+}
+
+/// Read a string value under HKLM (`windows_build()` uses it). `None` when
+/// absent or unreadable.
+pub(super) fn read_hklm_string(key: &str, name: &str) -> Option<String> {
+    use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    let wkey = wide(key);
+    let wname = wide(name);
+    let mut buf = [0u16; 256];
+    let mut cb = (buf.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(wkey.as_ptr()),
+            PCWSTR(wname.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut cb),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let len = (cb as usize / 2).saturating_sub(1).min(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
 }
 
 /// Read back a string value under ROOT that `register()` writes (`Icon` holds
@@ -441,6 +445,11 @@ pub fn unregister() -> Result<()> {
     for store in [STORE_ITEM, STORE_BACKGROUND, STORE_FRAMES] {
         delete_tree(&format!(r"Software\Classes\{store}"));
     }
+    match super::package::unregister() {
+        Ok(true) => crate::applog::log("Windows 11 menu: package removed"),
+        Ok(false) => {}
+        Err(e) => crate::applog::log(&format!("Windows 11 menu: package removal failed ({e:#})")),
+    }
     println!("Kuvatin context menu removed.");
     Ok(())
 }
@@ -449,56 +458,25 @@ pub fn unregister() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The sparse-package build script carries a static copy of the extension
+    /// list (it cannot run the exe on CI); this keeps it equal to the engine's.
     #[test]
-    fn command_lines_quote_the_exe_and_pass_the_item_token() {
-        assert_eq!(
-            command_line(
-                r"C:\Program Files\Kuvatin\kuvatin.exe",
-                &Action::Preset("Convert to WebP".into()),
-                "%1"
-            ),
-            r#""C:\Program Files\Kuvatin\kuvatin.exe" --preset "Convert to WebP" "%1""#
-        );
-        assert_eq!(
-            command_line(r"C:\k\kuvatin.exe", &Action::SequenceMp4, "%1"),
-            r#""C:\k\kuvatin.exe" --sequence-mp4 "%1""#
-        );
-        // The GUI item has no flag; background verbs get the folder via %V.
-        assert_eq!(
-            command_line(r"C:\k\kuvatin.exe", &Action::Gui, "%V"),
-            r#""C:\k\kuvatin.exe" "%V""#
-        );
-    }
-
-    /// The submenu mirrors the store: every preset in order (position carried
-    /// by the key name, since Explorer sorts subcommands by key), then a
-    /// separator and the fixed actions; an unquotable name stays GUI-only.
-    #[test]
-    fn menu_mirrors_the_preset_store() {
-        let mut store = PresetStore::builtin();
-        store.presets.push(kuvatin_core::preset::Preset {
-            name: "Say \"cheese\"".into(),
-            job: Default::default(),
-        });
-        let items = menu_items(&store);
-        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            [
-                "Compress PNG",
-                "Convert to WebP",
-                "Resize to 1080p",
-                "Resize to 50%",
-                "Render image sequence to MP4",
-                "Open in Kuvatin\u{2026}"
-            ]
-        );
-        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        let mut sorted = ids.clone();
-        sorted.sort();
-        assert_eq!(ids, sorted, "key order must equal menu order");
-        assert!(items[4].separator_before && !items[3].separator_before);
-        assert_eq!(items[0].action, Action::Preset("Compress PNG".into()));
+    fn msix_build_script_lists_the_same_extensions() {
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("msix/build-msix.ps1"),
+        )
+        .expect("read build-msix.ps1");
+        let line = script
+            .lines()
+            .find(|l| l.trim_start().starts_with("$extensions = "))
+            .expect("$extensions line");
+        let listed: Vec<String> = line
+            .split('\'')
+            .skip(1)
+            .step_by(2)
+            .map(|s| s.trim_start_matches('.').to_string())
+            .collect();
+        assert_eq!(listed, menu_extensions(), "update build-msix.ps1");
     }
 
     /// Per-extension roots: the aliases Windows' perceived-type group carried

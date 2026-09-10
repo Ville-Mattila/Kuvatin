@@ -119,9 +119,46 @@ cargo run -p kuvatin -- --register     # add the Kuvatin submenu (per-user, HKCU
 cargo run -p kuvatin -- --unregister   # remove it
 ```
 
-On Windows 11 the entries appear under "Show more options"; on Windows 10 directly in
-the context menu. The submenu is attached to every accepted image extension, to
-folders, and to a folder's background (right-click inside an open folder).
+On Windows 11 the "Kuvatin" entry sits in the top-level context menu: `--register`
+also registers `Kuvatin.msix`, a sparse package (identity only, no files of its own)
+whose external location is the install folder, which lets Explorer load the
+`IExplorerCommand` handler in `kuvatin_shellext.dll` (crate `kuvatin-shellext`,
+hosted in a COM surrogate, never inside Explorer). The package is registered per
+user, like the classic menu, and reads the preset store when the menu opens, so
+it never needs re-syncing. The classic registry verbs are written too (Windows 10
+shows them directly, Windows 11 under "Show more options"). The submenu is
+attached to every accepted image extension, to folders, and to a folder's
+background (right-click inside an open folder).
+
+### Signing the menu package
+
+Windows refuses an unsigned package that hosts a COM server (`0x80073D2B`), so
+the Windows 11 entry only appears when `Kuvatin.msix` is signed with a
+certificate the machine trusts. The release pipeline signs it when the
+repository has two secrets, `KUVATIN_SIGN_PFX_BASE64` (a code-signing PFX,
+base64) and `KUVATIN_SIGN_PFX_PASSWORD`; the manifest's Publisher is taken from
+the certificate's Subject. The public certificate is installed with the app and
+the installer adds it to the machine's **Trusted People** store before
+registering (and removes it on uninstall); a CA-issued certificate needs no
+such trust but is not hurt by it. Without the secrets the package ships
+unsigned, `--register` logs `Windows 11 menu: not registered (...)`, and the
+classic menu is all there is. A self-signed key is enough:
+
+```powershell
+$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Ville Mattila' `
+  -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5) -KeyUsage DigitalSignature `
+  -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+$pw = Read-Host -AsSecureString 'PFX password'
+Export-PfxCertificate -Cert $c -FilePath kuvatin-sign.pfx -Password $pw | Out-Null
+gh secret set KUVATIN_SIGN_PFX_BASE64 --body ([Convert]::ToBase64String([IO.File]::ReadAllBytes('kuvatin-sign.pfx')))
+gh secret set KUVATIN_SIGN_PFX_PASSWORD   # paste the password
+```
+
+Keep the `.pfx` out of the repository. For local testing, build the package
+(`crates\kuvatin\msix\build-msix.ps1`), sign it with `signtool sign /fd SHA256
+/sha1 <thumbprint> Kuvatin.msix`, import the `.cer` into
+`Cert:\LocalMachine\TrustedPeople` (elevated), put the `.msix` next to the exe
+and run `--register`.
 Registration is explicit: a debug build never touches the menu, and a release
 build only self-registers when nothing owns the menu yet or the registered exe
 no longer exists — so a portable or test copy can't hijack an installed one.

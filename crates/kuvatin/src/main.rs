@@ -142,6 +142,11 @@ fn main() {
             applog::log("unregister done");
         }
         Mode::Invalid(reason) => fail("Kuvatin", anyhow::anyhow!("{reason}")),
+        Mode::PrintExtensions => {
+            for ext in shell::menu_extensions() {
+                println!(".{ext}");
+            }
+        }
         Mode::QuickRun { preset, paths } => {
             // One group per preset, so two different presets never merge.
             let Some(paths) = coalesce(&format!("preset:{preset}"), paths) else {
