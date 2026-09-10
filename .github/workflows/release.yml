@@ -229,7 +229,8 @@ jobs:
           $msi = Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1
           Copy-Item $msi.FullName (Join-Path $msi.DirectoryName "kuvatin-x86_64.msi")
           $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($msi.Name)" | Out-File -FilePath "$($msi.FullName).sha256" -Encoding ascii
+          # LF, not Out-File's CRLF: `sha256sum -c` (Git Bash, Linux) rejects a CR in the name.
+          [IO.File]::WriteAllText("$($msi.FullName).sha256", "$hash  $($msi.Name)`n")
           Get-ChildItem target\wix
 
       # Install the MSI the way a user would and drive the INSTALLED exe with
