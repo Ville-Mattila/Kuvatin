@@ -5,16 +5,21 @@
 //! generation kept) and `crash.log` next to it.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOG_MAX_BYTES: u64 = 1_000_000;
 
-/// The log directory (created on demand): `%LOCALAPPDATA%\Kuvatin`, or the
-/// temp dir when that variable is unset.
+/// The log directory (created on demand): the user's local app-data folder,
+/// `%LOCALAPPDATA%\Kuvatin`. Resolved through the shell's known-folder API
+/// (`directories`) rather than the environment variable, so a process
+/// launched with a stripped or foreign environment block (a service, a
+/// scheduler, an installer) still logs where the user looks; the variable
+/// and then the temp dir are only fallbacks.
 pub fn dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
+    let base = directories::BaseDirs::new()
+        .map(|d| d.data_local_dir().to_path_buf())
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
         .unwrap_or_else(std::env::temp_dir);
     let dir = base.join("Kuvatin");
     let _ = std::fs::create_dir_all(&dir);
@@ -32,18 +37,35 @@ pub fn crash_path() -> PathBuf {
 /// Append one line: `2026-09-09T13:04:05Z pid=1234 <line>`. Best-effort —
 /// a full disk or a locked file must never take the run down.
 pub fn log(line: &str) {
-    let path = log_path();
-    rotate_if_large(&path);
+    append(&log_path(), line);
+}
+
+/// The launch context worth a log line when a headless run misbehaves on
+/// another machine: which exe, and whose environment it inherited.
+pub fn context() -> String {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| "<unset>".into());
+    format!(
+        "exe={}, USERNAME={}, LOCALAPPDATA={}",
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "?".into()),
+        var("USERNAME"),
+        var("LOCALAPPDATA")
+    )
+}
+
+fn append(path: &Path, line: &str) {
+    rotate_if_large(path);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
         let _ = writeln!(f, "{} pid={} {}", timestamp(), std::process::id(), line);
     }
 }
 
-fn rotate_if_large(path: &std::path::Path) {
+fn rotate_if_large(path: &Path) {
     if std::fs::metadata(path)
         .map(|m| m.len() > LOG_MAX_BYTES)
         .unwrap_or(false)
@@ -140,22 +162,21 @@ mod tests {
 
     #[test]
     fn log_lines_append_and_rotate() {
-        // Redirect the log dir through LOCALAPPDATA for the test.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LOCALAPPDATA", dir.path());
-        log("first");
-        log("second");
-        let text = std::fs::read_to_string(log_path()).unwrap();
+        let path = dir.path().join("kuvatin.log");
+        append(&path, "first");
+        append(&path, "second");
+        let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 2);
         assert!(
             text.contains("pid=") && text.ends_with("second\n"),
             "{text}"
         );
         // Grow it past the cap: the next write rotates it away first.
-        std::fs::write(log_path(), vec![b'x'; LOG_MAX_BYTES as usize + 1]).unwrap();
-        log("after rotation");
-        assert!(log_path().with_extension("log.1").exists());
-        let fresh = std::fs::read_to_string(log_path()).unwrap();
+        std::fs::write(&path, vec![b'x'; LOG_MAX_BYTES as usize + 1]).unwrap();
+        append(&path, "after rotation");
+        assert!(path.with_extension("log.1").exists());
+        let fresh = std::fs::read_to_string(&path).unwrap();
         assert_eq!(fresh.lines().count(), 1);
     }
 }

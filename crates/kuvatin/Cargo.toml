@@ -17,6 +17,7 @@ kuvatin-core = { path = "../kuvatin-core" }
 kuvatin-video = { path = "../kuvatin-video" }
 clap = { workspace = true }
 anyhow = { workspace = true }
+directories = { workspace = true }
 image = { workspace = true }
 slint = { version = "1.8", features = ["raw-window-handle-06"] }
 rfd = "0.14"

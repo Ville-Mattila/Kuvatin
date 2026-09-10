@@ -124,18 +124,20 @@ fn main() {
     }
     match cli.into_mode() {
         Mode::Register => {
-            applog::log("register context menu");
+            applog::log(&format!("register context menu ({})", applog::context()));
             or_fail(
                 "Kuvatin \u{2014} could not register the context menu",
                 shell::register(),
-            )
+            );
+            applog::log("register done");
         }
         Mode::Unregister => {
-            applog::log("unregister context menu");
+            applog::log(&format!("unregister context menu ({})", applog::context()));
             or_fail(
                 "Kuvatin \u{2014} could not remove the context menu",
                 shell::unregister(),
-            )
+            );
+            applog::log("unregister done");
         }
         Mode::Invalid(reason) => fail("Kuvatin", anyhow::anyhow!("{reason}")),
         Mode::QuickRun { preset, paths } => {

@@ -245,6 +245,15 @@ jobs:
           if ($p.ExitCode -ne 0) { Get-Content $log | Select-Object -Last 80; throw "msiexec /i exited $($p.ExitCode)" }
           $exe = "C:\Program Files\kuvatin\bin\kuvatin.exe"
           if (-not (Test-Path $exe)) { throw "installed exe missing at $exe" }
+          # --register ran as a deferred, impersonated custom action: the Explorer
+          # verb must now exist in THIS user's hive and point at the installed exe.
+          $verb = 'HKCU:\Software\Classes\SystemFileAssociations\.png\shell\Kuvatin'
+          if (-not (Test-Path $verb)) {
+            Get-Content $log | Select-String 'KuvatinRegister' | Select-Object -Last 6
+            throw "install did not register the Explorer verb ($verb missing)"
+          }
+          $icon = (Get-ItemProperty $verb).Icon
+          if ($icon -ne $exe) { throw "Explorer verb points at '$icon', expected '$exe'" }
           $env:Path = (($env:Path -split ';') | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
           $work = Join-Path $env:GITHUB_WORKSPACE "target\smoke\installed"
           New-Item -ItemType Directory -Force -Path "$work\frames" | Out-Null
@@ -266,6 +275,7 @@ jobs:
           $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/norestart" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
           if (Test-Path $exe) { throw "uninstall left $exe behind" }
+          if (Test-Path $verb) { throw "uninstall left the Explorer verb behind" }
 
       # Software bill of materials for the release (CycloneDX, from Cargo.lock).
       - name: SBOM (CycloneDX)
