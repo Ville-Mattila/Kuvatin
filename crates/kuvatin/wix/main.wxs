@@ -126,7 +126,7 @@
                         <!-- Windows 11 top-level context menu: the IExplorerCommand
                              handler DLL and the sparse package that gives this
                              folder package identity (see crates\kuvatin\msix).
-                             `--register` registers the package per user, next to
+                             the register step registers the package per user, next to
                              the classic registry menu; Windows 10 skips it. -->
                         <Component Id='shellext' Guid='*'>
                             <File
@@ -147,7 +147,7 @@
 <?ifdef SignCerPath?>
                         <!-- The certificate Kuvatin.msix is signed with: the
                              installer trusts it machine-wide (Trusted People),
-                             which is what lets --register register the package. -->
+                             which is what lets the register step register the package. -->
                         <Component Id='signcer' Guid='*'>
                             <File
                                 Id='signcer_file'
@@ -256,7 +256,7 @@
 <?ifdef SignCerPath?>
         <!--
           The Windows 11 menu package is signed; its certificate must be in the
-          machine's Trusted People store before --register can register it (a
+          machine's Trusted People store before the register step can register it (a
           self-signed certificate is trusted only by this store, a CA-issued one
           needs nothing but is not hurt). System context, no impersonation: the
           store is per machine. Removed again on uninstall, by thumbprint.
