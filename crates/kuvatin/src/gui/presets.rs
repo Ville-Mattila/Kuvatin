@@ -11,7 +11,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// Wire the preset callbacks: selection, save (upsert) and delete.
+/// Wire the preset callbacks: selection, save (upsert), rename, reorder and delete.
 pub(super) fn wire(ui: &AppWindow, store: &Arc<Mutex<PresetStore>>, store_path: &Path) {
     let store_path = store_path.to_path_buf();
     // Selecting a preset syncs every control (format, quality, resolution,
@@ -92,6 +92,66 @@ pub(super) fn wire(ui: &AppWindow, store: &Arc<Mutex<PresetStore>>, store_path: 
         });
     }
 
+    // Rename the selected preset to whatever the name field holds. Unlike
+    // Save this never touches the preset's job, and it refuses a name another
+    // preset already has (case-insensitively) instead of merging the two.
+    {
+        let store = store.clone();
+        let store_path = store_path.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_rename_preset(move |name| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let mut store = store.lock().unwrap();
+            let cur = ui.get_current_preset();
+            if cur < 0 {
+                return;
+            }
+            match store.rename(cur as usize, &name) {
+                Ok(stored) => {
+                    if let Err(e) = store.save(&store_path) {
+                        show_error(&ui, "Could not save presets", e.to_string());
+                    }
+                    refresh_names(&ui, &store, cur as usize);
+                    ui.set_preset_name(stored.into());
+                    crate::shell::sync_menu();
+                }
+                Err(reason) => show_error(&ui, "Can't rename the preset", reason),
+            }
+        });
+    }
+
+    // Move the selected preset up or down. The Explorer submenu lists presets
+    // in store order, so this is also how the menu is arranged.
+    {
+        let store = store.clone();
+        let store_path = store_path.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_move_preset(move |delta| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let mut store = store.lock().unwrap();
+            let cur = ui.get_current_preset();
+            if cur < 0 {
+                return;
+            }
+            let Some(new_idx) = store.move_by(cur as usize, delta) else {
+                return;
+            };
+            if new_idx == cur as usize {
+                return;
+            }
+            if let Err(e) = store.save(&store_path) {
+                show_error(&ui, "Could not save presets", e.to_string());
+            }
+            // Names + selection only: the controls keep any unsaved edits.
+            refresh_names(&ui, &store, new_idx);
+            crate::shell::sync_menu();
+        });
+    }
+
     // Delete the currently selected preset (keeping at least one).
     {
         let store = store.clone();
@@ -134,6 +194,15 @@ pub(super) fn wire(ui: &AppWindow, store: &Arc<Mutex<PresetStore>>, store_path: 
 /// (Re)build the preset-names model, select `select` (clamped to a valid index),
 /// and sync every control to the selected preset's job.
 pub(super) fn refresh_presets(ui: &AppWindow, store: &PresetStore, select: usize) {
+    let idx = refresh_names(ui, store, select);
+    if let Some(p) = store.presets.get(idx) {
+        sync_controls(ui, &p.job);
+    }
+}
+
+/// (Re)build the preset-names model and select `select` (clamped), leaving
+/// the Settings controls alone. Returns the selected index.
+fn refresh_names(ui: &AppWindow, store: &PresetStore, select: usize) -> usize {
     let names: Vec<SharedString> = store
         .presets
         .iter()
@@ -142,9 +211,7 @@ pub(super) fn refresh_presets(ui: &AppWindow, store: &PresetStore, select: usize
     ui.set_preset_names(ModelRc::new(VecModel::from(names)));
     let idx = select.min(store.presets.len().saturating_sub(1));
     ui.set_current_preset(idx as i32);
-    if let Some(p) = store.presets.get(idx) {
-        sync_controls(ui, &p.job);
-    }
+    idx
 }
 
 /// Mirror a job into the Settings controls — the inverse of [`current_job`],

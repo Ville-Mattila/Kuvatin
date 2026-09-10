@@ -10,6 +10,7 @@
 
 mod image_mode;
 mod presets;
+mod updates;
 mod video;
 #[cfg(windows)]
 mod win_drop;
@@ -97,6 +98,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // Images mode: the file queue, per-file crops, thumbnails, the viewer.
     let image = ImageState::new(&ui, &initial_paths);
     presets::wire(&ui, &store, &store_path);
+    updates::wire(&ui);
     image_mode::wire(&ui, &image, &store);
 
     // Videos mode: the GES project + timeline models, the media import queue

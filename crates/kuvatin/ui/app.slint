@@ -159,6 +159,9 @@ export component AppWindow inherits Window {
     in-out property <bool> dialog-info: false;
     callback video-mode-changed(int);          // 0 = Images, 1 = Videos
     callback inspector-changed();              // any inspector slider moved
+    callback inspector-duration-changed(int);  // Duration field (stills), whole seconds
+    in-out property <int> insp-duration-s: 5;  // selected clip's length, whole seconds
+    in property <bool> insp-is-still: false;   // selected clip is a still image (duration is free)
     callback timeline-select(int);            // clip index
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
@@ -210,7 +213,17 @@ export component AppWindow inherits Window {
     callback preset-changed(int);
     callback convert();
     callback save-preset(string);
+    callback rename-preset(string);          // give the selected preset the typed name
+    callback move-preset(int);               // -1 = up, +1 = down (menu order follows)
     callback delete-preset();
+    // Opt-in update check (Settings > Updates). Off by default: Kuvatin makes
+    // no network request unless the user turns it on.
+    in-out property <bool> update-check-enabled: false;
+    in property <string> update-status: "";
+    in property <string> update-available: "";  // newer version, "" when none/unknown
+    callback update-check-toggled(bool);
+    callback check-updates-now();
+    callback open-releases();
     callback apply-crop();
 
     // Central image viewer.
@@ -218,8 +231,10 @@ export component AppWindow inherits Window {
     in property <image> viewer-image;
     callback select-file(int);
 
-    // Keyboard shortcut targets (video mode): Space toggles play/pause, Delete
-    // removes the selected clip, Esc dismisses the topmost modal.
+    // Keyboard shortcuts (see `kbd` below). Videos: Space toggles play/pause,
+    // Delete removes the selected clip. Images: Up/Down/Home/End walk the file
+    // list, Delete removes the selected file, Ctrl+O adds files, Ctrl+S saves
+    // the preset, Ctrl+Enter converts. Esc dismisses the topmost modal.
     callback delete-selected-clip();
     forward-focus: kbd;
 
@@ -239,21 +254,50 @@ export component AppWindow inherits Window {
     // bubbles up to it whatever holds focus: a clicked button, a modal button,
     // a file row. A LineEdit that accepts the key (typing digits) still wins.
     // It also takes focus itself when a click lands on nothing focusable.
+    // Each group is its own function: the Slint compiler lowers a long chain of
+    // `if … return` into nested expressions and overflowed its stack at ~17.
+    function modal-keys(event: KeyEvent) -> EventResult {
+        // Esc dismisses the topmost modal — every one of them.
+        if (event.text != Key.Escape) { return EventResult.reject; }
+        if (root.error-visible) { root.error-visible = false; return EventResult.accept; }
+        if (root.export-config) { root.export-config = false; return EventResult.accept; }
+        if (root.seq-config) { root.seq-config = false; return EventResult.accept; }
+        if (root.importing) { root.import-cancel(); return EventResult.accept; }
+        if (root.confirm-delete) { root.confirm-delete = false; return EventResult.accept; }
+        return EventResult.reject;
+    }
+    function video-keys(event: KeyEvent) -> EventResult {
+        // Transport/edit keys are dead during an export (the engine ignores
+        // them too — this just keeps the play icon from flipping).
+        if (root.exporting) { return EventResult.reject; }
+        if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
+        if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
+        return EventResult.reject;
+    }
+    function image-keys(event: KeyEvent) -> EventResult {
+        // Walk the file list, remove the selected file, and the usual
+        // accelerators. A focused LineEdit consumes arrows/Backspace itself,
+        // so typing in the numeric fields is never hijacked.
+        if (root.running) { return EventResult.reject; }
+        if (event.modifiers.control) {
+            if (event.text == "o" || event.text == "O") { root.add-files(); return EventResult.accept; }
+            if (event.text == "s" || event.text == "S") { root.save-preset(root.preset-name); return EventResult.accept; }
+            if (event.text == Key.Return) { root.convert(); return EventResult.accept; }
+            return EventResult.reject;
+        }
+        if (root.files.length == 0) { return EventResult.reject; }
+        if (event.text == Key.DownArrow) { root.select-file(Math.min(root.selected-index + 1, root.files.length - 1)); return EventResult.accept; }
+        if (event.text == Key.UpArrow) { root.select-file(Math.max(root.selected-index - 1, 0)); return EventResult.accept; }
+        if (event.text == Key.Home) { root.select-file(0); return EventResult.accept; }
+        if (event.text == Key.End) { root.select-file(root.files.length - 1); return EventResult.accept; }
+        if ((event.text == Key.Delete || event.text == Key.Backspace) && root.selected-index >= 0) { root.remove-file(root.selected-index); return EventResult.accept; }
+        return EventResult.reject;
+    }
     kbd := FocusScope {
         key-pressed(event) => {
-            // Esc dismisses the topmost modal — every one of them.
-            if (root.error-visible && event.text == Key.Escape) { root.error-visible = false; return accept; }
-            if (root.export-config && event.text == Key.Escape) { root.export-config = false; return accept; }
-            if (root.seq-config && event.text == Key.Escape) { root.seq-config = false; return accept; }
-            if (root.importing && event.text == Key.Escape) { root.import-cancel(); return accept; }
-            if (root.confirm-delete && event.text == Key.Escape) { root.confirm-delete = false; return accept; }
-            // Transport/edit keys are dead during an export (the engine ignores
-            // them too — this just keeps the play icon from flipping).
-            if (root.app-mode == 1 && !root.exporting) {
-                if (event.text == " ") { root.video-playpause(); return accept; }
-                if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return accept; }
-            }
-            return reject;
+            if (root.modal-keys(event) == EventResult.accept) { return accept; }
+            if (root.app-mode == 1) { return root.video-keys(event); }
+            return root.image-keys(event);
         }
 
         VerticalLayout {
@@ -306,6 +350,30 @@ export component AppWindow inherits Window {
                     labels: ["Images", "Videos"];
                     selected: root.app-mode;
                     select(i) => { root.app-mode = i; root.video-mode-changed(i); }
+                }
+                // A newer release exists (only ever set by the opt-in check).
+                if root.update-available != "" : Rectangle {
+                    x: parent.width - self.width - 14px;
+                    y: (parent.height - self.height) / 2;
+                    width: badge-t.preferred-width + 22px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: badge-ta.has-hover ? Theme.accent-pressed : Theme.accent;
+                    animate background { duration: 120ms; }
+                    accessible-role: button;
+                    accessible-label: "Update available: version " + root.update-available + ". Opens the download page.";
+                    badge-t := Text {
+                        text: "Update " + root.update-available + " available";
+                        color: Theme.on-accent;
+                        font-size: 11px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    badge-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-releases(); }
+                    }
                 }
             }
 
@@ -846,26 +914,52 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             spacing: 6px;
                             FieldLabel { text: "PRESET"; }
-                            ComboBox {
-                                model: root.preset-names;
-                                current-index <=> root.current-preset;
-                                selected => { root.preset-changed(self.current-index); }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                ComboBox {
+                                    horizontal-stretch: 1;
+                                    model: root.preset-names;
+                                    current-index <=> root.current-preset;
+                                    selected => { root.preset-changed(self.current-index); }
+                                }
+                                // Reorder: the Explorer submenu lists presets in this order.
+                                SecondaryButton {
+                                    text: "▲";
+                                    min-width: 34px;
+                                    enabled: root.current-preset > 0;
+                                    accessible-label: "Move preset up";
+                                    clicked => { root.move-preset(-1); }
+                                }
+                                SecondaryButton {
+                                    text: "▼";
+                                    min-width: 34px;
+                                    enabled: root.current-preset >= 0 && root.current-preset < root.preset-names.length - 1;
+                                    accessible-label: "Move preset down";
+                                    clicked => { root.move-preset(1); }
+                                }
+                            }
+                            // Save stores the current settings under this name (a new
+                            // preset, or an update of the one with that name); Rename
+                            // gives the selected preset this name without touching it.
+                            LineEdit {
+                                placeholder-text: "Preset name";
+                                text <=> root.preset-name;
                             }
                             HorizontalLayout {
                                 spacing: 8px;
-                                LineEdit {
-                                    placeholder-text: "Preset name";
-                                    text <=> root.preset-name;
-                                    horizontal-stretch: 1;
-                                }
                                 SecondaryButton {
                                     text: "Save";
-                                    min-width: 72px;
+                                    horizontal-stretch: 1;
                                     clicked => { root.save-preset(root.preset-name); }
                                 }
                                 SecondaryButton {
+                                    text: "Rename";
+                                    horizontal-stretch: 1;
+                                    clicked => { root.rename-preset(root.preset-name); }
+                                }
+                                SecondaryButton {
                                     text: "Delete";
-                                    min-width: 72px;
+                                    horizontal-stretch: 1;
                                     clicked => { root.confirm-delete = true; }
                                 }
                             }
@@ -956,6 +1050,32 @@ export component AppWindow inherits Window {
                             CheckBox {
                                 text: "Save to a subfolder (named after the suffix)";
                                 checked <=> root.save-subfolder;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 6px;
+                            FieldLabel { text: "UPDATES"; }
+                            CheckBox {
+                                text: "Check for updates once a day";
+                                checked <=> root.update-check-enabled;
+                                toggled => { root.update-check-toggled(self.checked); }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.update-status;
+                                    color: Theme.muted;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                if root.update-check-enabled : SecondaryButton {
+                                    text: "Check now";
+                                    min-width: 84px;
+                                    clicked => { root.check-updates-now(); }
+                                }
                             }
                         }
 
@@ -1309,6 +1429,23 @@ export component AppWindow inherits Window {
                                 InspSlider { label: "Scale"; min: 10; max: 100; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
                                 InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
                                 if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
+                                // A still has no source length, so its duration is a free
+                                // choice; a real clip's is set by trimming on the timeline.
+                                if root.insp-is-still : VerticalLayout {
+                                    spacing: 4px;
+                                    HorizontalLayout {
+                                        Text { text: "Duration"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; vertical-alignment: center; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text { text: root.insp-duration-s + " s"; color: #cfd6e2; font-size: 9.5px; font-weight: 600; vertical-alignment: center; }
+                                    }
+                                    SpinBox {
+                                        minimum: 1;
+                                        maximum: 3600;
+                                        value <=> root.insp-duration-s;
+                                        accessible-label: "Duration in seconds";
+                                        edited(v) => { root.inspector-duration-changed(v); }
+                                    }
+                                }
                             }
                             Rectangle { vertical-stretch: 1; }
                         }

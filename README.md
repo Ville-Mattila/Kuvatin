@@ -36,6 +36,14 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
 Outputs are written next to the originals with a token-pattern name
 (default `{name}_{w}x{h}.{ext}`) and are never overwritten (collisions get `-1`, `-2`, …).
 
+### Presets and keyboard
+
+Presets can be renamed (type the new name, click **Rename**) and reordered
+with the arrows next to the preset list; the Explorer submenu follows that
+order. In Images mode: **Up/Down/Home/End** walk the file list, **Delete**
+removes the selected file, **Ctrl+O** adds files, **Ctrl+S** saves the
+preset, **Ctrl+Enter** converts, **Esc** closes the topmost dialog.
+
 ## Video features (new in 2.0)
 
 - **Layered timeline editor** — drag files straight onto the timeline; slide,
@@ -165,6 +173,14 @@ exercises the installed exe, then publishes the release; add notes with
 Headless runs (the Explorer menu) append to `%LOCALAPPDATA%\Kuvatin\kuvatin.log`
 (1 MB, one older generation kept); a crash writes `crash.log` next to it and,
 in the GUI, shows the error dialog.
+
+**Update check (opt-in).** Settings > Updates > *Check for updates once a day*
+is off by default; Kuvatin makes no network request unless you turn it on.
+When on, it sends one `HEAD` request a day to
+`github.com/Ville-Mattila/Kuvatin/releases/latest` (User-Agent
+`Kuvatin/<version>`) and reads the redirect target for the latest tag. Nothing
+else is sent. A newer version shows as a badge that opens the releases page.
+The setting lives in `%APPDATA%\Kuvatin\settings.toml`.
 
 ## Architecture
 

@@ -3021,9 +3021,11 @@ dependencies = [
  "kuvatin-video",
  "raw-window-handle",
  "rfd",
+ "serde",
  "slint",
  "slint-build",
  "tempfile",
+ "toml 0.8.23",
  "windows 0.58.0",
  "winresource",
 ]

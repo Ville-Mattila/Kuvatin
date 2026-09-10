@@ -775,6 +775,18 @@ impl Project {
         Some(clip_geom(&clip))
     }
 
+    /// Set a clip's duration outright (the inspector's Duration field for
+    /// stills, whose length is otherwise only reachable by edge-trimming).
+    /// Clamped like a right-edge trim: never below the trim minimum, never
+    /// past the end of a real media source. Returns the resulting geometry.
+    pub fn set_clip_duration(&mut self, id: &ClipId, secs: f64) -> Option<ClipGeom> {
+        if self.rendering.get() || !secs.is_finite() {
+            return None;
+        }
+        let current = self.clips.get(&id.0)?.duration().nseconds() as f64 / 1e9;
+        self.trim_clip(id, 1, secs - current)
+    }
+
     /// Number of tracks (GES layers, 0 = top) in the timeline.
     pub fn track_count(&self) -> usize {
         self.layers.len()
@@ -1233,6 +1245,36 @@ mod tests {
     }
 
     /// remove_clip deletes from GES + the map, prunes empty trailing layers,
+    /// A still's length is a free choice: `set_clip_duration` applies it
+    /// exactly, clamps a silly value up to the trim minimum, and reports
+    /// what it applied. Needs only GStreamer (the still is generated here).
+    #[test]
+    fn set_clip_duration_sets_and_clamps_a_still() {
+        let dir = scratch("set-dur");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([200, 80, 40, 255]))
+            .save(&png)
+            .expect("write still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let info = project.append_clip(&png, 0, None).expect("append still");
+        let geom = project.set_clip_duration(&info.id, 8.0).expect("set 8 s");
+        assert!(
+            (geom.duration.as_secs_f64() - 8.0).abs() < 1e-6,
+            "got {:?}",
+            geom.duration
+        );
+        assert_eq!(project.duration(), Some(geom.duration), "timeline follows");
+        let tiny = project
+            .set_clip_duration(&info.id, 0.001)
+            .expect("set tiny");
+        assert_eq!(tiny.duration.as_nanos() as i128, MIN_TRIM_NS, "clamped up");
+        assert!(project.set_clip_duration(&info.id, f64::NAN).is_none());
+        assert!(project
+            .set_clip_duration(&ClipId("nope".into()), 3.0)
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// and the remaining clips keep working. Self-skips without `GST_TEST_FILE`.
     #[test]
     fn removes_clips_and_prunes_trailing_layers() {

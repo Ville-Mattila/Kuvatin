@@ -30,6 +30,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let mut name = SharedString::new();
             let mut sel_id = SharedString::new();
             let mut sel_kind = ClipKind::Video;
+            let mut sel_dur = 0.0f32;
             for idx in 0..tl_clips.row_count() {
                 if let Some(mut c) = tl_clips.row_data(idx) {
                     c.selected = idx as i32 == i;
@@ -37,6 +38,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                         name = c.name.clone();
                         sel_id = c.id.clone();
                         sel_kind = c.kind;
+                        sel_dur = c.duration;
                     }
                     tl_clips.set_row_data(idx, c);
                 }
@@ -44,6 +46,9 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             ui.set_inspector_name(name);
             // Only real videos carry audio — stills and image sequences don't.
             ui.set_insp_has_audio(sel_kind == ClipKind::Video);
+            // Stills get a free Duration field; real media is trimmed instead.
+            ui.set_insp_is_still(sel_kind == ClipKind::Image);
+            ui.set_insp_duration_s(sel_dur.round().max(1.0) as i32);
             // Give a fresh clip an aspect-correct default, then reflect its
             // current layout into the sliders.
             {
@@ -269,12 +274,46 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             row.start = geom.start.as_secs_f32();
             row.inpoint = geom.inpoint.as_secs_f32();
             row.duration = geom.duration.as_secs_f32();
+            let selected = row.selected;
             tl_clips.set_row_data(i as usize, row);
-            if let (Some(ui), Some(d)) = (
-                ui_weak.upgrade(),
-                project_slot.borrow().as_ref().and_then(|p| p.duration()),
-            ) {
-                ui.set_timeline_duration(d.as_secs_f32());
+            if let Some(ui) = ui_weak.upgrade() {
+                if let Some(d) = project_slot.borrow().as_ref().and_then(|p| p.duration()) {
+                    ui.set_timeline_duration(d.as_secs_f32());
+                }
+                if selected {
+                    ui.set_insp_duration_s(geom.duration.as_secs_f32().round().max(1.0) as i32);
+                }
+            }
+        });
+    }
+    // Inspector Duration field (stills): set the selected clip's length outright.
+    {
+        let ui_weak = ui_weak.clone();
+        let project_slot = project_slot.clone();
+        let tl_clips = tl_clips.clone();
+        let sel_idx = sel_idx.clone();
+        ui.on_inspector_duration_changed(move |secs| {
+            let i = sel_idx.get();
+            if i < 0 {
+                return;
+            }
+            let Some(mut row) = tl_clips.row_data(i as usize) else {
+                return;
+            };
+            let geom = project_slot.borrow_mut().as_mut().and_then(|p| {
+                p.set_clip_duration(&kuvatin_video::ClipId(row.id.to_string()), secs as f64)
+            });
+            let Some(geom) = geom else {
+                return;
+            };
+            row.duration = geom.duration.as_secs_f32();
+            tl_clips.set_row_data(i as usize, row);
+            if let Some(ui) = ui_weak.upgrade() {
+                if let Some(d) = project_slot.borrow().as_ref().and_then(|p| p.duration()) {
+                    ui.set_timeline_duration(d.as_secs_f32());
+                }
+                // The engine may have clamped; show what it actually applied.
+                ui.set_insp_duration_s(geom.duration.as_secs_f32().round().max(1.0) as i32);
             }
         });
     }

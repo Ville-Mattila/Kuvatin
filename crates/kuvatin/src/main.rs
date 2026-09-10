@@ -8,7 +8,9 @@ mod progress_ui;
 mod quickrun;
 mod rendezvous;
 mod sequence_render;
+mod settings;
 mod shell;
+mod update;
 
 use clap::Parser;
 use cli::{Cli, Mode};

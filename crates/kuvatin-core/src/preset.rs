@@ -160,6 +160,46 @@ impl PresetStore {
             .find(|p| p.name.to_lowercase() == wanted)
     }
 
+    /// Rename the preset at `idx`. The new name must pass
+    /// [`validate_preset_name`] and must not belong to another preset
+    /// (compared case-insensitively, like [`PresetStore::find`]). Returns the
+    /// stored (trimmed) name.
+    pub fn rename(&mut self, idx: usize, new_name: &str) -> Result<String, String> {
+        let name = new_name.trim();
+        validate_preset_name(name)?;
+        let wanted = name.to_lowercase();
+        if self
+            .presets
+            .iter()
+            .enumerate()
+            .any(|(i, p)| i != idx && p.name.to_lowercase() == wanted)
+        {
+            return Err(format!("A preset named \"{name}\" already exists."));
+        }
+        let p = self
+            .presets
+            .get_mut(idx)
+            .ok_or_else(|| "No preset is selected.".to_string())?;
+        p.name = name.to_string();
+        Ok(p.name.clone())
+    }
+
+    /// Move the preset at `idx` by `delta` places (negative = towards the
+    /// top), clamped to the list. The Explorer submenu mirrors this order.
+    /// Returns the preset's new index, `None` when `idx` is out of range.
+    pub fn move_by(&mut self, idx: usize, delta: i32) -> Option<usize> {
+        let len = self.presets.len();
+        if idx >= len {
+            return None;
+        }
+        let target = (idx as i64 + delta as i64).clamp(0, len as i64 - 1) as usize;
+        if target != idx {
+            let p = self.presets.remove(idx);
+            self.presets.insert(target, p);
+        }
+        Some(target)
+    }
+
     /// Default on-disk location: %APPDATA%\Kuvatin\presets.toml (or platform equiv,
     /// e.g. ~/.config/Kuvatin/presets.toml on Linux).
     pub fn default_path() -> Option<PathBuf> {
@@ -460,5 +500,53 @@ mod tests {
         store.save(&path).unwrap(); // overwrite path too (Windows rename-over)
         assert!(path.exists());
         assert!(!path.with_extension("toml.tmp").exists());
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    fn store(names: &[&str]) -> PresetStore {
+        PresetStore {
+            presets: names
+                .iter()
+                .map(|n| Preset {
+                    name: n.to_string(),
+                    job: Default::default(),
+                })
+                .collect(),
+            ..PresetStore::builtin()
+        }
+    }
+
+    #[test]
+    fn rename_trims_and_refuses_duplicates_and_bad_names() {
+        let mut s = store(&["WebP", "Small JPEG"]);
+        assert_eq!(s.rename(1, "  Tiny JPEG ").unwrap(), "Tiny JPEG");
+        assert_eq!(s.presets[1].name, "Tiny JPEG");
+        // Same name (any case) as ANOTHER preset: refused.
+        assert!(s.rename(1, "webp").is_err());
+        // Renaming to its own name (case change only) is fine.
+        assert_eq!(s.rename(0, "webp").unwrap(), "webp");
+        // Names the Explorer menu can't carry are refused with the reason.
+        assert!(s.rename(0, "a\"b").is_err());
+        assert!(s.rename(0, "   ").is_err());
+        assert!(s.rename(5, "x").is_err(), "out of range");
+    }
+
+    #[test]
+    fn move_by_reorders_and_clamps() {
+        let mut s = store(&["a", "b", "c"]);
+        assert_eq!(s.move_by(2, -1), Some(1));
+        assert_eq!(names(&s), ["a", "c", "b"]);
+        assert_eq!(s.move_by(0, -1), Some(0), "already at the top: unchanged");
+        assert_eq!(s.move_by(1, 5), Some(2), "clamped to the end");
+        assert_eq!(names(&s), ["a", "b", "c"]);
+        assert_eq!(s.move_by(3, 1), None);
+    }
+
+    fn names(s: &PresetStore) -> Vec<&str> {
+        s.presets.iter().map(|p| p.name.as_str()).collect()
     }
 }
