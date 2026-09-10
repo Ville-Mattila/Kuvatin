@@ -14,7 +14,7 @@ authors = ["Ville Mattila <ville.mattila@ensemble.fi>"]
 image = "0.25"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 thiserror = "1"
 anyhow = "1"
 directories = "5"
