@@ -20,8 +20,8 @@ use windows::Win32::System::Console::{
     AttachConsole, GetConsoleWindow, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
 };
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegGetValueW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_TOPMOST};
 
@@ -229,8 +229,39 @@ fn register_quiet() -> Result<()> {
 pub fn register() -> Result<()> {
     register_quiet()?;
     println!("Kuvatin context menu registered.");
-    println!("{}", register_package_line());
+    let (package_active, line) = register_package();
+    set_classic_verbs_hidden(package_active);
+    println!("{line}");
     Ok(())
+}
+
+/// Every classic verb root: per extension, folders, folder backgrounds.
+fn classic_roots() -> Vec<String> {
+    let mut roots: Vec<String> = extension_roots().into_iter().map(|(r, _)| r).collect();
+    roots.push(FOLDER_ROOT.to_string());
+    roots.push(BACKGROUND_ROOT.to_string());
+    roots
+}
+
+/// Windows 11 lists a packaged handler in BOTH its new menu and the classic
+/// "Show more options" menu, so with the package registered the registry
+/// verbs would show up as a second, identical "Kuvatin". `ProgrammaticAccessOnly`
+/// keeps a verb off the menu while its keys (and our `Icon`/`Schema`
+/// sentinels) stay in place; cleared again when the package is not active
+/// (Windows 10, or a failed registration), so the classic menu takes over.
+fn set_classic_verbs_hidden(hidden: bool) {
+    let name = wide("ProgrammaticAccessOnly");
+    for root in classic_roots() {
+        let Ok(k) = create_key(&root) else { continue };
+        if hidden {
+            let _ = set_string(k, Some("ProgrammaticAccessOnly"), "");
+        } else {
+            unsafe {
+                let _ = RegDeleteValueW(k, PCWSTR(name.as_ptr()));
+            }
+        }
+        close_key(k);
+    }
 }
 
 /// The install directory: where the exe, the handler DLL and the package live.
@@ -242,22 +273,28 @@ fn install_dir() -> Result<std::path::PathBuf> {
 }
 
 /// Register the Windows 11 sparse package (see `super::package`), never
-/// failing the classic registration over it. Returns the line to report.
-fn register_package_line() -> String {
+/// failing the classic registration over it. Returns whether the package is
+/// now active (so the classic verbs must hide) and the line to report.
+fn register_package() -> (bool, String) {
+    use super::package::Outcome;
     let attempt = install_dir().and_then(|dir| super::package::register(&dir));
-    let line = match attempt {
-        Ok(super::package::Outcome::Registered) => "Windows 11 menu: registered.".to_string(),
-        Ok(super::package::Outcome::AlreadyRegistered) => {
-            "Windows 11 menu: already registered.".to_string()
+    let (active, line) = match attempt {
+        Ok(Outcome::Registered) => (true, "Windows 11 menu: registered.".to_string()),
+        Ok(Outcome::AlreadyRegistered) => {
+            (true, "Windows 11 menu: already registered.".to_string())
         }
-        Ok(super::package::Outcome::Unsupported) => {
+        Ok(Outcome::Unsupported) => (
+            false,
             "Windows 11 menu: not available on this Windows version (classic menu only)."
-                .to_string()
-        }
-        Err(e) => format!("Windows 11 menu: not registered ({e:#}); the classic menu still works."),
+                .to_string(),
+        ),
+        Err(e) => (
+            false,
+            format!("Windows 11 menu: not registered ({e:#}); the classic menu still works."),
+        ),
     };
     crate::applog::log(&line);
-    line
+    (active, line)
 }
 
 /// Rewrite the submenu after the preset store changed (save/delete in the
@@ -297,13 +334,10 @@ pub fn ensure_registered() {
     // on the machine, or a moved install, gets it on first launch. Off the UI
     // thread, because enumerating packages takes a moment.
     if super::package::os_supports_package() {
-        if let Ok(dir) = install_dir() {
-            std::thread::spawn(move || {
-                if let Err(e) = super::package::register(&dir) {
-                    crate::applog::log(&format!("Windows 11 menu: self-heal failed ({e:#})"));
-                }
-            });
-        }
+        std::thread::spawn(|| {
+            let (active, _) = register_package();
+            set_classic_verbs_hidden(active);
+        });
     }
     let registered = read_root_value("Icon");
     let schema_current = read_root_value("Schema").as_deref() == Some(SCHEMA);
