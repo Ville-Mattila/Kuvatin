@@ -23,6 +23,11 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
 - **Batch** whole folders / multi-selections in parallel, with reusable **presets**
   (stored in `%APPDATA%\Kuvatin\presets.toml`) — one bad file can't take down a
   run, and **EXIF orientation** is applied automatically on decode
+- **Colour profile and EXIF are carried to the output** (PNG, JPEG and WebP —
+  BMP and GIF have nowhere to put them), so a Display P3 photo or an Adobe RGB
+  scan keeps its colours and a photo keeps its capture date, camera and
+  copyright. The orientation tag is reset to "normal" on the way out, because
+  the rotation is already baked into the pixels
 - **Explorer context menu**: right-click images **or folders** for **every
   preset in your store** (the built-ins and the ones you save — the submenu
   is rewritten whenever presets change), "Open in Kuvatin…",

@@ -2,6 +2,7 @@ pub mod batch;
 pub mod crop;
 pub mod format;
 pub mod menu;
+pub mod metadata;
 pub mod naming;
 pub mod pipeline;
 pub mod preset;

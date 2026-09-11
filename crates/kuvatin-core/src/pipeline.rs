@@ -1,5 +1,6 @@
 use crate::crop::{apply_crop, CropMode};
 use crate::format::OutputFormat;
+use crate::metadata::{neutralise_orientation, Metadata};
 use crate::naming::{render_output_path, OutputPolicy};
 use crate::resize::{compute_target_dimensions, resample, ResizeMode};
 use crate::{CoreError, CoreResult};
@@ -80,11 +81,17 @@ pub fn process_image(img: DynamicImage, job: &Job) -> DynamicImage {
 /// `png` selects PNG-only size optimization (lossless via oxipng or lossy via
 /// libimagequant); it is ignored for non-PNG formats. Consumes the image so
 /// an already-RGBA8 buffer is reused rather than copied.
+///
+/// `meta` is the source image's colour profile and EXIF (see
+/// [`decode_with_metadata`]), attached wherever the container can carry it:
+/// PNG, JPEG and WebP can, BMP and GIF cannot, so those two lose it. Pass
+/// `&Metadata::default()` for an image built from scratch.
 pub fn encode(
     img: DynamicImage,
     format: OutputFormat,
     quality: u8,
     png: PngOptimize,
+    meta: &Metadata,
 ) -> CoreResult<Vec<u8>> {
     // Single choke point for quality: presets.toml and the CLI can carry any
     // u8, and out-of-range values panic deep inside libwebp. GUI-side clamps
@@ -99,8 +106,17 @@ pub fn encode(
             let rgb = flatten_onto_white(img);
             let mut enc =
                 image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut buf), quality);
-            enc.encode_image(&rgb)
-                .map_err(|e| CoreError::Encode(e.to_string()))?;
+            attach(&mut enc, meta);
+            // The trait's write_image is what emits the metadata segments;
+            // the inherent encode_image does not.
+            use image::ImageEncoder;
+            enc.write_image(
+                rgb.as_raw(),
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| CoreError::Encode(e.to_string()))?;
             Ok(buf)
         }
         OutputFormat::Webp => {
@@ -114,9 +130,13 @@ pub fn encode(
                     "WebP encode failed for {w}x{h} ({e:?}); note WebP allows at most 16383 px per side"
                 ))
             })?;
-            Ok(mem.to_vec())
+            // libwebp writes the simple form, which has no room for a colour
+            // profile or EXIF; re-wrap it as the extended form when there is
+            // something to carry.
+            let bytes = mem.to_vec();
+            Ok(crate::metadata::webp_with_metadata(&bytes, w, h, meta).unwrap_or(bytes))
         }
-        OutputFormat::Png => encode_png(img, png, quality),
+        OutputFormat::Png => encode_png(img, png, quality, meta),
         OutputFormat::Gif => {
             // NeuQuant at speed 10 (the fastest setting) instead of the
             // default 1 ("at any cost"); the visual difference is nil for
@@ -145,11 +165,33 @@ pub fn encode(
     }
 }
 
+/// Hand the source's colour profile and EXIF to an encoder that can carry
+/// them. A container that cannot store one answers with an error, which is
+/// not a failure of the conversion: the pixels are still correct.
+fn attach<E: image::ImageEncoder>(enc: &mut E, meta: &Metadata) {
+    if let Some(icc) = &meta.icc {
+        let _ = enc.set_icc_profile(icc.clone());
+    }
+    if let Some(exif) = &meta.exif {
+        let _ = enc.set_exif_metadata(exif.clone());
+    }
+}
+
 /// Encode a plain PNG via the image crate (no extra optimization).
-fn encode_png_plain(img: &DynamicImage) -> CoreResult<Vec<u8>> {
+fn encode_png_plain(img: &DynamicImage, meta: &Metadata) -> CoreResult<Vec<u8>> {
+    use image::ImageEncoder;
     let mut buf = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
-        .map_err(|e| CoreError::Encode(e.to_string()))?;
+    let mut enc = image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
+    attach(&mut enc, meta);
+    // Writing through the encoder rather than `write_to` is what carries the
+    // metadata; the colour type comes from the image, so 16-bit stays 16-bit.
+    enc.write_image(
+        img.as_bytes(),
+        img.width(),
+        img.height(),
+        img.color().into(),
+    )
+    .map_err(|e| CoreError::Encode(e.to_string()))?;
     Ok(buf)
 }
 
@@ -160,11 +202,18 @@ fn oxipng_squeeze(raw: &[u8]) -> CoreResult<Vec<u8>> {
 
 /// Encode a PNG with the requested size-optimization mode. Alpha is preserved in
 /// all modes.
-fn encode_png(img: DynamicImage, mode: PngOptimize, quality: u8) -> CoreResult<Vec<u8>> {
+fn encode_png(
+    img: DynamicImage,
+    mode: PngOptimize,
+    quality: u8,
+    meta: &Metadata,
+) -> CoreResult<Vec<u8>> {
     match mode {
-        PngOptimize::None => encode_png_plain(&img),
-        PngOptimize::Lossless => oxipng_squeeze(&encode_png_plain(&img)?),
-        PngOptimize::Lossy => encode_png_lossy(img, quality),
+        PngOptimize::None => encode_png_plain(&img, meta),
+        // oxipng keeps ancillary chunks (it is configured not to strip), so
+        // the profile and EXIF written above survive the squeeze.
+        PngOptimize::Lossless => oxipng_squeeze(&encode_png_plain(&img, meta)?),
+        PngOptimize::Lossy => encode_png_lossy(img, quality, meta),
     }
 }
 
@@ -172,16 +221,20 @@ fn encode_png(img: DynamicImage, mode: PngOptimize, quality: u8) -> CoreResult<V
 /// through a tRNS chunk), encode an indexed PNG via the `png` crate, then run a
 /// final lossless oxipng pass. Falls back to a lossless PNG when even a
 /// floorless quantization is refused.
-fn encode_png_lossy(img: DynamicImage, quality: u8) -> CoreResult<Vec<u8>> {
+fn encode_png_lossy(img: DynamicImage, quality: u8, meta: &Metadata) -> CoreResult<Vec<u8>> {
     let rgba = img.into_rgba8();
-    match quantize_png(&rgba, quality)? {
+    match quantize_png(&rgba, quality, meta)? {
         Some(bytes) => Ok(bytes),
-        None => oxipng_squeeze(&encode_png_plain(&DynamicImage::ImageRgba8(rgba))?),
+        None => oxipng_squeeze(&encode_png_plain(&DynamicImage::ImageRgba8(rgba), meta)?),
     }
 }
 
 /// `Ok(None)` when libimagequant can't meet even a zero quality floor.
-fn quantize_png(rgba: &image::RgbaImage, quality: u8) -> CoreResult<Option<Vec<u8>>> {
+fn quantize_png(
+    rgba: &image::RgbaImage,
+    quality: u8,
+    meta: &Metadata,
+) -> CoreResult<Option<Vec<u8>>> {
     use rgb::FromSlice;
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     // The image crate's RGBA8 bytes ARE libimagequant's pixel layout — view
@@ -233,7 +286,17 @@ fn quantize_png(rgba: &image::RgbaImage, quality: u8) -> CoreResult<Option<Vec<u
     // Encode an indexed PNG with palette + transparency.
     let mut buf = Vec::new();
     {
-        let mut enc = png::Encoder::new(&mut buf, w as u32, h as u32);
+        // with_info rather than new: the indexed path builds the PNG through
+        // this crate directly, so the metadata has to ride on the info block.
+        let mut info = png::Info::with_size(w as u32, h as u32);
+        if let Some(icc) = &meta.icc {
+            info.icc_profile = Some(std::borrow::Cow::Borrowed(icc));
+        }
+        if let Some(exif) = &meta.exif {
+            info.exif_metadata = Some(std::borrow::Cow::Borrowed(exif));
+        }
+        let mut enc = png::Encoder::with_info(&mut buf, info)
+            .map_err(|e| CoreError::Encode(e.to_string()))?;
         enc.set_color(png::ColorType::Indexed);
         enc.set_depth(png::BitDepth::Eight);
         let plte: Vec<u8> = palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
@@ -278,6 +341,14 @@ fn flatten_onto_white(img: DynamicImage) -> image::RgbImage {
 /// a crop drawn on an un-rotated preview of a portrait phone photo would
 /// otherwise select the wrong region once the pipeline rotates the pixels.
 pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
+    decode_with_metadata(input).map(|(img, _)| img)
+}
+
+/// As [`decode_oriented`], and also hands back the colour profile and EXIF so
+/// [`encode`] can put them on the output. The EXIF orientation tag is reset to
+/// "normal" first: the rotation is already applied to the pixels here, and a
+/// viewer honouring the original tag would rotate a second time.
+pub fn decode_with_metadata(input: &Path) -> CoreResult<(DynamicImage, Metadata)> {
     let decode_err = |e: image::ImageError| CoreError::Decode {
         path: input.to_path_buf(),
         source: e,
@@ -317,7 +388,10 @@ pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
                 input.display()
             )));
         }
-        return Ok(DynamicImage::ImageRgba8(first.into_buffer()));
+        return Ok((
+            DynamicImage::ImageRgba8(first.into_buffer()),
+            Metadata::default(),
+        ));
     }
     let mut decoder = reader.into_decoder().map_err(decode_err)?;
     // EXIF orientation: without this, portrait phone photos convert lying on
@@ -326,9 +400,24 @@ pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
+    // Read the sidecar blocks before the decoder is consumed. Neither is
+    // essential to the conversion, so an unreadable one is simply absent.
+    let icc = decoder
+        .icc_profile()
+        .ok()
+        .flatten()
+        .filter(|b| !b.is_empty());
+    let mut exif = decoder
+        .exif_metadata()
+        .ok()
+        .flatten()
+        .filter(|b| !b.is_empty());
+    if let Some(bytes) = exif.as_mut() {
+        neutralise_orientation(bytes);
+    }
     let mut img = DynamicImage::from_decoder(decoder).map_err(decode_err)?;
     img.apply_orientation(orientation);
-    Ok(img)
+    Ok((img, Metadata { icc, exif }))
 }
 
 /// Write `bytes` to a NEW file derived from `base`, appending `-1`, `-2`, ...
@@ -386,9 +475,9 @@ fn write_unique(base: PathBuf, bytes: &[u8]) -> CoreResult<PathBuf> {
 /// Full single-file pipeline: decode -> process -> encode -> write. Returns the
 /// path written.
 pub fn process_file(input: &Path, job: &Job) -> CoreResult<PathBuf> {
-    let img = decode_oriented(input)?;
+    let (img, meta) = decode_with_metadata(input)?;
     let out_img = process_image(img, job);
-    let bytes = encode(out_img, job.format, job.quality, job.png)?;
+    let bytes = encode(out_img, job.format, job.quality, job.png, &meta)?;
     let target = render_output_path(&job.output, input, job.format);
     // The policy may point at a subfolder that doesn't exist yet.
     if let Some(parent) = target.parent() {
@@ -409,9 +498,9 @@ pub fn process_file(input: &Path, job: &Job) -> CoreResult<PathBuf> {
 /// job's [`OutputPolicy`]. Used by the GUI when the user picks a save location
 /// or an output folder. Overwrites `output` if it already exists.
 pub fn process_file_to(input: &Path, job: &Job, output: &Path) -> CoreResult<PathBuf> {
-    let img = decode_oriented(input)?;
+    let (img, meta) = decode_with_metadata(input)?;
     let out_img = process_image(img, job);
-    let bytes = encode(out_img, job.format, job.quality, job.png)?;
+    let bytes = encode(out_img, job.format, job.quality, job.png, &meta)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| CoreError::Io {
@@ -527,21 +616,42 @@ mod tests {
 
     #[test]
     fn encode_jpeg_roundtrips() {
-        let bytes = encode(sample(16, 16), OutputFormat::Jpeg, 80, PngOptimize::None).unwrap();
+        let bytes = encode(
+            sample(16, 16),
+            OutputFormat::Jpeg,
+            80,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
 
     #[test]
     fn encode_webp_roundtrips() {
-        let bytes = encode(sample(16, 16), OutputFormat::Webp, 80, PngOptimize::None).unwrap();
+        let bytes = encode(
+            sample(16, 16),
+            OutputFormat::Webp,
+            80,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
 
     #[test]
     fn encode_png_none_roundtrips() {
-        let bytes = encode(sample(16, 16), OutputFormat::Png, 90, PngOptimize::None).unwrap();
+        let bytes = encode(
+            sample(16, 16),
+            OutputFormat::Png,
+            90,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
     }
@@ -549,7 +659,14 @@ mod tests {
     #[test]
     fn encode_png_lossless_is_valid_png() {
         let src = gradient_with_alpha(64, 64);
-        let bytes = encode(src.clone(), OutputFormat::Png, 90, PngOptimize::Lossless).unwrap();
+        let bytes = encode(
+            src.clone(),
+            OutputFormat::Png,
+            90,
+            PngOptimize::Lossless,
+            &Metadata::default(),
+        )
+        .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (64, 64));
         // Alpha preserved: still has the fully-transparent quadrant.
@@ -560,8 +677,22 @@ mod tests {
     #[test]
     fn encode_png_lossy_preserves_alpha_and_shrinks() {
         let src = gradient_with_alpha(256, 256);
-        let lossy = encode(src.clone(), OutputFormat::Png, 80, PngOptimize::Lossy).unwrap();
-        let none = encode(src.clone(), OutputFormat::Png, 80, PngOptimize::None).unwrap();
+        let lossy = encode(
+            src.clone(),
+            OutputFormat::Png,
+            80,
+            PngOptimize::Lossy,
+            &Metadata::default(),
+        )
+        .unwrap();
+        let none = encode(
+            src.clone(),
+            OutputFormat::Png,
+            80,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
 
         let decoded = image::load_from_memory(&lossy).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (256, 256));
@@ -599,7 +730,13 @@ mod tests {
     #[test]
     fn webp_oversize_errors_instead_of_panicking() {
         let wide = DynamicImage::ImageRgba8(RgbaImage::new(16_384, 1));
-        let res = encode(wide, OutputFormat::Webp, 80, PngOptimize::None);
+        let res = encode(
+            wide,
+            OutputFormat::Webp,
+            80,
+            PngOptimize::None,
+            &Metadata::default(),
+        );
         assert!(res.is_err(), "expected Err for 16384-px WebP");
     }
 
@@ -607,7 +744,14 @@ mod tests {
     /// encode choke point rather than panicking deep inside libwebp.
     #[test]
     fn webp_out_of_range_quality_is_clamped() {
-        let bytes = encode(sample(16, 16), OutputFormat::Webp, 150, PngOptimize::None).unwrap();
+        let bytes = encode(
+            sample(16, 16),
+            OutputFormat::Webp,
+            150,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
         assert!(image::load_from_memory(&bytes).is_ok());
     }
 
@@ -623,6 +767,7 @@ mod tests {
             OutputFormat::Jpeg,
             95,
             PngOptimize::None,
+            &Metadata::default(),
         )
         .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
@@ -707,6 +852,7 @@ mod tests {
             OutputFormat::Png,
             100,
             PngOptimize::Lossy,
+            &Metadata::default(),
         )
         .expect("a noisy image must still encode");
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
@@ -802,8 +948,14 @@ mod tests {
     #[test]
     fn bmp_tiff_gif_roundtrip() {
         for f in [OutputFormat::Bmp, OutputFormat::Tiff, OutputFormat::Gif] {
-            let bytes = encode(gradient_with_alpha(24, 16), f, 90, PngOptimize::None)
-                .unwrap_or_else(|e| panic!("{f:?}: {e}"));
+            let bytes = encode(
+                gradient_with_alpha(24, 16),
+                f,
+                90,
+                PngOptimize::None,
+                &Metadata::default(),
+            )
+            .unwrap_or_else(|e| panic!("{f:?}: {e}"));
             let decoded = image::load_from_memory(&bytes).unwrap_or_else(|e| panic!("{f:?}: {e}"));
             assert_eq!((decoded.width(), decoded.height()), (24, 16), "{f:?}");
         }
@@ -861,5 +1013,309 @@ mod tests {
             ..Job::default()
         }
         .uses_quality());
+    }
+
+    // ---- colour profile and EXIF preservation -------------------------
+
+    /// A plausible ICC profile: the header's size field and the `acsp`
+    /// signature are real, the body is filler. Encoders store the block
+    /// verbatim, so that is enough to prove it travels.
+    fn profile(tag: u8) -> Vec<u8> {
+        let mut icc = vec![tag; 132];
+        icc[0..4].copy_from_slice(&132u32.to_be_bytes());
+        icc[36..40].copy_from_slice(b"acsp");
+        icc
+    }
+
+    fn png_carrying(icc: &[u8]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let img = sample(8, 8).into_rgba8();
+        let mut buf = Vec::new();
+        let mut enc = image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
+        enc.set_icc_profile(icc.to_vec()).unwrap();
+        enc.write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        buf
+    }
+
+    fn icc_of(bytes: &[u8], format: image::ImageFormat) -> Option<Vec<u8>> {
+        use image::ImageDecoder;
+        let c = Cursor::new(bytes);
+        match format {
+            image::ImageFormat::Png => image::codecs::png::PngDecoder::new(c)
+                .ok()?
+                .icc_profile()
+                .ok()?,
+            image::ImageFormat::Jpeg => image::codecs::jpeg::JpegDecoder::new(c)
+                .ok()?
+                .icc_profile()
+                .ok()?,
+            image::ImageFormat::WebP => image::codecs::webp::WebPDecoder::new(c)
+                .ok()?
+                .icc_profile()
+                .ok()?,
+            _ => None,
+        }
+    }
+
+    fn exif_of(bytes: &[u8], format: image::ImageFormat) -> Option<Vec<u8>> {
+        use image::ImageDecoder;
+        let c = Cursor::new(bytes);
+        match format {
+            image::ImageFormat::Png => image::codecs::png::PngDecoder::new(c)
+                .ok()?
+                .exif_metadata()
+                .ok()?,
+            image::ImageFormat::Jpeg => image::codecs::jpeg::JpegDecoder::new(c)
+                .ok()?
+                .exif_metadata()
+                .ok()?,
+            _ => None,
+        }
+    }
+
+    /// A 20x10 JPEG whose EXIF says "rotate 90 clockwise", the way a portrait
+    /// phone photo is stored.
+    fn jpeg_rotated_90() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(20, 10, image::Rgb([90, 120, 150]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut jpeg), 92)
+            .encode_image(&img)
+            .unwrap();
+        let tiff: Vec<u8> = [
+            b"II".as_slice(),
+            &[42, 0, 8, 0, 0, 0],
+            &[1, 0],
+            &[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0],
+            &[0, 0, 0, 0],
+        ]
+        .concat();
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let len = (payload.len() + 2) as u16;
+        let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1, (len >> 8) as u8, len as u8];
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    fn write_temp(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = dir.path().join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    /// The colour profile must reach the output. Without it a Display P3 photo
+    /// is rendered as though its numbers were sRGB, which shifts every colour.
+    #[test]
+    fn png_output_keeps_the_colour_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let icc = profile(0x5A);
+        let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()), "read back");
+
+        let out = encode(img, OutputFormat::Png, 90, PngOptimize::None, &meta).unwrap();
+        assert_eq!(
+            icc_of(&out, image::ImageFormat::Png).as_deref(),
+            Some(icc.as_slice())
+        );
+    }
+
+    /// The lossless mode runs the bytes through oxipng afterwards, which is
+    /// free to drop ancillary chunks; the profile must still be there.
+    #[test]
+    fn the_oxipng_pass_keeps_the_colour_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let icc = profile(0x33);
+        let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        let out = encode(img, OutputFormat::Png, 90, PngOptimize::Lossless, &meta).unwrap();
+        assert_eq!(
+            icc_of(&out, image::ImageFormat::Png).as_deref(),
+            Some(icc.as_slice())
+        );
+    }
+
+    /// The lossy mode builds the PNG through libimagequant and the png crate
+    /// rather than the image crate, so it needs the chunk written explicitly.
+    #[test]
+    fn the_quantized_png_keeps_the_colour_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let icc = profile(0x77);
+        let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        let out = encode(img, OutputFormat::Png, 80, PngOptimize::Lossy, &meta).unwrap();
+        assert_eq!(
+            icc_of(&out, image::ImageFormat::Png).as_deref(),
+            Some(icc.as_slice())
+        );
+    }
+
+    #[test]
+    fn jpeg_output_keeps_the_colour_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let icc = profile(0x11);
+        let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        let out = encode(img, OutputFormat::Jpeg, 85, PngOptimize::None, &meta).unwrap();
+        assert_eq!(
+            icc_of(&out, image::ImageFormat::Jpeg).as_deref(),
+            Some(icc.as_slice())
+        );
+    }
+
+    /// EXIF carries the capture date, camera and copyright, and losing it on a
+    /// same-format run is a surprise. The orientation tag is the exception: the
+    /// rotation is already in the pixels, so the copy must say "normal" or
+    /// every viewer rotates a second time.
+    #[test]
+    fn exif_travels_but_its_orientation_is_neutralised() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_temp(&dir, "portrait.jpg", &jpeg_rotated_90());
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        assert_eq!((img.width(), img.height()), (10, 20), "rotation applied");
+        let carried = meta.exif.clone().expect("exif read back");
+        assert_eq!(orientation_in(&carried), Some(1), "tag neutralised");
+
+        let out = encode(img, OutputFormat::Jpeg, 90, PngOptimize::None, &meta).unwrap();
+        let written = exif_of(&out, image::ImageFormat::Jpeg).expect("exif on the output");
+        assert_eq!(orientation_in(&written), Some(1));
+    }
+
+    /// Read the orientation tag straight out of an EXIF block; the decoder
+    /// returns it with the `Exif\0\0` prefix already stripped.
+    fn orientation_in(exif: &[u8]) -> Option<u16> {
+        let body = exif.strip_prefix(b"Exif\0\0").unwrap_or(exif);
+        let little = match body.get(0..2)? {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let at = 8 + 2;
+        let raw = [*body.get(at + 8)?, *body.get(at + 9)?];
+        Some(if little {
+            u16::from_le_bytes(raw)
+        } else {
+            u16::from_be_bytes(raw)
+        })
+    }
+
+    /// "Convert to WebP" is one of the built-in presets, so the profile has to
+    /// survive this path too; WebP carries one only in its extended form.
+    #[test]
+    fn webp_output_keeps_the_colour_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let icc = profile(0x2B);
+        let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        let out = encode(img, OutputFormat::Webp, 85, PngOptimize::None, &meta).unwrap();
+
+        assert_eq!(
+            icc_of(&out, image::ImageFormat::WebP).as_deref(),
+            Some(icc.as_slice())
+        );
+        let decoded = image::load_from_memory(&out).expect("still a readable WebP");
+        assert_eq!((decoded.width(), decoded.height()), (8, 8));
+    }
+
+    /// Transparency is stored in its own chunk, and rebuilding the container
+    /// to add a profile must not lose it.
+    #[test]
+    fn webp_keeps_alpha_alongside_the_profile() {
+        let icc = profile(0x44);
+        let meta = Metadata {
+            icc: Some(icc.clone()),
+            exif: None,
+        };
+        let mut img = RgbaImage::from_pixel(12, 12, Rgba([200, 40, 60, 255]));
+        for y in 0..12 {
+            img.put_pixel(0, y, Rgba([0, 0, 0, 0]));
+        }
+        let out = encode(
+            DynamicImage::ImageRgba8(img),
+            OutputFormat::Webp,
+            90,
+            PngOptimize::None,
+            &meta,
+        )
+        .unwrap();
+
+        assert_eq!(
+            icc_of(&out, image::ImageFormat::WebP).as_deref(),
+            Some(icc.as_slice())
+        );
+        let decoded = image::load_from_memory(&out).unwrap().into_rgba8();
+        assert_eq!(decoded.get_pixel(0, 0)[3], 0, "transparent column survived");
+        assert_eq!(decoded.get_pixel(6, 6)[3], 255, "opaque body survived");
+    }
+
+    /// Without metadata the encoder's own output is handed back untouched, so
+    /// a plain conversion gains no container overhead.
+    #[test]
+    fn webp_without_metadata_is_not_rewrapped() {
+        let bare = encode(
+            sample(8, 8),
+            OutputFormat::Webp,
+            85,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
+        assert_eq!(&bare[8..12], b"WEBP");
+        assert_eq!(&bare[12..16], b"VP8 ", "simple form kept");
+    }
+
+    /// Writing PNGs through the encoder rather than `write_to` is what lets
+    /// the metadata ride along; the colour type must still come from the
+    /// image, so a 16-bit source is not quietly flattened to 8.
+    #[test]
+    fn png_output_keeps_sixteen_bit_depth() {
+        let deep = DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(
+            4,
+            4,
+            image::Rgba([40_000u16, 20_000, 10_000, 65_535]),
+        ));
+        let out = encode(
+            deep,
+            OutputFormat::Png,
+            90,
+            PngOptimize::None,
+            &Metadata::default(),
+        )
+        .unwrap();
+        let decoded = image::load_from_memory(&out).unwrap();
+        assert!(
+            matches!(decoded, DynamicImage::ImageRgba16(_)),
+            "got {:?}",
+            decoded.color()
+        );
+    }
+
+    /// A source with neither profile nor EXIF must not gain empty chunks.
+    #[test]
+    fn a_bare_image_stays_bare() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plain = Vec::new();
+        sample(8, 8)
+            .write_to(&mut Cursor::new(&mut plain), image::ImageFormat::Png)
+            .unwrap();
+        let src = write_temp(&dir, "plain.png", &plain);
+
+        let (img, meta) = decode_with_metadata(&src).unwrap();
+        assert!(meta.is_empty(), "nothing to carry");
+        let out = encode(img, OutputFormat::Png, 90, PngOptimize::None, &meta).unwrap();
+        assert_eq!(icc_of(&out, image::ImageFormat::Png), None);
     }
 }
