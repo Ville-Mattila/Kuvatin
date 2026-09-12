@@ -52,6 +52,7 @@ pub fn warm_asset_uri(uri: &str) -> Result<()> {
     gst::init()?;
     ges::init()?;
     ensure_encoder_ranks();
+    ensure_discovery_timeout();
     let _ = ges::UriClipAsset::request_sync(uri)?;
     Ok(())
 }
@@ -398,6 +399,28 @@ pub enum RenderStatus {
 /// env override still wins because the registry parses it at init, after which
 /// we only *adjust* the specific features below. Idempotent; cheap after the
 /// first call.
+/// How long discovery may spend on one file before giving up.
+///
+/// GES discovers with no deadline at all by default, so a file behind an
+/// unresponsive network share never returns: the import worker stops there and
+/// every import queued behind it stops too, for the rest of the session, and
+/// Cancel cannot free it because nothing is polling. Thumbnailing already
+/// learned this (see [`thumbnail_uri`]); discovery had not.
+///
+/// Twenty seconds is generous for a slow share and short enough that a user
+/// who picked the wrong file gets their app back.
+pub(crate) const DISCOVERY_TIMEOUT_SECS: u64 = 20;
+
+/// Apply [`DISCOVERY_TIMEOUT_SECS`] to the process-wide discoverer. Idempotent;
+/// call after `ges::init()` on any path that may discover an asset.
+pub(crate) fn ensure_discovery_timeout() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        ges::DiscovererManager::default()
+            .set_timeout(gst::ClockTime::from_seconds(DISCOVERY_TIMEOUT_SECS));
+    });
+}
+
 pub(crate) fn ensure_encoder_ranks() {
     use gst::prelude::PluginFeatureExtManual;
     let registry = gst::Registry::get();
@@ -555,6 +578,7 @@ impl Project {
         gst::init()?;
         ges::init()?;
         ensure_encoder_ranks();
+        ensure_discovery_timeout();
 
         let timeline = ges::Timeline::new_audio_video();
         let layer = timeline.append_layer();
@@ -1273,6 +1297,21 @@ impl Drop for Project {
 mod tests {
     /// One second, in nanoseconds — the unit every timeline number here is in.
     const S: i128 = 1_000_000_000;
+
+    /// Discovery blocks forever by default, so one unreachable network file
+    /// used to stall the import worker - and every import queued behind it -
+    /// for the rest of the session, with cancel unable to free it.
+    /// Thumbnailing learned this lesson long ago; discovery had not.
+    #[test]
+    fn discovery_gives_up_instead_of_blocking_forever() {
+        gst::init().unwrap();
+        ges::init().unwrap();
+        ensure_discovery_timeout();
+        assert_eq!(
+            ges::DiscovererManager::default().timeout(),
+            Some(gst::ClockTime::from_seconds(DISCOVERY_TIMEOUT_SECS))
+        );
+    }
 
     #[test]
     fn a_clip_on_an_empty_layer_slides_freely() {
