@@ -439,6 +439,7 @@ impl PresetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::WebpMode;
 
     /// A file that can't be read as UTF-8 (Notepad's UTF-16 re-save) falls
     /// back to built-ins with a warning instead of aborting startup.
@@ -534,6 +535,36 @@ mod tests {
             path.with_extension("toml.bad").exists(),
             "bad file preserved"
         );
+    }
+
+    /// The WebP mode is a new key in an old file format. A presets.toml
+    /// written before it existed must keep loading, as lossy — the behaviour
+    /// those presets already had — and a lossless one must survive a save.
+    #[test]
+    fn a_preset_file_without_a_webp_key_loads_as_lossy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.toml");
+        let mut store = PresetStore::builtin();
+        store.presets.truncate(1);
+        store.presets[0].job.format = OutputFormat::Webp;
+        store.presets[0].job.webp = WebpMode::Lossless;
+        store.save(&path).unwrap();
+
+        let back = PresetStore::load_or_init(&path).unwrap();
+        assert_eq!(back.presets[0].job.webp, WebpMode::Lossless, "round-trips");
+
+        // The same file as an older version wrote it: no webp key at all.
+        let older: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("webp"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        // (`format = "webp"` stays; it is the key line that must be gone.)
+        assert!(!older.contains("webp = "), "fixture has no webp key");
+        std::fs::write(&path, older).unwrap();
+        let old = PresetStore::load_or_init(&path).unwrap();
+        assert_eq!(old.presets[0].job.webp, WebpMode::Lossy, "the old default");
     }
 
     /// One invalid preset entry is skipped; the rest of the file survives.

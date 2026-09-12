@@ -1,7 +1,7 @@
 use image::{Rgba, RgbaImage};
 use kuvatin_core::batch::run_batch;
 use kuvatin_core::format::OutputFormat;
-use kuvatin_core::pipeline::Job;
+use kuvatin_core::pipeline::{Job, WebpMode};
 use kuvatin_core::resize::ResizeMode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -59,4 +59,42 @@ fn full_batch_resizes_converts_and_reports_failures() {
         let img = image::open(out).unwrap();
         assert!(img.width() <= 256 && img.height() <= 256);
     }
+}
+
+/// The whole way through: a screenshot-like PNG with transparency, run as a
+/// real batch job, comes back out of the .webp byte-for-byte. This is the
+/// claim "Lossless" makes in the Settings panel, and it is worth owning at the
+/// level the app actually calls — the unit test encodes in memory, this one
+/// goes through the file on disk.
+#[test]
+fn a_lossless_webp_job_writes_a_file_that_decodes_to_the_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("shot.png");
+
+    // Flat blocks and a hard edge: what lossy WebP smears and lossless keeps.
+    // The transparent band has a colour under it, which libwebp is free to
+    // rewrite unless we ask it not to.
+    let mut img = RgbaImage::new(64, 48);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = match (x / 16, y / 16) {
+            (_, 0) => Rgba([255, 0, 0, 255]),
+            (0, _) => Rgba([0, 128, 255, 255]),
+            (_, 2) => Rgba([9, 200, 60, 0]), // invisible, but still a colour
+            _ => Rgba([250, 250, 250, 255]),
+        };
+    }
+    img.save(&src).unwrap();
+
+    let job = Job {
+        format: OutputFormat::Webp,
+        webp: WebpMode::Lossless,
+        quality: 5, // ignored: proves the slider does not reach this path
+        ..Job::default()
+    };
+    let results = run_batch(std::slice::from_ref(&src), &job, |_p| {});
+    let out = results[0].outcome.as_ref().expect("converted");
+    assert_eq!(out.extension().unwrap(), "webp");
+
+    let back = image::open(out).unwrap().to_rgba8();
+    assert_eq!(back, img, "every pixel, alpha and the colour beneath it");
 }

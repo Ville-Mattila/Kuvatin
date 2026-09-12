@@ -34,6 +34,19 @@ pub enum PngOptimize {
     Lossy,
 }
 
+/// WebP compression mode. Only affects `OutputFormat::Webp` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebpMode {
+    /// libwebp's lossy encoder, driven by `Job.quality`. Right for
+    /// photographs, and the default because most images are photographs.
+    #[default]
+    Lossy,
+    /// Every pixel comes back exactly, alpha included. For screenshots, logos
+    /// and flat colour, where lossy throws away detail and saves little.
+    Lossless,
+}
+
 /// Struct-level `serde(default)`: a presets.toml written by an older version
 /// that lacks a field added later still parses, with that field defaulted —
 /// otherwise every such preset would be rejected as "invalid" on load.
@@ -48,6 +61,9 @@ pub struct Job {
     /// PNG-only size optimization mode.
     #[serde(default)]
     pub png: PngOptimize,
+    /// WebP-only: lossy (quality-driven) or lossless.
+    #[serde(default)]
+    pub webp: WebpMode,
     pub output: OutputPolicy,
 }
 
@@ -59,6 +75,7 @@ impl Default for Job {
             format: OutputFormat::Png,
             quality: 90,
             png: PngOptimize::None,
+            webp: WebpMode::default(),
             output: OutputPolicy::default(),
         }
     }
@@ -67,8 +84,14 @@ impl Default for Job {
 impl Job {
     /// True when this job actually consumes `quality` — unlike
     /// [`OutputFormat::uses_quality`], this accounts for lossy PNG
-    /// (libimagequant), which the flagship "Compress PNG" preset uses.
+    /// (libimagequant), which the flagship "Compress PNG" preset uses, and
+    /// lossless WebP, which does not.
     pub fn uses_quality(&self) -> bool {
+        // A lossless WebP ignores the slider, as a lossless PNG does: leaving
+        // it on screen invites a bug report that it does nothing.
+        if self.format == OutputFormat::Webp {
+            return self.webp == WebpMode::Lossy;
+        }
         self.format.uses_quality()
             || (self.format == OutputFormat::Png && self.png == PngOptimize::Lossy)
     }
@@ -109,6 +132,7 @@ pub fn encode(
     format: OutputFormat,
     quality: u8,
     png: PngOptimize,
+    webp_mode: WebpMode,
     meta: &Metadata,
 ) -> CoreResult<Vec<u8>> {
     // Single choke point for quality: presets.toml and the CLI can carry any
@@ -141,9 +165,31 @@ pub fn encode(
             let rgba = img.into_rgba8();
             let (w, h) = (rgba.width(), rgba.height());
             let encoder = webp::Encoder::from_rgba(&rgba, w, h);
-            // encode() unwraps internally and panics on inputs libwebp rejects
-            // (dimensions > 16383 px, config errors) — use the fallible API.
-            let mem = encoder.encode_simple(false, quality as f32).map_err(|e| {
+            // encode()/encode_lossless() unwrap internally and panic on inputs
+            // libwebp rejects (dimensions > 16383 px, config errors) — both
+            // paths here use a fallible API.
+            let mem = match webp_mode {
+                WebpMode::Lossy => encoder.encode_simple(false, quality as f32),
+                WebpMode::Lossless => {
+                    let mut config = webp::WebPConfig::new().map_err(|_| {
+                        CoreError::Encode("libwebp rejected its own default config".into())
+                    })?;
+                    config.lossless = 1;
+                    // In lossless mode `quality` is the effort spent looking
+                    // for redundancy, not an amount of loss: 90 is most of the
+                    // saving without the long tail of 100.
+                    config.quality = 90.0;
+                    // Without this libwebp rewrites the colour of fully
+                    // transparent pixels to whatever compresses best. Invisible
+                    // in a viewer, but it is still a changed pixel, and an
+                    // image edited further afterwards shows it.
+                    config.exact = 1;
+                    // Same error type as the lossy call, so both land in the
+                    // one message below.
+                    encoder.encode_advanced(&config)
+                }
+            };
+            let mem = mem.map_err(|e| {
                 CoreError::Encode(format!(
                     "WebP encode failed for {w}x{h} ({e:?}); note WebP allows at most 16383 px per side"
                 ))
@@ -548,7 +594,7 @@ fn write_unique(base: PathBuf, bytes: &[u8]) -> CoreResult<PathBuf> {
 pub fn process_file(input: &Path, job: &Job) -> CoreResult<PathBuf> {
     let (img, meta) = decode_with_metadata(input)?;
     let out_img = process_image(img, job);
-    let bytes = encode(out_img, job.format, job.quality, job.png, &meta)?;
+    let bytes = encode(out_img, job.format, job.quality, job.png, job.webp, &meta)?;
     let target = render_output_path(&job.output, input, job.format);
     // The policy may point at a subfolder that doesn't exist yet.
     if let Some(parent) = target.parent() {
@@ -571,7 +617,7 @@ pub fn process_file(input: &Path, job: &Job) -> CoreResult<PathBuf> {
 pub fn process_file_to(input: &Path, job: &Job, output: &Path) -> CoreResult<PathBuf> {
     let (img, meta) = decode_with_metadata(input)?;
     let out_img = process_image(img, job);
-    let bytes = encode(out_img, job.format, job.quality, job.png, &meta)?;
+    let bytes = encode(out_img, job.format, job.quality, job.png, job.webp, &meta)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| CoreError::Io {
@@ -692,6 +738,7 @@ mod tests {
             OutputFormat::Jpeg,
             80,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -706,6 +753,7 @@ mod tests {
             OutputFormat::Webp,
             80,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -720,6 +768,7 @@ mod tests {
             OutputFormat::Png,
             90,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -735,6 +784,7 @@ mod tests {
             OutputFormat::Png,
             90,
             PngOptimize::Lossless,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -753,6 +803,7 @@ mod tests {
             OutputFormat::Png,
             80,
             PngOptimize::Lossy,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -761,6 +812,7 @@ mod tests {
             OutputFormat::Png,
             80,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -806,6 +858,7 @@ mod tests {
             OutputFormat::Webp,
             80,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         );
         assert!(res.is_err(), "expected Err for 16384-px WebP");
@@ -820,6 +873,7 @@ mod tests {
             OutputFormat::Webp,
             150,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -838,6 +892,7 @@ mod tests {
             OutputFormat::Jpeg,
             95,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -923,6 +978,7 @@ mod tests {
             OutputFormat::Png,
             100,
             PngOptimize::Lossy,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .expect("a noisy image must still encode");
@@ -1036,12 +1092,100 @@ mod tests {
             ("GIF", OutputFormat::Gif, PngOptimize::None, Rgba8),
         ];
         for (name, format, png, expected) in cases {
-            let bytes = encode(src.clone(), format, 90, png, &Metadata::default())
-                .unwrap_or_else(|e| panic!("{name} refused a 16-bit image: {e}"));
+            let bytes = encode(
+                src.clone(),
+                format,
+                90,
+                png,
+                WebpMode::Lossy,
+                &Metadata::default(),
+            )
+            .unwrap_or_else(|e| panic!("{name} refused a 16-bit image: {e}"));
             let back = image::load_from_memory(&bytes)
                 .unwrap_or_else(|e| panic!("{name} wrote something undecodable: {e}"));
             assert_eq!(back.color(), expected, "{name}");
         }
+    }
+
+    /// Lossy WebP is the default and the right one for photographs; for a
+    /// screenshot, a logo or anything with flat colour it throws away detail
+    /// for nothing. Lossless means every pixel comes back, alpha included.
+    #[test]
+    fn lossless_webp_returns_every_pixel_unchanged() {
+        let src = gradient_with_alpha(40, 30);
+        let bytes = encode(
+            src.clone(),
+            OutputFormat::Webp,
+            80,
+            PngOptimize::None,
+            WebpMode::Lossless,
+            &Metadata::default(),
+        )
+        .expect("lossless webp");
+        let back = image::load_from_memory(&bytes).expect("decodes").to_rgba8();
+        assert_eq!(back.dimensions(), (40, 30));
+        assert_eq!(back, src.to_rgba8(), "every pixel, including alpha");
+    }
+
+    /// ...and the lossy default still is lossy, or the mode would be a no-op
+    /// nobody would notice was broken.
+    #[test]
+    fn lossy_webp_is_still_lossy() {
+        let src = gradient_with_alpha(40, 30);
+        let bytes = encode(
+            src.clone(),
+            OutputFormat::Webp,
+            60,
+            PngOptimize::None,
+            WebpMode::Lossy,
+            &Metadata::default(),
+        )
+        .expect("lossy webp");
+        let back = image::load_from_memory(&bytes).expect("decodes").to_rgba8();
+        assert_ne!(back, src.to_rgba8(), "a lossy encode changed something");
+    }
+
+    /// The colour profile rides on the extended container either way — the
+    /// re-wrap is the same code, and this is what would silently stop being
+    /// true if the lossless path built its own file.
+    #[test]
+    fn lossless_webp_keeps_the_colour_profile() {
+        let meta = Metadata {
+            icc: Some(b"fake icc profile".to_vec()),
+            exif: None,
+        };
+        let bytes = encode(
+            sample(16, 16),
+            OutputFormat::Webp,
+            80,
+            PngOptimize::None,
+            WebpMode::Lossless,
+            &meta,
+        )
+        .expect("lossless webp");
+        let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes)).expect("webp");
+        use image::ImageDecoder;
+        assert_eq!(
+            decoder.icc_profile().ok().flatten().as_deref(),
+            Some(b"fake icc profile".as_slice())
+        );
+    }
+
+    /// The quality slider drives the lossy encoder and nothing else; leaving it
+    /// on screen for a lossless job invites a bug report that it does nothing.
+    #[test]
+    fn quality_is_not_consumed_by_a_lossless_webp_job() {
+        let lossy = Job {
+            format: OutputFormat::Webp,
+            ..Job::default()
+        };
+        assert!(lossy.uses_quality());
+        let lossless = Job {
+            format: OutputFormat::Webp,
+            webp: WebpMode::Lossless,
+            ..Job::default()
+        };
+        assert!(!lossless.uses_quality());
     }
 
     /// A TIFF block whose only entry is the orientation tag.
@@ -1176,6 +1320,7 @@ mod tests {
                 f,
                 90,
                 PngOptimize::None,
+                WebpMode::Lossy,
                 &Metadata::default(),
             )
             .unwrap_or_else(|e| panic!("{f:?}: {e}"));
@@ -1385,7 +1530,15 @@ mod tests {
         let (img, meta) = decode_with_metadata(&src).unwrap();
         assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()), "read back");
 
-        let out = encode(img, OutputFormat::Png, 90, PngOptimize::None, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Png,
+            90,
+            PngOptimize::None,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
         assert_eq!(
             icc_of(&out, image::ImageFormat::Png).as_deref(),
             Some(icc.as_slice())
@@ -1401,7 +1554,15 @@ mod tests {
         let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
 
         let (img, meta) = decode_with_metadata(&src).unwrap();
-        let out = encode(img, OutputFormat::Png, 90, PngOptimize::Lossless, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Png,
+            90,
+            PngOptimize::Lossless,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
         assert_eq!(
             icc_of(&out, image::ImageFormat::Png).as_deref(),
             Some(icc.as_slice())
@@ -1417,7 +1578,15 @@ mod tests {
         let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
 
         let (img, meta) = decode_with_metadata(&src).unwrap();
-        let out = encode(img, OutputFormat::Png, 80, PngOptimize::Lossy, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Png,
+            80,
+            PngOptimize::Lossy,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
         assert_eq!(
             icc_of(&out, image::ImageFormat::Png).as_deref(),
             Some(icc.as_slice())
@@ -1431,7 +1600,15 @@ mod tests {
         let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
 
         let (img, meta) = decode_with_metadata(&src).unwrap();
-        let out = encode(img, OutputFormat::Jpeg, 85, PngOptimize::None, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Jpeg,
+            85,
+            PngOptimize::None,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
         assert_eq!(
             icc_of(&out, image::ImageFormat::Jpeg).as_deref(),
             Some(icc.as_slice())
@@ -1452,7 +1629,15 @@ mod tests {
         let carried = meta.exif.clone().expect("exif read back");
         assert_eq!(orientation_in(&carried), Some(1), "tag neutralised");
 
-        let out = encode(img, OutputFormat::Jpeg, 90, PngOptimize::None, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Jpeg,
+            90,
+            PngOptimize::None,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
         let written = exif_of(&out, image::ImageFormat::Jpeg).expect("exif on the output");
         assert_eq!(orientation_in(&written), Some(1));
     }
@@ -1484,7 +1669,15 @@ mod tests {
         let src = write_temp(&dir, "p3.png", &png_carrying(&icc));
 
         let (img, meta) = decode_with_metadata(&src).unwrap();
-        let out = encode(img, OutputFormat::Webp, 85, PngOptimize::None, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Webp,
+            85,
+            PngOptimize::None,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
 
         assert_eq!(
             icc_of(&out, image::ImageFormat::WebP).as_deref(),
@@ -1512,6 +1705,7 @@ mod tests {
             OutputFormat::Webp,
             90,
             PngOptimize::None,
+            WebpMode::Lossy,
             &meta,
         )
         .unwrap();
@@ -1534,6 +1728,7 @@ mod tests {
             OutputFormat::Webp,
             85,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -1556,6 +1751,7 @@ mod tests {
             OutputFormat::Png,
             90,
             PngOptimize::None,
+            WebpMode::Lossy,
             &Metadata::default(),
         )
         .unwrap();
@@ -1633,7 +1829,15 @@ mod tests {
 
         let (img, meta) = decode_with_metadata(&src).unwrap();
         assert!(meta.is_empty(), "nothing to carry");
-        let out = encode(img, OutputFormat::Png, 90, PngOptimize::None, &meta).unwrap();
+        let out = encode(
+            img,
+            OutputFormat::Png,
+            90,
+            PngOptimize::None,
+            WebpMode::Lossy,
+            &meta,
+        )
+        .unwrap();
         assert_eq!(icc_of(&out, image::ImageFormat::Png), None);
     }
 }

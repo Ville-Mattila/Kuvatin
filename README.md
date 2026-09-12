@@ -18,6 +18,9 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
   oxipng-only optimization. This is the default preset.
 - **Convert** between PNG, JPEG, WebP, BMP, TIFF, GIF (quality control for the
   lossy formats; the quality slider hides itself when it doesn't apply)
+- **Lossless WebP** for screenshots, logos and flat colour, where the lossy
+  encoder throws away detail and saves little. Every pixel comes back
+  unchanged, alpha and the colour underneath it included
 - **Resize** by pixels, percent, or fit-to-box (aspect-ratio aware, Lanczos3 resampling)
 - **Crop** to a fixed size or aspect ratio, inline in the viewer or with numeric fields
 - **Batch** whole folders / multi-selections in parallel, with reusable **presets**

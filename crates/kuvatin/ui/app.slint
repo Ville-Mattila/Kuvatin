@@ -64,6 +64,8 @@ export component AppWindow inherits Window {
     in-out property <int> quality: 80;
     // PNG optimization mode: 0 = Normal, 1 = Optimize (lossless), 2 = Compress (lossy).
     in-out property <int> png-mode: 0;
+    // WebP compression mode: 0 = Compress (lossy), 1 = Lossless.
+    in-out property <int> webp-mode: 0;
     in-out property <string> preset-name;
     in-out property <bool> confirm-delete: false;   // "Delete this preset?" dialog open
     // 0 = Images, 1 = Videos (the SegToggle index; both modes are live).
@@ -1111,9 +1113,23 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Quality only applies to lossy outputs: JPEG, WebP, and PNG
-                        // in "Compress (lossy)" mode (png-mode == 2).
-                        if root.format == "jpeg" || root.format == "webp"
+                        // WebP compression mode (only relevant for WebP output).
+                        if root.format == "webp": VerticalLayout {
+                            opacity: 0;
+                            animate opacity { duration: 160ms; easing: ease-out; }
+                            init => { self.opacity = 1; }
+                            spacing: 6px;
+                            FieldLabel { text: "WEBP OPTIMIZATION"; }
+                            ComboBox {
+                                model: ["Compress (lossy · uses quality)", "Lossless"];
+                                current-index <=> root.webp-mode;
+                            }
+                        }
+
+                        // Quality only applies to lossy outputs: JPEG, lossy WebP,
+                        // and PNG in "Compress (lossy)" mode (png-mode == 2).
+                        if root.format == "jpeg"
+                            || (root.format == "webp" && root.webp-mode == 0)
                             || (root.format == "png" && root.png-mode == 2): VerticalLayout {
                             opacity: 0;
                             animate opacity { duration: 160ms; easing: ease-out; }

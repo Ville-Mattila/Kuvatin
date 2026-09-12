@@ -4,7 +4,7 @@
 
 use super::{show_error, AppWindow};
 use kuvatin_core::format::OutputFormat;
-use kuvatin_core::pipeline::{Job, PngOptimize};
+use kuvatin_core::pipeline::{Job, PngOptimize, WebpMode};
 use kuvatin_core::preset::PresetStore;
 use kuvatin_core::resize::ResizeMode;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -222,6 +222,7 @@ fn sync_controls(ui: &AppWindow, job: &Job) {
     ui.set_format(format_combo_str(job.format).into());
     ui.set_quality(job.quality as i32);
     ui.set_png_mode(png_mode_to_idx(job.png));
+    ui.set_webp_mode(webp_mode_to_idx(job.webp));
     ui.set_suffix(job.output.suffix.clone().into());
     ui.set_save_subfolder(job.output.subfolder);
     let (w, h, lock) = match job.resize {
@@ -257,6 +258,7 @@ pub(super) fn current_job(ui: &AppWindow, store: &PresetStore) -> Job {
     job.format = format_combo_to_format(&ui.get_format());
     job.quality = ui.get_quality().clamp(0, 100) as u8;
     job.png = png_mode_from(ui.get_png_mode());
+    job.webp = webp_mode_from(ui.get_webp_mode());
     job.output.suffix = ui.get_suffix().to_string();
     job.output.subfolder = ui.get_save_subfolder();
     let rw = ui.get_res_w().max(0) as u32;
@@ -286,6 +288,22 @@ fn png_mode_to_idx(mode: PngOptimize) -> i32 {
         PngOptimize::None => 0,
         PngOptimize::Lossless => 1,
         PngOptimize::Lossy => 2,
+    }
+}
+
+/// Map the WebP-optimization combo index to the core enum.
+fn webp_mode_from(idx: i32) -> WebpMode {
+    match idx {
+        1 => WebpMode::Lossless,
+        _ => WebpMode::Lossy,
+    }
+}
+
+/// Map the core WebP-optimization enum back to its combo index.
+fn webp_mode_to_idx(mode: WebpMode) -> i32 {
+    match mode {
+        WebpMode::Lossy => 0,
+        WebpMode::Lossless => 1,
     }
 }
 

@@ -15,6 +15,13 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **Lossless WebP.** A WEBP OPTIMIZATION control next to the format, the same
+  shape as the PNG one: lossy (the default, driven by the quality slider) or
+  lossless. Lossless returns every pixel unchanged — including the colour
+  under fully transparent ones, which libwebp is otherwise free to rewrite —
+  and hides the quality slider, which it does not use.
+
 ## [2.10.0] - 2026-09-12
 The video editor learns to remember. A project — the timeline, the tracks,
 every clip's trim and transform — saves to a file and comes back. Neither end
