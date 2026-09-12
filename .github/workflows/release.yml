@@ -150,7 +150,7 @@ jobs:
       # Licenses + RUSTSEC advisories across the whole dependency tree
       # (deny.toml). A prebuilt, checksum-verified binary (the official
       # cargo-deny action is a Linux container action and cannot run here).
-      - uses: taiki-e/install-action@d438492cf8a250514fa2d34b30bc3c0dc37c65ff # v2
+      - uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2
         with:
           tool: cargo-deny@0.20.2
       - name: cargo deny (licenses, advisories, sources)
@@ -486,7 +486,7 @@ jobs:
       # on a pull request is "123/merge" and puts a slash in the path.
       - name: SBOM (CycloneDX)
         if: env.PACKAGE == 'true'
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: ./
           format: cyclonedx-json
