@@ -1836,6 +1836,8 @@ export component AppWindow inherits Window {
         // asks first (Esc or Cancel keeps it).
         if root.confirm-delete : Modal {
             card-width: 400px; card-height: 176px; card-spacing: 12px;
+            title: "Delete this preset?";
+            default-action => { root.confirm-delete = false; root.delete-preset(); }
             Text { text: "Delete this preset?"; color: Theme.ink; font-size: 15px; font-weight: 700; }
             Text {
                 text: "\"" + root.preset-name + "\" will be removed from your presets and from the Explorer menu. This cannot be undone.";
@@ -1855,6 +1857,7 @@ export component AppWindow inherits Window {
         // Import progress modal — overlays everything while files are being imported.
         if root.importing : Modal {
             card-width: 320px; card-height: 172px; card-spacing: 14px;
+            title: "Importing files";
             Text {
                 text: "Importing files…";
                 color: Theme.ink; font-size: 14px; font-weight: 700;
@@ -1884,6 +1887,10 @@ export component AppWindow inherits Window {
         // Export settings dialog: choose codec, output resolution and bitrate, then
         // Export (which opens the save dialog and starts the render).
         if root.export-config : Modal {
+            title: "Export video";
+            default-action => {
+                if (root.timeline-clips.length > 0) { root.export-config = false; root.video-export(); }
+            }
             card-width: 440px; card-height: 496px;
             Text { text: "Export video"; color: Theme.ink; font-size: 15px; font-weight: 700; }
 
@@ -1948,6 +1955,7 @@ export component AppWindow inherits Window {
 
         // Export/render progress modal (with Cancel).
         if root.exporting : Modal {
+            title: "Exporting video";
             card-width: 360px; card-height: 168px; card-spacing: 14px;
             Text {
                 text: "Exporting video…";
@@ -1977,6 +1985,8 @@ export component AppWindow inherits Window {
         // Image-sequence import dialog: shows the detected frame range and lets the
         // user pick the frame rate (one file = one frame) before adding the clip.
         if root.seq-config : Modal {
+            title: "Import image sequence";
+            default-action => { root.seq-config = false; root.seq-confirm(); }
             card-width: 440px; card-height: 252px;
             Text { text: "Import image sequence"; color: Theme.ink; font-size: 15px; font-weight: 700; }
             Text { text: root.seq-range; color: Theme.ink2; font-size: 12px; overflow: elide; }
@@ -2014,6 +2024,8 @@ export component AppWindow inherits Window {
         // sizes to the detail text up to most of the window, then the detail
         // scrolls — twenty file names used to render straight over the OK button.
         if root.error-visible : err-modal := Modal {
+            title: root.error-title;
+            default-action => { root.error-visible = false; }
             property <length> chrome: 24px * 2 + 26px + 12px * 2 + 32px;
             card-width: 460px;
             card-padding: 24px;

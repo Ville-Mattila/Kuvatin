@@ -14,13 +14,34 @@ export component Modal inherits Rectangle {
     /// Exposed so a caller can size the card from its children (see the
     /// error dialog); `card` is the card itself.
     out property <length> card-inner-width: root.card-width - 2 * root.card-padding;
+    /// What this dialog is, for assistive technology. Also the accessible name
+    /// of the card, so a screen reader announces the dialog rather than an
+    /// anonymous rectangle full of buttons.
+    in property <string> title;
+    /// Enter, when the focused control did not want it: the dialog's primary
+    /// action. Left unconnected by dialogs whose only button is Cancel — a
+    /// progress modal should not be dismissible by leaning on Return.
+    callback default-action();
 
     background: root.backdrop;
     opacity: 0;
     animate opacity { duration: 150ms; easing: ease-out; }
-    init => { self.opacity = 1; }
+    // Focus moves INTO the dialog as it opens. Without this the keyboard
+    // stayed wherever it was — behind the backdrop, on controls the user can
+    // no longer see, and Tab walked through them one by one.
+    init => { self.opacity = 1; keys.focus(); }
     // Swallow clicks behind the modal.
     TouchArea {}
+    keys := FocusScope {
+        key-pressed(e) => {
+            // Return here means no button had focus (a focused DialogButton
+            // handles its own Return and never lets it through).
+            if (e.text == Key.Return) { root.default-action(); return accept; }
+            // Everything else — Esc in particular — belongs to the window's
+            // handler, which knows which modal is on top.
+            return reject;
+        }
+    }
     card := Rectangle {
         property <length> rise: 14px;
         animate rise { duration: 220ms; easing: cubic-bezier(0.2, 0.9, 0.3, 1.12); }
@@ -33,6 +54,11 @@ export component Modal inherits Rectangle {
         border-radius: 12px;
         border-width: 1px;
         border-color: root.card-border;
+        // Slint 1.16 has no `dialog` accessible role; a labelled group is the
+        // closest thing it can express, and it does at least announce the
+        // dialog by name instead of as unlabelled scenery.
+        accessible-role: groupbox;
+        accessible-label: root.title;
         VerticalLayout {
             padding: root.card-padding;
             spacing: root.card-spacing;
