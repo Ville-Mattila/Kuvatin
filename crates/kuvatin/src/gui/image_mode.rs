@@ -18,6 +18,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// How long a selection must stand before its preview is decoded. Long enough
+/// to swallow a key repeat (a held arrow fires every ~30 ms), short enough that
+/// a deliberate click feels immediate — the row highlights at once either way.
+const PREVIEW_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
+
 /// Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
 /// not present here are converted with the base job (no crop override).
 pub(super) type CropMap = HashMap<PathBuf, (u32, u32, u32, u32)>;
@@ -178,6 +183,12 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
         let select_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Walking the list with the arrow keys used to start a full decode per
+        // keystroke — a hundred-file list, held Down, meant a hundred threads
+        // each decoding a photo whose result was then thrown away. The decode
+        // waits out a keypress instead; restarting this single-shot timer is
+        // what makes only the selection you stop on cost anything.
+        let preview_timer = Rc::new(slint::Timer::default());
         ui.on_select_file(move |index| {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -195,70 +206,80 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             let edit = edit.clone();
             let select_gen = select_gen.clone();
             let files = files.clone();
-            std::thread::spawn(move || {
-                // Decode exactly as the conversion will (EXIF orientation applied,
-                // animated GIFs refused), so the crop the user draws lands on the
-                // same pixels the pipeline crops.
-                let decoded = decode_oriented(&path)
-                    .ok()
-                    .filter(|i| i.width() > 0 && i.height() > 0);
-                let Some(img) = decoded else {
-                    // Unreadable: don't leave the viewer and Crop aimed at the
-                    // PREVIOUS file — clear them and say so in the row.
+            preview_timer.start(slint::TimerMode::SingleShot, PREVIEW_DEBOUNCE, move || {
+                let (ui_weak, crops, edit, select_gen, files, path) = (
+                    ui_weak.clone(),
+                    crops.clone(),
+                    edit.clone(),
+                    select_gen.clone(),
+                    files.clone(),
+                    path.clone(),
+                );
+                std::thread::spawn(move || {
+                    // Decode exactly as the conversion will (EXIF orientation applied,
+                    // animated GIFs refused), so the crop the user draws lands on the
+                    // same pixels the pipeline crops.
+                    let decoded = decode_oriented(&path)
+                        .ok()
+                        .filter(|i| i.width() > 0 && i.height() > 0);
+                    let Some(img) = decoded else {
+                        // Unreadable: don't leave the viewer and Crop aimed at the
+                        // PREVIOUS file — clear them and say so in the row.
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                                return;
+                            }
+                            let Some(ui) = ui_weak.upgrade() else {
+                                return;
+                            };
+                            ui.set_viewer_image(Image::default());
+                            ui.set_cropping(false);
+                            *edit.lock().unwrap() = None;
+                            if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
+                                let model = ui.get_files();
+                                if let Some(mut row) = model.row_data(i) {
+                                    row.dims = "unreadable".into();
+                                    model.set_row_data(i, row);
+                                }
+                            }
+                        });
+                        return;
+                    };
+                    let (ow, oh) = (img.width(), img.height());
+                    // Decode a display-sized preview; normalized crop coords stay
+                    // size-independent. Ship raw pixels (Send) to the UI thread.
+                    let preview = img.thumbnail(1280, 1280).to_rgba8();
+                    let (pw, ph) = (preview.width(), preview.height());
+                    let raw = preview.into_raw();
                     let _ = slint::invoke_from_event_loop(move || {
+                        // Superseded by a newer selection? then drop this result.
                         if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
                             return;
                         }
                         let Some(ui) = ui_weak.upgrade() else {
                             return;
                         };
-                        ui.set_viewer_image(Image::default());
-                        ui.set_cropping(false);
-                        *edit.lock().unwrap() = None;
-                        if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
-                            let model = ui.get_files();
-                            if let Some(mut row) = model.row_data(i) {
-                                row.dims = "unreadable".into();
-                                model.set_row_data(i, row);
-                            }
-                        }
-                    });
-                    return;
-                };
-                let (ow, oh) = (img.width(), img.height());
-                // Decode a display-sized preview; normalized crop coords stay
-                // size-independent. Ship raw pixels (Send) to the UI thread.
-                let preview = img.thumbnail(1280, 1280).to_rgba8();
-                let (pw, ph) = (preview.width(), preview.height());
-                let raw = preview.into_raw();
-                let _ = slint::invoke_from_event_loop(move || {
-                    // Superseded by a newer selection? then drop this result.
-                    if select_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
-                        return;
-                    }
-                    let Some(ui) = ui_weak.upgrade() else {
-                        return;
-                    };
-                    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&raw, pw, ph);
-                    ui.set_viewer_image(Image::from_rgba8(buf));
+                        let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&raw, pw, ph);
+                        ui.set_viewer_image(Image::from_rgba8(buf));
 
-                    // Seed crop state for this file (used when the viewer enters
-                    // Crop mode later). The crop box itself is sized by the
-                    // Slint side from the surface and this aspect ratio.
-                    ui.set_crop_img_w(ow as i32);
-                    ui.set_crop_img_h(oh as i32);
-                    if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
-                        ui.set_crop_x(x as f32 / ow as f32);
-                        ui.set_crop_y(y as f32 / oh as f32);
-                        ui.set_crop_w(w as f32 / ow as f32);
-                        ui.set_crop_h(h as f32 / oh as f32);
-                    } else {
-                        ui.set_crop_x(0.0);
-                        ui.set_crop_y(0.0);
-                        ui.set_crop_w(1.0);
-                        ui.set_crop_h(1.0);
-                    }
-                    *edit.lock().unwrap() = Some((path, ow, oh));
+                        // Seed crop state for this file (used when the viewer enters
+                        // Crop mode later). The crop box itself is sized by the
+                        // Slint side from the surface and this aspect ratio.
+                        ui.set_crop_img_w(ow as i32);
+                        ui.set_crop_img_h(oh as i32);
+                        if let Some(&(x, y, w, h)) = crops.lock().unwrap().get(&path) {
+                            ui.set_crop_x(x as f32 / ow as f32);
+                            ui.set_crop_y(y as f32 / oh as f32);
+                            ui.set_crop_w(w as f32 / ow as f32);
+                            ui.set_crop_h(h as f32 / oh as f32);
+                        } else {
+                            ui.set_crop_x(0.0);
+                            ui.set_crop_y(0.0);
+                            ui.set_crop_w(1.0);
+                            ui.set_crop_h(1.0);
+                        }
+                        *edit.lock().unwrap() = Some((path, ow, oh));
+                    });
                 });
             });
         });
