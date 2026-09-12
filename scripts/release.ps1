@@ -98,8 +98,17 @@ cmd /c "cargo update --workspace --offline >nul 2>nul"
 if ($LASTEXITCODE -ne 0) { cmd /c "cargo update --workspace >nul 2>nul" }
 if ($LASTEXITCODE -ne 0) { throw "cargo update failed" }
 
+# Everything from here is a native command, and several of them talk on
+# stderr for reasons that are not failures: git warns about line endings, and
+# push reports progress. Under 'Stop' that becomes a terminating error in the
+# middle of a release — measured, twice. Exit codes are checked explicitly
+# instead, which is what they are for.
+$ErrorActionPreference = 'Continue'
+
 git add Cargo.toml Cargo.lock docs/index.html CHANGELOG.md
+if ($LASTEXITCODE -ne 0) { throw 'could not stage the version bump' }
 git commit -q -m "release: bump workspace version to $Version"
+if ($LASTEXITCODE -ne 0) { throw 'could not commit the version bump' }
 
 # Order matters when pushing: master first, and the tag only once that push
 # has been accepted. A rejected push (someone else got there first) then
@@ -112,6 +121,7 @@ if ($Push) {
     }
 }
 git tag -a "v$Version" -m "Kuvatin $Version"
+if ($LASTEXITCODE -ne 0) { throw "could not tag v$Version" }
 Write-Host "committed and tagged v$Version"
 
 if ($Push) {
