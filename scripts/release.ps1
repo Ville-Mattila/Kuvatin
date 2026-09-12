@@ -54,6 +54,21 @@ if (-not $SkipChecks) {
     }
 }
 
+# CHANGELOG.md is what the pipeline publishes as the release body. The
+# "Unreleased" section becomes this version's section, dated today; if there is
+# nothing under it, there is nothing to release.
+$log = 'CHANGELOG.md'
+$l = [IO.File]::ReadAllText((Resolve-Path $log))
+$today = (Get-Date).ToString('yyyy-MM-dd')
+$un = [regex]::Match($l, '(?ms)^## \[Unreleased\]\s*\n(.*?)(?=^## \[|\z)')
+if (-not $un.Success) { throw "no Unreleased section in $log" }
+if (-not $un.Groups[1].Value.Trim()) { throw "the Unreleased section in $log is empty - write the notes first" }
+$lNew = [regex]::Replace($l, '(?m)^## \[Unreleased\]\s*$', "## [Unreleased]`r`n`r`n## [$Version] - $today", 1)
+# ...and the link definitions at the bottom follow.
+$lNew = [regex]::Replace($lNew, '(?m)^\[Unreleased\]: (.*)compare/v[\d.]+\.\.\.HEAD\s*$',
+    "[Unreleased]: `$1compare/v$Version...HEAD`r`n[$Version]: `$1releases/tag/v$Version", 1)
+if ($lNew -eq $l) { throw "could not move the Unreleased section in $log" }
+
 $cargo = 'Cargo.toml'
 $page = 'docs/index.html'
 $c = [IO.File]::ReadAllText((Resolve-Path $cargo))
@@ -66,6 +81,7 @@ if ($pNew -eq $p) { throw "no softwareVersion found in $page" }
 $utf8 = New-Object Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Resolve-Path $cargo), $cNew, $utf8)
 [IO.File]::WriteAllText((Resolve-Path $page), $pNew, $utf8)
+[IO.File]::WriteAllText((Resolve-Path $log), $lNew, $utf8)
 
 # Cargo.lock carries the workspace version too. Run cargo through cmd: under
 # Windows PowerShell 5.1 a native command writing to stderr (cargo's
@@ -74,7 +90,7 @@ cmd /c "cargo update --workspace --offline >nul 2>nul"
 if ($LASTEXITCODE -ne 0) { cmd /c "cargo update --workspace >nul 2>nul" }
 if ($LASTEXITCODE -ne 0) { throw "cargo update failed" }
 
-git add Cargo.toml Cargo.lock docs/index.html
+git add Cargo.toml Cargo.lock docs/index.html CHANGELOG.md
 git commit -q -m "release: bump workspace version to $Version"
 
 # Order matters when pushing: master first, and the tag only once that push
