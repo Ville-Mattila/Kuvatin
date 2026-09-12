@@ -492,12 +492,39 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: kuvatin-windows-msi
           path: dist
 
+      # The release used to be published with an empty body and the notes
+      # pasted in by hand afterwards, so for a few minutes a release existed
+      # with nothing describing it. The notes come from the changelog instead,
+      # and a tag whose version has no section there fails here rather than
+      # publishing something blank.
+      - name: Release notes from the changelog
+        shell: bash
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v want="## [$ver]" '
+            index($0, want) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no section for $ver - write it before tagging" >&2
+            exit 1
+          fi
+          echo "release notes for $ver:"
+          cat release-notes.md
+
       - name: Attach to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
+          body_path: release-notes.md
