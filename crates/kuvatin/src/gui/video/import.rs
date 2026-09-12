@@ -197,6 +197,18 @@ pub(super) fn wire(
             let Some(mut spec) = pending_seq.borrow_mut().take() else {
                 return;
             };
+            // One conversion at a time. Confirming the dialog again mid-run
+            // used to start a second worker sharing this one's progress
+            // counters and cancel flag, and whichever finished first closed
+            // the dialog over the other.
+            if seq_active.get() {
+                show_error(
+                    &ui,
+                    "A sequence is already being converted",
+                    "Wait for the current import to finish, or cancel it, then import this one.",
+                );
+                return;
+            }
             spec.fps = ui.get_seq_fps().clamp(1, 240) as u32;
             let first = spec.first_path();
             if !import_q.seen.borrow_mut().insert(&first) {

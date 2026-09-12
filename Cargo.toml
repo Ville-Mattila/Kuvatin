@@ -19,3 +19,23 @@ thiserror = "1"
 anyhow = "1"
 directories = "5"
 clap = { version = "4", features = ["derive"] }
+
+# The shipped binaries. Measured on this workspace, cold builds:
+#
+#   default                    kuvatin.exe 25.76 MB   shellext 0.93 MB
+#   strip only                             25.83 MB            0.80 MB   4m09
+#   thin LTO + 1 codegen unit + strip      22.02 MB            0.74 MB   7m27
+#
+# `strip` alone buys nothing for the executable: this is an MSVC target, where
+# debug info lives in a separate .pdb rather than in the image. The 14% comes
+# from link-time optimisation and a single codegen unit, which also help at
+# run time; the extra few minutes are spent only on release builds.
+#
+# Unwinding stays on deliberately: the batch runner isolates a panicking file
+# into a per-file error and the context-menu handler catches panics at the COM
+# boundary, so `abort` would turn both of those into a dead process.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

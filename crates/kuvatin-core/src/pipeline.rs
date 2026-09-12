@@ -9,6 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+/// libimagequant speed. The scale runs 1 (most careful, closest to pngquant)
+/// to 10 (fastest), and every right-click "Compress PNG" run pays it.
+///
+/// 1 looks like the expensive choice and is not. Measured on a 1600x1200 noisy
+/// gradient, best of five runs in a release build, 1 was both the smallest
+/// output and the *quickest*: speed 5 took 18% longer, speed 3 took 57%
+/// longer, and no setting moved the output size by more than a third of a
+/// percent. Raising it would cost quality and buy nothing. Re-measure with the
+/// ignored `quantiser_speed_tradeoff` test before changing this.
+const QUANTISE_SPEED: i32 = 1;
+
 /// PNG size-optimization mode. Only affects `OutputFormat::Png` output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -235,6 +246,24 @@ fn quantize_png(
     quality: u8,
     meta: &Metadata,
 ) -> CoreResult<Option<Vec<u8>>> {
+    quantize_at_speed_with(rgba, quality, QUANTISE_SPEED, meta)
+}
+
+#[cfg(test)]
+fn quantize_at_speed(
+    rgba: &image::RgbaImage,
+    quality: u8,
+    speed: i32,
+) -> CoreResult<Option<Vec<u8>>> {
+    quantize_at_speed_with(rgba, quality, speed, &Metadata::default())
+}
+
+fn quantize_at_speed_with(
+    rgba: &image::RgbaImage,
+    quality: u8,
+    speed: i32,
+    meta: &Metadata,
+) -> CoreResult<Option<Vec<u8>>> {
     use rgb::FromSlice;
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     // The image crate's RGBA8 bytes ARE libimagequant's pixel layout — view
@@ -242,8 +271,7 @@ fn quantize_png(
     let pixels: &[imagequant::RGBA] = rgba.as_raw().as_rgba();
 
     let mut liq = imagequant::new();
-    // Best quantization quality (slowest) — closest to pngquant output.
-    liq.set_speed(1)
+    liq.set_speed(speed)
         .map_err(|e| CoreError::Encode(e.to_string()))?;
     // Map our 0-100 quality to a (min, max) target window. Higher quality raises
     // the floor so the quantizer is allowed fewer color compromises.
@@ -1301,6 +1329,60 @@ mod tests {
             "got {:?}",
             decoded.color()
         );
+    }
+
+    /// How the libimagequant speed setting was chosen. Not a correctness test:
+    /// run it with `cargo test -p kuvatin-core -- --ignored --nocapture
+    /// quantiser_speed` when retuning the default preset.
+    #[test]
+    #[ignore]
+    fn quantiser_speed_tradeoff() {
+        // Photo-like: a smooth gradient with noise, which is the hard case for
+        // a palette (flat screenshots quantise well at any speed).
+        let (w, h) = (1600u32, 1200u32);
+        let mut img = RgbaImage::new(w, h);
+        let mut seed = 0x9E3779B9u32;
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let n = ((seed >> 24) as i32 - 128) / 12;
+            let r = (x * 255 / w) as i32 + n;
+            let g = (y * 255 / h) as i32 + n;
+            let b = 255 - ((x + y) * 255 / (w + h)) as i32 + n;
+            *p = Rgba([
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                255,
+            ]);
+        }
+
+        // Best of several runs: a single timing on a working machine is noise,
+        // and an earlier pass made speed 4 look slower than speed 1.
+        const RUNS: usize = 5;
+        eprintln!("speed  bytes      vs speed 1   best of {RUNS} (s)   vs speed 1");
+        let mut baseline_bytes = 0usize;
+        let mut baseline_time = f64::MAX;
+        for speed in [1i32, 2, 3, 4, 5] {
+            let mut best = f64::MAX;
+            let mut bytes = Vec::new();
+            for _ in 0..RUNS {
+                let start = std::time::Instant::now();
+                bytes = quantize_at_speed(&img, 80, speed)
+                    .unwrap()
+                    .expect("quantised");
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            if speed == 1 {
+                baseline_bytes = bytes.len();
+                baseline_time = best;
+            }
+            eprintln!(
+                "{speed:>5}  {:>9}  {:>+9.2}%  {best:>14.3}  {:>+9.1}%",
+                bytes.len(),
+                (bytes.len() as f64 / baseline_bytes as f64 - 1.0) * 100.0,
+                (best / baseline_time - 1.0) * 100.0
+            );
+        }
     }
 
     /// A source with neither profile nor EXIF must not gain empty chunks.

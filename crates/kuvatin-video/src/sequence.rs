@@ -366,6 +366,11 @@ pub fn convert_exr_sequence(
             return Err(e).with_context(|| format!("publish {}", out_dir.display()));
         }
     }
+    // Reclaim here, not only at startup: converting several 4K sequences in
+    // one session (roughly 8 MB per frame) could pass the size limit with
+    // nothing tidying up until the next launch. The entry just published is
+    // the most recently used, so it is the last thing this would evict.
+    sweep_sequence_cache(CACHE_MAX_AGE, CACHE_MAX_BYTES);
     Ok(converted)
 }
 
