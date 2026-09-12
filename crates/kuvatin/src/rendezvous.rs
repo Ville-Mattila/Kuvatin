@@ -30,10 +30,13 @@ pub enum Role {
 }
 
 /// Arrivals must be quiet for this long before the leader closes the batch —
-/// once a SECOND arrival has shown up. A lone arrival only waits
-/// [`FIRST_ARRIVAL_GRACE`]: Explorer launches a burst within tens of
-/// milliseconds, so a single-file right-click shouldn't pay the full window.
+/// once a SECOND arrival has shown up. A lone arrival waits only as long as
+/// [`lone_grace`] says: Explorer launches its burst within tens of milliseconds
+/// on an idle machine, and a single-file right-click shouldn't pay the full
+/// window for that.
 pub const QUIET: Duration = Duration::from_millis(600);
+/// The floor on that wait — long enough for a sibling on a machine that is not
+/// busy, short enough not to be felt.
 const FIRST_ARRIVAL_GRACE: Duration = Duration::from_millis(250);
 /// A lock or spool entry older than this is debris from a crashed run.
 const STALE: Duration = Duration::from_secs(30);
@@ -43,6 +46,58 @@ const SPOOL_EXT: &str = "paths";
 
 /// Distinguishes spool entries written by the same process (threads in tests).
 static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// How long a lone arrival waits before concluding it really is alone.
+///
+/// Explorer launches one process per selected file, back to back, so the gap
+/// between arrivals is really the cost of starting this executable. On an idle
+/// machine that is tens of milliseconds and the fixed grace is plenty; on a
+/// loaded one it can be half a second, and a fixed 250 ms grace closes the
+/// batch before the second process has finished loading — two leaders, two
+/// progress windows, two collision namespaces, for what the user did as one
+/// selection.
+///
+/// `startup` is how long THIS process took to reach the rendezvous, which is
+/// the best available prediction of how long its siblings will take. Capped at
+/// [`QUIET`] so a pathological start cannot hold a single-file right-click for
+/// seconds.
+fn lone_grace(startup: Duration) -> Duration {
+    startup.clamp(FIRST_ARRIVAL_GRACE, QUIET)
+}
+
+/// How long this process has been alive, loader included. `Instant::now()` at
+/// the top of `main` would miss exactly the part that is slow under load: the
+/// image and its dependencies being paged in before `main` is reached.
+#[cfg(windows)]
+fn startup_elapsed() -> Duration {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    let hundred_ns = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    let (mut created, mut exit, mut kernel, mut user) = Default::default();
+    // SAFETY: four out-parameters we own; the pseudo-handle needs no closing.
+    let ok = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok.is_err() {
+        return Duration::ZERO;
+    }
+    let now = unsafe { GetSystemTimeAsFileTime() };
+    let ticks = hundred_ns(now).saturating_sub(hundred_ns(created));
+    Duration::from_nanos(ticks.saturating_mul(100))
+}
+
+#[cfg(not(windows))]
+fn startup_elapsed() -> Duration {
+    Duration::ZERO
+}
 
 /// Rendezvous with any sibling processes in `group` (e.g. one group per
 /// preset, so two different presets never merge). Never fails: if the
@@ -67,6 +122,7 @@ pub fn gather_in(root: &Path, group: &str, mine: &[PathBuf], quiet: Duration) ->
     let started = Instant::now();
     let mut last_change = Instant::now();
     let mut seen = spool_count(&dir);
+    let alone = lone_grace(startup_elapsed()).min(quiet);
     loop {
         std::thread::sleep(Duration::from_millis(40));
         let n = spool_count(&dir);
@@ -74,7 +130,7 @@ pub fn gather_in(root: &Path, group: &str, mine: &[PathBuf], quiet: Duration) ->
             seen = n;
             last_change = Instant::now();
         }
-        if seen <= 1 && started.elapsed() >= FIRST_ARRIVAL_GRACE.min(quiet) {
+        if seen <= 1 && started.elapsed() >= alone {
             break;
         }
         if last_change.elapsed() >= quiet {
@@ -288,6 +344,33 @@ fn claim(dir: &Path, claim_dir: &Path, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
 
+    /// The lone-arrival grace is the part that can split a selection in two:
+    /// wait too little and the second process becomes a second leader, with a
+    /// second progress window and a second collision namespace. The wait now
+    /// scales with how long THIS process took to start, which is the best
+    /// available measure of how long its siblings will take.
+    #[test]
+    fn a_quick_start_keeps_the_snappy_single_file_path() {
+        assert_eq!(lone_grace(Duration::from_millis(0)), FIRST_ARRIVAL_GRACE);
+        assert_eq!(lone_grace(Duration::from_millis(80)), FIRST_ARRIVAL_GRACE);
+    }
+
+    #[test]
+    fn a_slow_start_waits_longer_for_the_siblings() {
+        // Loaded machine: our own start took 400 ms, so theirs will too.
+        assert_eq!(
+            lone_grace(Duration::from_millis(400)),
+            Duration::from_millis(400)
+        );
+    }
+
+    #[test]
+    fn the_wait_never_exceeds_the_quiet_window() {
+        // A pathological start (paging, cold cache) must not hold a
+        // single-file right-click for seconds.
+        assert_eq!(lone_grace(Duration::from_secs(9)), QUIET);
+    }
+
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
     }
@@ -358,8 +441,11 @@ mod tests {
         );
         let took = t0.elapsed();
         assert_eq!(role, Role::Leader(vec![p("only.png")]));
+        // The lone wait is capped at QUIET however wide the caller's window is
+        // (this test process is old, so `lone_grace` returns the cap); the
+        // slack is the 40 ms poll plus whatever else the machine is doing.
         assert!(
-            took < Duration::from_millis(1200),
+            took < QUIET + Duration::from_millis(300),
             "waited {took:?} for a lone arrival"
         );
     }
