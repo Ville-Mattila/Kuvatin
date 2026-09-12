@@ -215,7 +215,8 @@ jobs:
             sequence:: previews_and_renders_an_image_sequence transport_and_edits_are_inert_while_rendering `
             export_settings_normalize_size_and_fps trim_math_never_goes_negative `
             stale_end_of_stream set_clip_duration_sets_and_clamps_a_still sets_canvas_size `
-            slid neighbour confined_to_the_gap already_overlapping discovery_gives_up
+            slid neighbour confined_to_the_gap already_overlapping discovery_gives_up `
+            without_blocking_the_caller
 
       # Fixtures for everything that needs real media. They live under the
       # workspace (a clean long path — the runner's %TEMP% is an 8.3 short path

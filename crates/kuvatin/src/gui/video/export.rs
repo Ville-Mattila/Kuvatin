@@ -8,14 +8,23 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+/// What the user is told once the preview is back and the modal closes.
+enum Ending {
+    /// The render finished: the file it wrote, and how long it took.
+    Done(PathBuf, Option<std::time::Duration>),
+    /// It failed, with the engine's reason.
+    Failed(String),
+}
+
 /// The running (or about-to-start) export.
 #[derive(Default)]
 pub(crate) struct ExportState {
     /// True while an export/render is running (pauses the preview timer, whose
     /// seeks/commits would corrupt the render).
     pub(super) active: Rc<Cell<bool>>,
-    /// True between "Export…" and the deferred `begin_render` (one tick
-    /// later, so the modal paints before the engine blocks the UI thread).
+    /// True while the pipeline is TRANSITIONING for an export: tearing the
+    /// preview down before a render, or bringing it back after one. The
+    /// preview timer must not touch the pipeline in either window.
     pub(super) pending: Rc<Cell<bool>>,
     /// The output path of the running export, so Cancel/failure can delete
     /// the partial file.
@@ -23,6 +32,13 @@ pub(crate) struct ExportState {
     /// When the render actually started, for the elapsed/remaining line and
     /// the "took 2:14" in the finished dialog.
     pub(super) started: Rc<Cell<Option<std::time::Instant>>>,
+    /// A render waiting for the preview teardown to finish; the progress timer
+    /// starts it once the pipeline has settled.
+    starting: Rc<RefCell<Option<(PathBuf, kuvatin_video::ExportSettings)>>>,
+    /// The preview is coming back (after a finish, a failure or a cancel).
+    finishing: Rc<Cell<bool>>,
+    /// What to say when it is back. None after a cancel: nothing to report.
+    ending: Rc<RefCell<Option<Ending>>>,
 }
 
 /// "1:15", "59:59", "1:01:01" — no leading zero on the first field, so short
@@ -71,13 +87,16 @@ pub(super) fn wire(
     let export_pending = &ex.pending;
     let export_path = &ex.path;
     let export_started = &ex.started;
+    let export_starting = &ex.starting;
+    let export_finishing = &ex.finishing;
+    let export_ending = &ex.ending;
     {
         let ui_weak = ui_weak.clone();
         let project_slot = project_slot.clone();
         let export_active = export_active.clone();
         let export_pending = export_pending.clone();
         let export_path = export_path.clone();
-        let export_started = export_started.clone();
+        let export_starting = export_starting.clone();
         ui.on_video_export(move || {
             if export_active.get() || export_pending.get() {
                 return;
@@ -120,51 +139,30 @@ pub(super) fn wire(
             else {
                 return;
             };
-            // Show the modal NOW and start the render on the next tick:
-            // begin_render tears the preview down and waits for NULL (up
-            // to 3 s) on this thread, which used to freeze the window with
-            // no feedback before anything appeared.
+            // Tearing the preview down has to finish before the render can
+            // take the pipeline over (the GPU context is not released
+            // synchronously), but waiting for it here would freeze the window
+            // for up to three seconds with the modal already on screen. Ask
+            // for the teardown, show the modal, and let the progress timer
+            // start the render when the pipeline has settled.
             *export_path.borrow_mut() = Some(path.clone());
-            export_pending.set(true);
-            ui.set_exporting(true);
-            ui.set_export_progress(0.0);
-            ui.set_export_status("Starting\u{2026}".into());
-            let ui_weak = ui_weak.clone();
-            let project_slot = project_slot.clone();
-            let export_active = export_active.clone();
-            let export_pending = export_pending.clone();
-            let export_path = export_path.clone();
-            let export_started = export_started.clone();
-            slint::Timer::single_shot(std::time::Duration::from_millis(60), move || {
-                if !export_pending.get() {
-                    return; // cancelled before it started
+            let prepared = project_slot.borrow().as_ref().map(|p| p.prepare_render());
+            match prepared {
+                Some(Ok(())) => {
+                    export_pending.set(true);
+                    *export_starting.borrow_mut() = Some((path, settings));
+                    ui.set_exporting(true);
+                    ui.set_export_progress(0.0);
+                    ui.set_export_status("Starting\u{2026}".into());
                 }
-                export_pending.set(false);
-                let result = project_slot
-                    .borrow()
-                    .as_ref()
-                    .map(|p| p.begin_render(&path, settings));
-                match result {
-                    Some(Ok(())) => {
-                        export_started.set(Some(std::time::Instant::now()));
-                        export_active.set(true);
-                    }
-                    Some(Err(e)) => {
-                        let _ = std::fs::remove_file(&path);
-                        export_path.borrow_mut().take();
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_exporting(false);
-                            show_error(&ui, "Export failed to start", e.to_string());
-                        }
-                    }
-                    None => {
-                        export_path.borrow_mut().take();
-                        if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_exporting(false);
-                        }
-                    }
+                Some(Err(e)) => {
+                    export_path.borrow_mut().take();
+                    show_error(&ui, "Export failed to start", e.to_string());
                 }
-            });
+                None => {
+                    export_path.borrow_mut().take();
+                }
+            }
         });
     }
 
@@ -177,27 +175,34 @@ pub(super) fn wire(
         let export_pending = export_pending.clone();
         let export_path = export_path.clone();
         let export_started = export_started.clone();
+        let export_starting = export_starting.clone();
+        let export_finishing = export_finishing.clone();
+        let export_ending = export_ending.clone();
         ui.on_export_cancel(move || {
-            if export_pending.get() {
-                // Not started yet: the deferred start sees the flag and bails.
-                export_pending.set(false);
-                export_path.borrow_mut().take();
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_exporting(false);
-                }
+            // Nothing to cancel once the preview is already coming back.
+            if export_finishing.get() {
                 return;
             }
-            if !export_active.get() {
+            let waiting_to_start = export_starting.borrow_mut().take().is_some();
+            if !waiting_to_start && !export_active.get() {
                 return;
             }
             let path = export_path.borrow_mut().take();
             export_started.take();
-            if let (Some(p), Some(path)) = (project_slot.borrow().as_ref(), path) {
-                let _ = p.cancel_render(&path, true);
-            }
             export_active.set(false);
+            // The partial file is discarded, so there is no muxer to wait for:
+            // stop, delete, and bring the preview back on the timer.
+            if let Some(p) = project_slot.borrow().as_ref() {
+                let _ = p.begin_restore();
+            }
+            if let Some(path) = path {
+                let _ = std::fs::remove_file(path);
+            }
+            export_ending.borrow_mut().take();
+            export_finishing.set(true);
+            export_pending.set(true);
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_exporting(false);
+                ui.set_export_status("Cancelling\u{2026}".into());
             }
         });
     }
@@ -207,8 +212,12 @@ pub(super) fn wire(
         let ui_weak = ui_weak.clone();
         let project_slot = project_slot.clone();
         let export_active = export_active.clone();
+        let export_pending = export_pending.clone();
         let export_path = export_path.clone();
         let export_started = export_started.clone();
+        let export_starting = export_starting.clone();
+        let export_finishing = export_finishing.clone();
+        let export_ending = export_ending.clone();
         // Watchdog: if progress hasn't advanced for this many ticks (200ms
         // each → 20s), tell the user the render looks stuck (Cancel is right
         // there). Some pipeline stalls never post EOS/Error. The baseline
@@ -220,13 +229,75 @@ pub(super) fn wire(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(200),
             move || {
-                if !export_active.get() {
-                    return;
-                }
                 let slot = project_slot.borrow();
                 let Some(p) = slot.as_ref() else {
                     return;
                 };
+
+                // Phase one: the preview is being torn down. Start the render
+                // the moment the pipeline has settled, and not before — this
+                // is the wait that used to freeze the window.
+                let waiting = export_starting.borrow().clone();
+                if let Some((path, settings)) = waiting {
+                    if p.render_ready() == kuvatin_video::Step::Pending {
+                        return;
+                    }
+                    export_starting.borrow_mut().take();
+                    match p.start_render(&path, settings) {
+                        Ok(()) => {
+                            export_started.set(Some(std::time::Instant::now()));
+                            export_pending.set(false);
+                            export_active.set(true);
+                        }
+                        Err(e) => {
+                            drop(slot);
+                            let _ = std::fs::remove_file(&path);
+                            export_path.borrow_mut().take();
+                            export_pending.set(false);
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_exporting(false);
+                                show_error(&ui, "Export failed to start", e.to_string());
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Phase three: the preview is coming back. The modal stays up
+                // (saying so) until it has, because the timeline is inert
+                // until then — a click that did nothing would be worse.
+                if export_finishing.get() {
+                    if p.restore_ready() == kuvatin_video::Step::Pending {
+                        return;
+                    }
+                    drop(slot);
+                    export_finishing.set(false);
+                    export_pending.set(false);
+                    stall.set((0.0, 0));
+                    let ending = export_ending.borrow_mut().take();
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_exporting(false);
+                        match ending {
+                            // The dialog used to just vanish, leaving no sign
+                            // that anything had been written, or where.
+                            Some(Ending::Done(path, took)) => {
+                                let mut detail = path.display().to_string();
+                                if let Some(t) = took {
+                                    detail.push_str(&format!("\n\nTook {}", clock(t)));
+                                }
+                                show_info_at(&ui, "Export finished", detail, &path);
+                            }
+                            Some(Ending::Failed(e)) => show_error(&ui, "Export failed", e),
+                            None => {}
+                        }
+                    }
+                    return;
+                }
+
+                // Phase two: rendering.
+                if !export_active.get() {
+                    return;
+                }
                 match p.render_status() {
                     kuvatin_video::RenderStatus::Rendering(f) => {
                         let (last, ticks) = stall.get();
@@ -248,55 +319,40 @@ pub(super) fn wire(
                     kuvatin_video::RenderStatus::Done => {
                         // A preview that fails to come back is otherwise a
                         // silently black viewer for the rest of the session.
-                        if let Err(e) = p.end_render() {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                show_error(&ui, "Preview could not be restored", e.to_string());
-                            }
-                        }
+                        let restore = p.begin_restore();
                         drop(slot);
                         export_active.set(false);
+                        export_pending.set(true);
+                        export_finishing.set(true);
                         let done = export_path.borrow_mut().take();
                         let took = export_started.take().map(|t| t.elapsed());
-                        stall.set((0.0, 0));
+                        *export_ending.borrow_mut() = match (restore, done) {
+                            (Err(e), _) => Some(Ending::Failed(format!(
+                                "The file is written, but the preview could not be restored: {e}"
+                            ))),
+                            (Ok(()), Some(path)) => Some(Ending::Done(path, took)),
+                            (Ok(()), None) => None,
+                        };
                         if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_exporting(false);
-                            // The dialog used to just vanish, leaving no sign
-                            // that anything had been written, or where.
-                            if let Some(path) = done {
-                                let mut detail = path.display().to_string();
-                                if let Some(t) = took {
-                                    detail.push_str(&format!(
-                                        "
-
-Took {}",
-                                        clock(t)
-                                    ));
-                                }
-                                show_info_at(&ui, "Export finished", detail, &path);
-                            }
+                            ui.set_export_progress(1.0);
+                            ui.set_export_status("Finishing\u{2026}".into());
                         }
                     }
                     kuvatin_video::RenderStatus::Failed(e) => {
-                        if let Err(restore) = p.end_render() {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                show_error(
-                                    &ui,
-                                    "Preview could not be restored",
-                                    restore.to_string(),
-                                );
-                            }
-                        }
+                        let _ = p.begin_restore();
                         drop(slot);
                         export_active.set(false);
+                        export_pending.set(true);
+                        export_finishing.set(true);
                         export_started.take();
-                        stall.set((0.0, 0));
-                        // Delete the truncated output and show the real reason.
+                        // Delete the truncated output; the reason waits for
+                        // the preview so there is only ever one dialog.
                         if let Some(path) = export_path.borrow_mut().take() {
                             let _ = std::fs::remove_file(path);
                         }
+                        *export_ending.borrow_mut() = Some(Ending::Failed(e));
                         if let Some(ui) = ui_weak.upgrade() {
-                            ui.set_exporting(false);
-                            show_error(&ui, "Export failed", e);
+                            ui.set_export_status("Finishing\u{2026}".into());
                         }
                     }
                 }

@@ -306,6 +306,27 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     }
 }
 
+/// Where a two-step pipeline operation has got to. `Pending` means the state
+/// change is still running; the caller should look again on its next tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Pending,
+    Ready,
+}
+
+/// Ask the pipeline for its state with no wait at all. A timed-out state
+/// change reports as `Async`, which is exactly "not there yet"; a failed one
+/// reports as an error, and there is nothing to wait for then either.
+fn settled(pipeline: &ges::Pipeline) -> Step {
+    match pipeline.state(gst::ClockTime::ZERO).0 {
+        Ok(gst::StateChangeSuccess::Success) | Ok(gst::StateChangeSuccess::NoPreroll) => {
+            Step::Ready
+        }
+        Err(_) => Step::Ready,
+        _ => Step::Pending,
+    }
+}
+
 /// Fixed composited canvas size. Pinning it gives the inspector's position/scale
 /// controls a known frame to work against.
 pub const CANVAS_W: i32 = 1280;
@@ -1186,32 +1207,12 @@ impl Project {
     }
 
     pub fn begin_render(&self, path: &Path, settings: ExportSettings) -> Result<()> {
-        // Fully tear the preview down and WAIT for NULL before switching to render
-        // mode. Coming straight from a playing preview, the GPU/CUDA context is not
-        // released synchronously, so the NVENC encoder fails gst_nv_encoder_init_
-        // session ("Could not encode stream" → 0-byte file). Waiting for the NULL
-        // transition to complete releases it.
-        self.pipeline.set_state(gst::State::Null)?;
+        // The blocking form of prepare_render + start_render, for callers with
+        // no event loop to poll from (the tests, and the headless sequence
+        // render). The interface uses the two-step form.
+        self.prepare_render()?;
         let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
-        // Drop the custom preview sink so render mode can route to encodebin.
-        self.pipeline.preview_set_video_sink(None::<&gst::Element>);
-        // Start from a clean bus: anything the preview or the teardown left
-        // queued would otherwise be read as this render's result.
-        self.flush_bus();
-        // From here until end_render, transport and edits are inert.
-        self.rendering.set(true);
-        let attempt = (|| -> Result<()> {
-            let uri = gst::glib::filename_to_uri(path, None)?;
-            let profile = encoding_profile(settings);
-            self.pipeline.set_render_settings(uri.as_str(), &profile)?;
-            self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
-            self.pipeline.set_state(gst::State::Playing)?;
-            Ok(())
-        })();
-        if attempt.is_err() {
-            let _ = self.end_render();
-        }
-        attempt
+        self.start_render(path, settings)
     }
 
     /// Abort a running render as gracefully as possible: send EOS so the muxer
@@ -1237,6 +1238,74 @@ impl Project {
             let _ = std::fs::remove_file(output);
         }
         restore
+    }
+
+    /// Step one of starting a render: tear the preview down and ask the
+    /// pipeline for NULL, then RETURN. Coming straight from a playing preview
+    /// the GPU/CUDA context is not released synchronously, so NVENC fails its
+    /// session init ("Could not encode stream" → a 0-byte file) unless the NULL
+    /// transition has completed — but waiting for it blocks the caller, and
+    /// the caller is the interface thread. Poll [`render_ready`](Self::render_ready)
+    /// from a timer instead, then call [`start_render`](Self::start_render).
+    ///
+    /// Transport and edits are inert from here until the preview is restored.
+    pub fn prepare_render(&self) -> Result<()> {
+        self.pipeline.set_state(gst::State::Null)?;
+        self.rendering.set(true);
+        Ok(())
+    }
+
+    /// Has the teardown from [`prepare_render`](Self::prepare_render) finished?
+    pub fn render_ready(&self) -> Step {
+        settled(&self.pipeline)
+    }
+
+    /// Step two: route the timeline to the encoder and roll. Only call this
+    /// once [`render_ready`](Self::render_ready) is `Ready`.
+    pub fn start_render(&self, path: &Path, settings: ExportSettings) -> Result<()> {
+        // Drop the custom preview sink so render mode can route to encodebin.
+        self.pipeline.preview_set_video_sink(None::<&gst::Element>);
+        // Start from a clean bus: anything the preview or the teardown left
+        // queued would otherwise be read as this render's result.
+        self.flush_bus();
+        self.rendering.set(true);
+        let attempt = (|| -> Result<()> {
+            let uri = gst::glib::filename_to_uri(path, None)?;
+            let profile = encoding_profile(settings);
+            self.pipeline.set_render_settings(uri.as_str(), &profile)?;
+            self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
+            self.pipeline.set_state(gst::State::Playing)?;
+            Ok(())
+        })();
+        if attempt.is_err() {
+            let _ = self.end_render();
+        }
+        attempt
+    }
+
+    /// Start restoring the live preview and RETURN; poll
+    /// [`restore_ready`](Self::restore_ready) for when it has prerolled. Until
+    /// it has, transport and edits stay inert: an edit landing while the
+    /// composition is mid-transition made GES dereference a freed source asset
+    /// (STATUS_ACCESS_VIOLATION).
+    pub fn begin_restore(&self) -> Result<()> {
+        self.pipeline.set_state(gst::State::Null)?;
+        self.pipeline
+            .preview_set_video_sink(Some(self.appsink.upcast_ref::<gst::Element>()));
+        self.pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
+        self.pipeline.set_state(gst::State::Paused)?;
+        Ok(())
+    }
+
+    /// Has the preview prerolled? Hands the timeline back (transport and edits
+    /// live again) the first time it says `Ready`.
+    pub fn restore_ready(&self) -> Step {
+        let step = settled(&self.pipeline);
+        if step == Step::Ready && self.rendering.get() {
+            self.rendering.set(false);
+            self.dirty.set(true);
+        }
+        step
     }
 
     /// Poll render progress — drive this from a UI timer. Consumes EOS/ERROR bus
@@ -1271,15 +1340,9 @@ impl Project {
 
     /// Stop rendering and restore the live preview (re-attaching the appsink).
     pub fn end_render(&self) -> Result<()> {
-        self.pipeline.set_state(gst::State::Null)?;
-        self.pipeline
-            .preview_set_video_sink(Some(self.appsink.upcast_ref::<gst::Element>()));
-        self.pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
-        self.pipeline.set_state(gst::State::Paused)?;
-        // Wait for the preview to actually preroll before handing the timeline
-        // back: an edit (a Delete keypress right after an export) landing while
-        // the composition is still mid-transition made GES dereference a freed
-        // source asset (STATUS_ACCESS_VIOLATION). Edits stay inert until then.
+        // The blocking form of begin_restore + restore_ready, for callers with
+        // no event loop to poll from.
+        self.begin_restore()?;
         let _ = self.pipeline.state(gst::ClockTime::from_seconds(5));
         self.rendering.set(false);
         self.dirty.set(true);
@@ -1403,6 +1466,76 @@ mod tests {
     }
 
     /// remove_clip deletes from GES + the map, prunes empty trailing layers,
+    /// Both ends of an export used to freeze the window for seconds: starting
+    /// waits for the preview pipeline to reach NULL (the NVENC context is not
+    /// released synchronously) and finishing waits for the preview to preroll
+    /// again, and both waits ran on whichever thread called them — the
+    /// interface thread. Each is now a step plus a poll, so the caller can wait
+    /// from a timer and stay responsive. Needs only GStreamer: the still is
+    /// generated here.
+    #[test]
+    fn a_render_starts_and_finishes_without_blocking_the_caller() {
+        let dir = scratch("two-step");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(160, 120, image::Rgba([40, 160, 200, 255]))
+            .save(&png)
+            .expect("write still");
+        let out = dir.join("out.mp4");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let info = project.append_clip(&png, 0, None).expect("append still");
+        project.set_clip_duration(&info.id, 1.0).expect("1 s still");
+
+        // Step one returns at once; the poll says when the teardown is done.
+        project.prepare_render().expect("prepare");
+        let settled = |what: &str, poll: &dyn Fn() -> Step| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while poll() == Step::Pending && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(poll(), Step::Ready, "{what} never settled");
+        };
+        settled("the teardown", &|| project.render_ready());
+
+        project
+            .start_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 320,
+                    height: 240,
+                    fps: 24,
+                    bitrate_kbps: 2000,
+                },
+            )
+            .expect("start_render");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match project.render_status() {
+                RenderStatus::Done => break,
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "render never finished"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+
+        // ...and the preview comes back the same way.
+        project.begin_restore().expect("begin_restore");
+        settled("the preview", &|| project.restore_ready());
+        assert!(
+            out.metadata().map(|m| m.len()).unwrap_or(0) > 1000,
+            "the render wrote nothing usable"
+        );
+        // The timeline is live again: transport works and edits are accepted.
+        project.play().expect("play after restore");
+        project.pause().expect("pause after restore");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A still's length is a free choice: `set_clip_duration` applies it
     /// exactly, clamps a silly value up to the trim minimum, and reports
     /// what it applied. Needs only GStreamer (the still is generated here).

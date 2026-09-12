@@ -11,10 +11,18 @@ updates:
       interval: weekly
     open-pull-requests-limit: 3
     groups:
+      # The GStreamer bindings are one stack and must move together: the first
+      # weekly run without this opened three separate pull requests taking
+      # gstreamer, gstreamer-app and gstreamer-editing-services from 0.23 to
+      # 0.25 one at a time, each of which cannot build without the others.
+      # Their version also has to suit the bundled 1.26 SDK, so this is a
+      # deliberate port, not a bump to merge on green.
+      gstreamer:
+        patterns: ["gstreamer*"]
       cargo-minor:
         update-types: ["minor", "patch"]
-      # Majors stay separate — they are read one at a time — but they share
-      # the limit above.
+      # Other majors stay separate — they are read one at a time — but they
+      # share the limit above.
   # The SHA-pinned actions in .github/workflows.
   - package-ecosystem: github-actions
     directory: /

@@ -43,6 +43,10 @@ something is fixed.
 - `scripts/release.ps1` runs format, lint and tests before it commits or tags.
 
 ### Fixed
+- Starting and finishing an export no longer freeze the window for seconds.
+  Both ends wait for a pipeline transition, and both waits used to run on the
+  interface thread; they are now polled from the progress modal, which says
+  "Starting…" and "Finishing…" while it waits.
 - A dragged clip can no longer be buried under another on the same layer: it
   stops against its neighbour instead of hiding it.
 - A large Explorer selection on a loaded machine no longer splits into two
