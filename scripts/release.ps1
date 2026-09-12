@@ -9,6 +9,12 @@
 
     scripts\release.ps1 2.8.0          # bump + commit + tag, print the push
     scripts\release.ps1 2.8.0 -Push    # ...and push master + the tag
+    scripts\release.ps1 2.8.0 -SkipChecks   # re-run after fixing a failed gate
+
+  The same format, lint and test gates CI runs happen FIRST, before anything
+  is committed or tagged: a tag CI is going to reject is better caught here,
+  where nothing has been written yet. (The video suite needs GStreamer on
+  PATH and is left to CI.)
 
   Pushing the tag starts the release pipeline (tests, MSI, install test,
   publish). Release notes: `gh release edit v2.8.0 --notes-file notes.md`
@@ -19,7 +25,10 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string] $Version,
-    [switch] $Push
+    [switch] $Push,
+    # Skip the local gates. For re-running after a gate failed and was fixed
+    # by hand — not for skipping the gates.
+    [switch] $SkipChecks
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +38,21 @@ Set-Location $root
 if ((git rev-parse --abbrev-ref HEAD) -ne 'master') { throw 'release from master' }
 if (git status --porcelain) { throw 'working tree is not clean' }
 if (git tag -l "v$Version") { throw "tag v$Version already exists" }
+
+# The gates, before the tree is touched. A failure here costs a few minutes;
+# a failure after the tag is pushed costs a version number.
+if (-not $SkipChecks) {
+    $gates = @(
+        @{ What = 'format'; Args = @('fmt', '--all', '--check') },
+        @{ What = 'clippy'; Args = @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings') },
+        @{ What = 'tests';  Args = @('test', '-p', 'kuvatin-core', '-p', 'kuvatin', '--release') }
+    )
+    foreach ($gate in $gates) {
+        Write-Host "gate: $($gate.What)"
+        & cargo $gate.Args
+        if ($LASTEXITCODE -ne 0) { throw "$($gate.What) failed - not tagging" }
+    }
+}
 
 $cargo = 'Cargo.toml'
 $page = 'docs/index.html'
@@ -52,12 +76,23 @@ if ($LASTEXITCODE -ne 0) { throw "cargo update failed" }
 
 git add Cargo.toml Cargo.lock docs/index.html
 git commit -q -m "release: bump workspace version to $Version"
+
+# Order matters when pushing: master first, and the tag only once that push
+# has been accepted. A rejected push (someone else got there first) then
+# leaves an ordinary local commit to rebase, rather than a tag pointing at a
+# commit the remote has never seen.
+if ($Push) {
+    git push origin master
+    if ($LASTEXITCODE -ne 0) {
+        throw "push rejected - the bump is committed locally; rebase, then re-run with -SkipChecks"
+    }
+}
 git tag -a "v$Version" -m "Kuvatin $Version"
 Write-Host "committed and tagged v$Version"
 
 if ($Push) {
-    git push origin master
     git push origin "v$Version"
+    if ($LASTEXITCODE -ne 0) { throw "the tag did not push; retry: git push origin v$Version" }
     Write-Host "pushed; the release run is starting: gh run watch"
 } else {
     Write-Host "to publish:  git push origin master; git push origin v$Version"

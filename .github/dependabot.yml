@@ -2,15 +2,31 @@ version: 2
 updates:
   # Cargo dependencies: one weekly PR batch (RUSTSEC advisories are caught
   # by cargo-deny on every master run; this keeps the tree from ageing).
+  # The limit is the point of the grouping: without one, a quiet month of
+  # crates.io activity can open ten pull requests against a one-person
+  # project, each of which wants a full 40-minute Windows run.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
     groups:
       cargo-minor:
         update-types: ["minor", "patch"]
+      # Majors stay separate — they are read one at a time — but they share
+      # the limit above.
   # The SHA-pinned actions in .github/workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        update-types: ["minor", "patch"]
+
+# Not covered here, and not coverable: the GStreamer runtime and devel MSIs
+# and the WiX 3 binaries are direct downloads pinned by SHA-256 in
+# .github/workflows/release.yml. Dependabot has no ecosystem for those, so
+# bumping them is a manual edit — change the version, download, recompute the
+# hash with Get-FileHash, and let a packaging run prove it.
