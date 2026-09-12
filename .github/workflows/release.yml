@@ -217,16 +217,14 @@ jobs:
             stale_end_of_stream set_clip_duration_sets_and_clamps_a_still sets_canvas_size `
             slid neighbour confined_to_the_gap already_overlapping discovery_gives_up
 
-      # The live-media tests (fixture webm + png) are environment-sensitive on
-      # the hosted runner (asset-URI resolution in particular), so they run for
-      # signal but do NOT block. Fixtures live under the workspace (a clean long
-      # path — the runner's %TEMP% is an 8.3 short path GStreamer's URI opener
-      # can choke on).
-      - name: Test (video integration — advisory, live media)
+      # Fixtures for everything that needs real media. They live under the
+      # workspace (a clean long path — the runner's %TEMP% is an 8.3 short path
+      # GStreamer's URI opener can choke on) and are built by a blocking step:
+      # if they cannot be made, the steps that depend on them are not measuring
+      # anything.
+      - name: Build the live-media fixtures
         shell: pwsh
-        continue-on-error: true
         run: |
-          $env:RUST_BACKTRACE = "1"
           $fixdir = Join-Path $env:GITHUB_WORKSPACE "target\test-fixtures"
           New-Item -ItemType Directory -Force -Path $fixdir | Out-Null
           $fx = Join-Path $fixdir "fixture_av.webm"
@@ -238,8 +236,38 @@ jobs:
           gst-launch-1.0 videotestsrc num-buffers=1 ! "video/x-raw,width=320,height=180" ! pngenc ! filesink location="$imgl"
           if (-not (Test-Path $fx) -or (Get-Item $fx).Length -eq 0) { throw "fixture webm not created at $fx" }
           if (-not (Test-Path $img) -or (Get-Item $img).Length -eq 0) { throw "fixture png not created at $img" }
-          $env:GST_TEST_FILE = $fx
-          $env:GST_TEST_IMAGE = $img
+          "GST_TEST_FILE=$fx" | Out-File $env:GITHUB_ENV -Append
+          "GST_TEST_IMAGE=$img" | Out-File $env:GITHUB_ENV -Append
+
+      # Two regressions that only real media can catch, and both shipped once:
+      # an export that came back instantly as a zero-byte file (a stale
+      # end-of-stream from the preview was read as the render's result), and a
+      # gapped overlay timeline that rendered something no player would open.
+      # They used to sit inside the advisory step, where a failure was a line
+      # in a log nobody reads. One retry before it counts, because asset-URI
+      # resolution on the hosted runner is occasionally flaky — a second
+      # failure in a row is the code, not the runner.
+      - name: Test (export regressions, live media — gates the release)
+        shell: pwsh
+        run: |
+          $env:RUST_BACKTRACE = "1"
+          $names = @("renders_after_preview_eos", "renders_gapped_overlay_timeline")
+          foreach ($attempt in 1..2) {
+            cargo test -p kuvatin-video --release -- --test-threads=1 --exact `
+              project::tests::renders_after_preview_eos `
+              project::tests::renders_gapped_overlay_timeline
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 2) { throw "the export regressions failed twice: $($names -join ', ')" }
+            Write-Host "::warning::live-media export regressions failed once; retrying"
+          }
+
+      # The rest of the live-media suite is environment-sensitive on the hosted
+      # runner, so it runs for signal but does NOT block.
+      - name: Test (video integration — advisory, live media)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $env:RUST_BACKTRACE = "1"
           cargo test -p kuvatin-video --release -- --test-threads=1
 
       # The headline export path, end to end, with the shipped binary: generate
