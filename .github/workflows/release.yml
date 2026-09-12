@@ -61,8 +61,41 @@ jobs:
   build:
     name: Build, test, package
     runs-on: windows-latest
+    # The video suite drives real media pipelines, which have deadlocked when
+    # run concurrently; without a cap one hang would burn the six-hour default.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # Full history so a pull request can be diffed against its base to
+          # decide whether the installer needs building (see the next step).
+          fetch-depth: 0
+
+      # The installer, the menu package and their custom actions used to be
+      # built on a tag and nowhere else, so a mistake in any of them surfaced
+      # only after the tag was pushed — three consecutive releases broke that
+      # way. A pull request touching them now packages too. Secrets are not
+      # exposed to pull requests, so that package is unsigned; the install test
+      # already treats signing as optional and skips the registration check.
+      - name: Package on pull requests that touch the installer
+        if: github.event_name == 'pull_request'
+        shell: pwsh
+        run: |
+          $watched = @(
+            'crates/kuvatin/wix/',
+            'crates/kuvatin/msix/',
+            'crates/kuvatin-shellext/',
+            'crates/kuvatin/src/shell/',
+            '.github/workflows/release.yml'
+          )
+          $changed = git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD"
+          $hits = $changed | Where-Object { $file = $_; ($watched | Where-Object { $file.StartsWith($_) }).Count -gt 0 }
+          if ($hits) {
+            Write-Host "installer touched, packaging this run:`n  $($hits -join "`n  ")"
+            'PACKAGE=true' | Out-File $env:GITHUB_ENV -Append
+          } else {
+            Write-Host 'no installer changes in this pull request; package steps stay off'
+          }
 
       # The version comes from rust-toolchain.toml; the action only makes sure
       # rustup + the components are present.
@@ -244,11 +277,19 @@ jobs:
             $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfx, $env:SIGN_PFX_PASSWORD)
             & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix -Publisher $cert.Subject
             $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object { [version]($_.Directory.Parent.Name) } | Select-Object -Last 1
-            & $signtool.FullName sign /fd SHA256 /f $pfx /p $env:SIGN_PFX_PASSWORD $msix
-            if ($LASTEXITCODE -ne 0) { throw "signtool exited $LASTEXITCODE" }
+            try {
+              # /tr countersigns with a trusted time. Without it the signature
+              # dies with the certificate, and every installer already shipped
+              # would stop registering the menu on that day.
+              & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $pfx /p $env:SIGN_PFX_PASSWORD $msix
+              if ($LASTEXITCODE -ne 0) { throw "signtool exited $LASTEXITCODE" }
+            } finally {
+              # Never leave the decoded private key on the runner, not even
+              # when signing threw.
+              Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+            }
             $cer = "$env:GITHUB_WORKSPACE\target\msix\kuvatin-signing.cer"
             Export-Certificate -Cert $cert -FilePath $cer | Out-Null
-            Remove-Item $pfx -Force
             $thumb = $cert.Thumbprint
             Write-Host "package signed as $($cert.Subject) ($thumb)"
             'SIGNED=true' | Out-File $env:GITHUB_ENV -Append
@@ -376,6 +417,7 @@ jobs:
   publish:
     name: Publish release assets
     needs: build
+    timeout-minutes: 20
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
