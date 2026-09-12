@@ -377,6 +377,38 @@ pub fn decode_oriented(input: &Path) -> CoreResult<DynamicImage> {
 /// "normal" first: the rotation is already applied to the pixels here, and a
 /// viewer honouring the original tag would rotate a second time.
 pub fn decode_with_metadata(input: &Path) -> CoreResult<(DynamicImage, Metadata)> {
+    decode_within(input, decode_limits())
+}
+
+/// Bytes a single decode may allocate. A corrupt or hostile header can claim
+/// any size it likes, and the decoder believes it: without a ceiling, one bad
+/// file takes the whole process down with an allocation failure, which does
+/// not unwind and so cannot be reported as a per-file error.
+///
+/// 1 GiB is four times the `image` crate's own default and leaves room for the
+/// largest sensible input (a 256-megapixel RGBA8 frame) while staying well
+/// under what a desktop can hand out. It pairs with
+/// [`crate::resize::MAX_TARGET_PIXELS`], which keeps the *output* of a resize
+/// inside the same budget.
+pub const MAX_DECODE_BYTES: u64 = 1 << 30;
+
+/// Per-side ceiling. Above this, no real format's tooling is interoperable and
+/// the dimensions are almost certainly a corrupt header.
+pub const MAX_DECODE_DIM: u32 = 65_535;
+
+/// The limits every decode in the app runs under.
+fn decode_limits() -> image::Limits {
+    let mut l = image::Limits::no_limits();
+    l.max_image_width = Some(MAX_DECODE_DIM);
+    l.max_image_height = Some(MAX_DECODE_DIM);
+    l.max_alloc = Some(MAX_DECODE_BYTES);
+    l
+}
+
+/// [`decode_with_metadata`] under caller-supplied limits — the seam the tests
+/// use to prove both decode paths, the ordinary one and the GIF one, are
+/// actually bounded.
+fn decode_within(input: &Path, limits: image::Limits) -> CoreResult<(DynamicImage, Metadata)> {
     let decode_err = |e: image::ImageError| CoreError::Decode {
         path: input.to_path_buf(),
         source: e,
@@ -385,18 +417,22 @@ pub fn decode_with_metadata(input: &Path) -> CoreResult<(DynamicImage, Metadata)
         path: input.to_path_buf(),
         source: e,
     };
-    let reader = image::ImageReader::open(input)
+    let mut reader = image::ImageReader::open(input)
         .map_err(io_err)?
         .with_guessed_format()
         .map_err(io_err)?;
+    reader.limits(limits.clone());
     // Animated GIF: converting would silently drop every frame after the
     // first — refuse with a clear message instead. (Animation support is a
     // separate feature, not a side effect.) A still GIF is returned from the
     // same decoder pass — it used to be decoded a second time below.
     if reader.format() == Some(image::ImageFormat::Gif) {
         let file = std::fs::File::open(input).map_err(io_err)?;
-        let gif = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file))
+        let mut gif = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file))
             .map_err(decode_err)?;
+        // The frame decoder is built here rather than by the reader, so the
+        // limits have to be handed to it explicitly.
+        image::ImageDecoder::set_limits(&mut gif, limits).map_err(decode_err)?;
         use image::AnimationDecoder;
         let mut frames = gif.into_frames();
         let first = match frames.next() {
@@ -919,6 +955,116 @@ mod tests {
         assert_eq!((img.width(), img.height()), (20, 10));
     }
 
+    /// The subfolder policy was only ever tested as path rendering. This runs
+    /// a real file through: the folder has to be created, and the output has
+    /// to land inside it rather than next to the original.
+    #[test]
+    fn the_subfolder_policy_creates_the_folder_and_writes_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("photo.png");
+        sample(8, 6).save(&src).unwrap();
+        let job = Job {
+            format: OutputFormat::Webp,
+            output: OutputPolicy {
+                suffix: "-kuvatin".into(),
+                subfolder: true,
+            },
+            ..Job::default()
+        };
+
+        let out = process_file(&src, &job).unwrap();
+
+        let folder = dir.path().join("kuvatin");
+        assert!(folder.is_dir(), "the subfolder was not created");
+        assert_eq!(out.parent(), Some(folder.as_path()));
+        assert_eq!(
+            out.file_name().unwrap().to_str().unwrap(),
+            "photo-kuvatin.webp"
+        );
+        assert!(out.is_file() && std::fs::metadata(&out).unwrap().len() > 0);
+        // The original folder keeps only the source.
+        let siblings: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(siblings.len(), 2, "{siblings:?}"); // photo.png + kuvatin/
+
+        // A second run does not overwrite the first.
+        let again = process_file(&src, &job).unwrap();
+        assert_ne!(again, out);
+        assert_eq!(again.parent(), Some(folder.as_path()));
+    }
+
+    /// A TIFF block whose only entry is the orientation tag.
+    fn exif_block(orientation: u8) -> Vec<u8> {
+        [
+            b"II".as_slice(),
+            &[42, 0, 8, 0, 0, 0], // magic, IFD0 at offset 8
+            &[1, 0],              // one entry
+            &[0x12, 0x01, 3, 0, 1, 0, 0, 0, orientation, 0, 0, 0],
+            &[0, 0, 0, 0], // no next IFD
+        ]
+        .concat()
+    }
+
+    /// A lossless PNG carrying `orientation` in an eXIf chunk — the pixels come
+    /// back exactly as written, so a single marker pixel can be followed.
+    fn png_with_orientation(img: &RgbaImage, orientation: u8) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut buf = Vec::new();
+        let mut enc = image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
+        enc.set_exif_metadata(exif_block(orientation)).unwrap();
+        enc.write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        buf
+    }
+
+    /// All eight EXIF orientations, not just the rotation a phone writes.
+    /// 2, 4, 5 and 7 are the mirrored ones, where a sign error survives a
+    /// rotation-only test: the image comes out the right shape, facing the
+    /// wrong way.
+    #[test]
+    fn every_exif_orientation_is_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        // A distinct colour per pixel; the one stored top-left is the marker.
+        let mut img = RgbaImage::new(4, 2);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = Rgba([10 + x as u8 * 40, 200 - y as u8 * 90, 30, 255]);
+        }
+        let marker = *img.get_pixel(0, 0);
+        // (tag value, displayed size, where the stored top-left pixel lands)
+        let cases = [
+            (1u8, (4u32, 2u32), (0u32, 0u32)), // as stored
+            (2, (4, 2), (3, 0)),               // mirrored left-right
+            (3, (4, 2), (3, 1)),               // 180°
+            (4, (4, 2), (0, 1)),               // mirrored top-bottom
+            (5, (2, 4), (0, 0)),               // transposed
+            (6, (2, 4), (1, 0)),               // 90° clockwise
+            (7, (2, 4), (1, 3)),               // transversed
+            (8, (2, 4), (0, 3)),               // 90° anticlockwise
+        ];
+        for (value, dims, at) in cases {
+            let p = dir.path().join(format!("orientation-{value}.png"));
+            std::fs::write(&p, png_with_orientation(&img, value)).unwrap();
+            let out = decode_oriented(&p).unwrap().to_rgba8();
+            assert_eq!(
+                (out.width(), out.height()),
+                dims,
+                "orientation {value}: wrong size"
+            );
+            assert_eq!(
+                *out.get_pixel(at.0, at.1),
+                marker,
+                "orientation {value}: the top-left pixel is not at {at:?}"
+            );
+        }
+    }
+
     /// A JPEG carrying EXIF orientation 6 (rotate 90° clockwise — the way a
     /// portrait phone photo is stored) comes out rotated: 20×10 becomes 10×20,
     /// and the pixel that was top-left ends up top-right.
@@ -1016,6 +1162,47 @@ mod tests {
     }
 
     /// A still GIF decodes (once) and converts; an empty container is refused.
+    /// A ceiling low enough that any real image trips it.
+    fn strict_limits() -> image::Limits {
+        let mut l = image::Limits::no_limits();
+        l.max_image_width = Some(8);
+        l.max_image_height = Some(8);
+        l
+    }
+
+    fn is_limits_error(e: &CoreError) -> bool {
+        matches!(e, CoreError::Decode { source, .. } if matches!(source, image::ImageError::Limits(_)))
+    }
+
+    #[test]
+    fn a_decode_past_the_limits_is_refused_rather_than_allocated() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("big.png");
+        sample(64, 64).save(&png).unwrap();
+        let err = decode_within(&png, strict_limits()).unwrap_err();
+        assert!(is_limits_error(&err), "expected a limits error, got {err}");
+    }
+
+    #[test]
+    fn the_gif_path_honours_the_same_limits() {
+        // The GIF branch builds its own decoder, which used to be created
+        // without limits at all.
+        let dir = tempfile::tempdir().unwrap();
+        let gif = dir.path().join("big.gif");
+        sample(64, 64).to_rgba8().save(&gif).unwrap();
+        let err = decode_within(&gif, strict_limits()).unwrap_err();
+        assert!(is_limits_error(&err), "expected a limits error, got {err}");
+    }
+
+    #[test]
+    fn the_shipped_limits_pass_an_ordinary_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("photo.png");
+        sample(640, 480).save(&png).unwrap();
+        let (img, _) = decode_with_metadata(&png).unwrap();
+        assert_eq!((img.width(), img.height()), (640, 480));
+    }
+
     #[test]
     fn still_gif_decodes_from_the_frame_pass() {
         let dir = tempfile::tempdir().unwrap();

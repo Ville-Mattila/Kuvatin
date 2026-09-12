@@ -26,15 +26,30 @@ pub enum ResizeMode {
 /// Ceiling on either output dimension. A hand-edited preset (factor = 1000,
 /// width = u32::MAX) would otherwise reach `resize_exact`, whose w*h*4
 /// allocation aborts the process (capacity overflow / OOM — not unwinding).
-/// 32768 px per side (~4 GiB RGBA worst case) is beyond any sane output.
+/// 32768 px per side is beyond any sane output.
 const MAX_TARGET_DIM: u32 = 32_768;
 
+/// Ceiling on the output's total pixels. The per-side limit is not enough on
+/// its own: 32768 squared is a billion pixels, four gigabytes of RGBA, and the
+/// allocation that fails there aborts rather than unwinding, so the batch
+/// cannot turn it into a per-file error. 2^28 pixels is one gigabyte of RGBA —
+/// the same budget a decode gets from [`crate::pipeline::MAX_DECODE_BYTES`] —
+/// and still allows a full-width 4:1 panorama at the per-side ceiling.
+pub const MAX_TARGET_PIXELS: u64 = 1 << 28;
+
 /// Compute the output dimensions for a `src_w` x `src_h` image. Never returns
-/// 0, never exceeds [`MAX_TARGET_DIM`] per side — and when the ceiling bites,
-/// both sides scale down together so the aspect ratio survives (clamping each
-/// side on its own turned a 4:1 panorama into 3.3:1).
+/// 0, never exceeds [`MAX_TARGET_DIM`] per side or [`MAX_TARGET_PIXELS`] in
+/// total — and when a ceiling bites, both sides scale down together so the
+/// aspect ratio survives (clamping each side on its own turned a 4:1 panorama
+/// into 3.3:1).
 pub fn compute_target_dimensions(mode: ResizeMode, src_w: u32, src_h: u32) -> (u32, u32) {
     let (w, h) = compute_target_dimensions_unclamped(mode, src_w, src_h);
+    let (w, h) = fit_within_sides(w, h);
+    fit_within_area(w, h)
+}
+
+/// Scale (w, h) down together until neither side exceeds [`MAX_TARGET_DIM`].
+fn fit_within_sides(w: u32, h: u32) -> (u32, u32) {
     if w <= MAX_TARGET_DIM && h <= MAX_TARGET_DIM {
         return (w, h);
     }
@@ -42,6 +57,27 @@ pub fn compute_target_dimensions(mode: ResizeMode, src_w: u32, src_h: u32) -> (u
     let scale = (max / w as f64).min(max / h as f64);
     let fit = |v: u32| ((v as f64 * scale).round() as u32).clamp(1, MAX_TARGET_DIM);
     (fit(w), fit(h))
+}
+
+/// Scale (w, h) down together until their product is within
+/// [`MAX_TARGET_PIXELS`]. Rounding can leave the product a hair over, so the
+/// result is trimmed by a pixel per side until it fits.
+fn fit_within_area(w: u32, h: u32) -> (u32, u32) {
+    let area = w as u64 * h as u64;
+    if area <= MAX_TARGET_PIXELS {
+        return (w, h);
+    }
+    let scale = (MAX_TARGET_PIXELS as f64 / area as f64).sqrt();
+    let fit = |v: u32| ((v as f64 * scale).floor() as u32).clamp(1, MAX_TARGET_DIM);
+    let (mut w, mut h) = (fit(w), fit(h));
+    while w as u64 * h as u64 > MAX_TARGET_PIXELS && (w > 1 || h > 1) {
+        if w >= h {
+            w -= 1;
+        } else {
+            h -= 1;
+        }
+    }
+    (w, h)
 }
 
 fn compute_target_dimensions_unclamped(mode: ResizeMode, src_w: u32, src_h: u32) -> (u32, u32) {
@@ -292,6 +328,42 @@ mod tests {
         let (w, h) = compute_target_dimensions(m, 1000, 5000);
         assert_eq!(h, MAX_TARGET_DIM);
         assert!((w as f64 / h as f64 - 0.2).abs() < 1e-3, "{w}x{h}");
+    }
+
+    /// The per-side ceiling alone still allows 32768x32768 — a billion pixels,
+    /// four gigabytes of RGBA, an allocation that aborts the process instead of
+    /// failing the file. The area ceiling is what actually bounds it.
+    #[test]
+    fn the_area_ceiling_bounds_a_square_blow_up() {
+        let m = ResizeMode::Percent { factor: 100.0 };
+        let (w, h) = compute_target_dimensions(m, 4000, 4000);
+        assert!(
+            w as u64 * h as u64 <= MAX_TARGET_PIXELS,
+            "{w}x{h} is past the budget"
+        );
+        assert_eq!(w, h, "a square input stays square");
+    }
+
+    #[test]
+    fn the_area_ceiling_keeps_the_aspect_ratio() {
+        let m = ResizeMode::Percent { factor: 100.0 };
+        let (w, h) = compute_target_dimensions(m, 8000, 2000);
+        assert!(
+            w as u64 * h as u64 <= MAX_TARGET_PIXELS,
+            "{w}x{h} is past the budget"
+        );
+        assert!((w as f64 / h as f64 - 4.0).abs() < 1e-3, "{w}x{h}");
+    }
+
+    /// An explicit target within the budget is passed through untouched.
+    #[test]
+    fn ordinary_targets_are_left_alone() {
+        let m = ResizeMode::Pixels {
+            width: Some(6000),
+            height: Some(4000),
+            keep_aspect: false,
+        };
+        assert_eq!(compute_target_dimensions(m, 800, 600), (6000, 4000));
     }
 
     /// Downscaling a hard edge between an opaque colour and fully transparent
