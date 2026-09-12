@@ -39,6 +39,11 @@ on:
     branches:
       - master
   workflow_dispatch:
+  # A quiet week used to mean no advisory check at all: cargo-deny only ran
+  # when somebody pushed. This run exists for the audit (and the format and
+  # lint gates that come with it); it packages nothing.
+  schedule:
+    - cron: "17 6 * * 1"
 
 # Superseded master runs are cancelled; a tag run is never cancelled.
 concurrency:
@@ -97,11 +102,24 @@ jobs:
             Write-Host 'no installer changes in this pull request; package steps stay off'
           }
 
-      # The version comes from rust-toolchain.toml; the action only makes sure
-      # rustup + the components are present.
+      # rust-toolchain.toml is the single source of truth for the compiler
+      # version. The action needs it as an argument (it cannot read the file,
+      # and a SHA-pinned action has no ref to infer one from), so the version
+      # is read out of the file rather than written down a second time: the
+      # two used to be able to drift, and rustup would then install the
+      # components for one toolchain while cargo used the other.
+      - name: Read the toolchain version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $line) { throw 'no channel in rust-toolchain.toml' }
+          $v = $line.Matches.Groups[1].Value
+          Write-Host "toolchain from rust-toolchain.toml: $v"
+          "RUST_TOOLCHAIN=$v" | Out-File $env:GITHUB_ENV -Append
+
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: 1.96.0
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -138,17 +156,36 @@ jobs:
       - name: cargo deny (licenses, advisories, sources)
         run: cargo deny check
 
+      # The two installers are pinned by checksum, which makes them perfectly
+      # cacheable: the key is the version and the hashes, so a cache entry can
+      # only be reused for the exact bytes this run would have downloaded.
+      # Every run used to pull ~300 MB before it could compile anything.
+      - name: Cache the GStreamer installers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: gst-msi
+          key: gst-${{ env.GST_VERSION }}-${{ env.GST_RUNTIME_SHA256 }}-${{ env.GST_DEVEL_SHA256 }}
+
       - name: Install GStreamer (runtime + devel), checksum-pinned
         shell: pwsh
         run: |
           $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc"
+          $dir = Join-Path $env:GITHUB_WORKSPACE "gst-msi"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
           $files = @(
             @{ Name = "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi";       Sha = "$env:GST_RUNTIME_SHA256" },
             @{ Name = "gstreamer-1.0-devel-msvc-x86_64-$env:GST_VERSION.msi"; Sha = "$env:GST_DEVEL_SHA256" }
           )
           foreach ($f in $files) {
-            $path = "$env:TEMP\$($f.Name)"
-            Invoke-WebRequest -Uri "$base/$($f.Name)" -OutFile $path
+            $path = Join-Path $dir $f.Name
+            # A cached copy still has to match the pin before it is trusted;
+            # anything else is downloaded again.
+            if ((Test-Path $path) -and (Get-FileHash $path -Algorithm SHA256).Hash -eq $f.Sha) {
+              Write-Host "$($f.Name): cached"
+            } else {
+              Remove-Item $path -ErrorAction SilentlyContinue
+              Invoke-WebRequest -Uri "$base/$($f.Name)" -OutFile $path
+            }
             $got = (Get-FileHash $path -Algorithm SHA256).Hash
             if ($got -ne $f.Sha) { throw "checksum mismatch for $($f.Name): got $got expected $($f.Sha)" }
             Start-Process msiexec -ArgumentList "/i", "`"$path`"", "/qn", "ADDLOCAL=ALL", "/norestart" -Wait -NoNewWindow
@@ -229,8 +266,19 @@ jobs:
           Write-Host "smoke render OK: $((Get-Item $mp4).Length) bytes"
 
       # ---- MSI: tag pushes and manual dispatch only (master runs stop here) ----
-      - name: Install cargo-wix
+      # cargo-wix is a source install, and the build cache is written only by
+      # master runs, which never package — so every tag paid the full compile.
+      # This cache is keyed on the exact version and holds just the binary.
+      - name: Cache cargo-wix
         if: env.PACKAGE == 'true'
+        id: wix-bin
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~\.cargo\bin\cargo-wix.exe
+          key: cargo-wix-0.3.9-${{ runner.os }}
+
+      - name: Install cargo-wix
+        if: env.PACKAGE == 'true' && steps.wix-bin.outputs.cache-hit != 'true'
         run: cargo install cargo-wix --version 0.3.9 --locked
 
       - name: Install WiX Toolset v3 (no-admin binaries), checksum-pinned
@@ -339,6 +387,14 @@ jobs:
           if ($p.ExitCode -ne 0) { Get-Content $log | Select-Object -Last 80; throw "msiexec /i exited $($p.ExitCode)" }
           $exe = "C:\Program Files\kuvatin\bin\kuvatin.exe"
           if (-not (Test-Path $exe)) { throw "installed exe missing at $exe" }
+          # The Start menu component is keyed on a per-user registry value
+          # (ICE38/ICE43 allow nothing else for a shortcut in ProgramMenuFolder),
+          # while the package itself is per-machine. Nothing used to check that
+          # the shortcut arrives in the all-users menu, or that it leaves again.
+          $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
+          if (-not (Test-Path (Join-Path $startMenu 'Kuvatin.lnk'))) {
+            throw "install did not create the all-users Start menu shortcut in $startMenu"
+          }
           # --register ran as a deferred, impersonated custom action: the Explorer
           # verb must now exist in THIS user's hive and point at the installed exe.
           $verb = 'HKCU:\Software\Classes\SystemFileAssociations\.png\shell\Kuvatin'
@@ -389,6 +445,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
           if (Test-Path $exe) { throw "uninstall left $exe behind" }
           if (Test-Path $verb) { throw "uninstall left the Explorer verb behind" }
+          if (Test-Path $startMenu) { throw "uninstall left the Start menu folder behind" }
           if ($build -ge 22000 -and (Get-AppxPackage VilleMattila.Kuvatin)) { throw "uninstall left the sparse package registered" }
           if ($env:SIGNED -eq 'true' -and (Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Subject -like 'CN=Ville Mattila*' })) { throw "uninstall left the signing certificate in Trusted People" }
 

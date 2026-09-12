@@ -56,7 +56,8 @@
     <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
 <?endif ?>
 
-<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:util='http://schemas.microsoft.com/wix/UtilExtension'>
 
     <Product
         Id='*'
@@ -87,6 +88,32 @@
             AllowSameVersionUpgrades='yes'
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <!--
+          The floor. MSI's VersionNT stops at 603 for anything Windows 8.1 or
+          newer unless the installer package itself is manifested for later
+          releases, so this cannot say "Windows 10" — but it does keep the
+          package off Windows 7 and 8.0 (601 / 602), where neither the bundled
+          GStreamer runtime nor the renderer would start. The Windows 11 menu
+          checks its own build number at registration time and quietly does
+          nothing below build 22000.
+        -->
+        <Condition Message='Kuvatin needs Windows 8.1 or later (Windows 10 or 11 in practice).'>
+            <![CDATA[Installed OR VersionNT >= 603]]>
+        </Condition>
+
+        <!--
+          Installing over a running copy used to mean the files-in-use dialog,
+          or a reboot request in a silent install. Ask the running instance to
+          close first (WM_CLOSE, the same as clicking the window's X), and
+          never ask for a reboot: nothing here needs one.
+        -->
+        <util:CloseApplication Id='CloseKuvatin'
+                               Target='kuvatin.exe'
+                               Description='Kuvatin is running. Setup will close it and carry on.'
+                               CloseMessage='yes'
+                               RebootPrompt='no'
+                               PromptToContinue='no' />
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='Kuvatin Installation'/>

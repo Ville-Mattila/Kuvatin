@@ -10,9 +10,12 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-# Fail on unmaintained crates only when they are DIRECT dependencies; the
-# unmaintained crates in Slint's transitive text stack (paste, rustybuzz,
-# ttf-parser) are Slint's to replace and are reported as warnings instead.
+# Fail on unmaintained crates only when they are DIRECT dependencies. Note
+# what this does to the rest: a transitive unmaintained crate is not demoted
+# to a warning, it is not considered at all, so the unmaintained crates in
+# Slint's text stack (paste, rustybuzz, ttf-parser) produce no output here.
+# They are Slint's to replace; RUSTSEC advisories against them still fail,
+# because those are a different check.
 unmaintained = "workspace"
 ignore = []
 
