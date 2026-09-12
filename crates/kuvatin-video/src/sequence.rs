@@ -432,6 +432,9 @@ pub fn render_to_mp4(
             height: h,
             fps: spec.fps,
             bitrate_kbps,
+            // The headless path has nobody to ask and nowhere to report a
+            // fallback, so it takes whatever the machine can do.
+            encoder: crate::project::Encoder::Auto,
         },
     )?;
     // Poll to completion. A pipeline that stops posting progress for a minute

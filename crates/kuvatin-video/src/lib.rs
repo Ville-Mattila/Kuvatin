@@ -14,8 +14,9 @@ pub mod project;
 pub mod sequence;
 pub use document::{path_from_uri, ClipRecord, LayoutRecord, ProjectFile};
 pub use project::{
-    normalize_render_size, thumbnail, thumbnail_uri, warm_asset, warm_asset_uri, ClipGeom, ClipId,
-    ClipInfo, ExportSettings, Layout, Project, RenderStatus, Step, VideoCodec, CANVAS_H, CANVAS_W,
+    hardware_encoding_available, is_hardware_encoder, normalize_render_size, thumbnail,
+    thumbnail_uri, warm_asset, warm_asset_uri, ClipGeom, ClipId, ClipInfo, Encoder, ExportSettings,
+    Layout, Project, RenderStatus, Step, VideoCodec, CANVAS_H, CANVAS_W,
 };
 pub use sequence::{
     convert_exr_sequence, detect_sequence, is_frame_file, parse_frame_path, render_to_mp4,

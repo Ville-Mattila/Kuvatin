@@ -57,6 +57,25 @@ pub fn warm_asset_uri(uri: &str) -> Result<()> {
     Ok(())
 }
 
+/// The first video encoder in `bin`, by element name. GStreamer's klass
+/// strings mark it: "Codec/Encoder/Video" (some add "/Hardware").
+fn encoder_in(bin: &gst::Bin) -> Option<String> {
+    for e in bin.iterate_elements().into_iter().flatten() {
+        if let Some(f) = e.factory() {
+            let klass = f.klass().to_string();
+            if klass.contains("Encoder") && klass.contains("Video") {
+                return Some(f.name().to_string());
+            }
+        }
+        if let Some(b) = e.dynamic_cast_ref::<gst::Bin>() {
+            if let Some(found) = encoder_in(b) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Recursively find the first element in `bin` created by the named factory.
 fn find_by_factory(bin: &gst::Bin, factory: &str) -> Option<gst::Element> {
     for e in bin.iterate_elements().into_iter().flatten() {
@@ -356,6 +375,8 @@ pub struct ExportSettings {
     /// `encoding_profile`), so this decides the constant output rate.
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Hardware, software, or let the machine decide (and fall back).
+    pub encoder: Encoder,
 }
 
 /// Hardware H.264 (NVENC) refuses tiny frames (its floor is around 145×49)
@@ -446,13 +467,63 @@ pub(crate) fn ensure_encoder_ranks() {
     use gst::prelude::PluginFeatureExtManual;
     let registry = gst::Registry::get();
     for (name, rank) in [
-        ("nvautogpuh264enc", gst::Rank::from(512)),
-        ("x264enc", gst::Rank::from(256)),
+        (HARDWARE_H264, gst::Rank::from(512)),
+        (SOFTWARE_H264, gst::Rank::from(256)),
         ("mfaacenc", gst::Rank::NONE),
     ] {
         if let Some(feature) = registry.lookup_feature(name) {
             feature.set_rank(rank);
         }
+    }
+}
+
+/// The hardware H.264 encoder, when the machine has one.
+pub(crate) const HARDWARE_H264: &str = "nvautogpuh264enc";
+/// The software H.264 encoder, which ships with the bundled runtime.
+pub(crate) const SOFTWARE_H264: &str = "x264enc";
+
+/// Which encoder an export should use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Encoder {
+    /// Hardware where the machine has it, software where it does not — and
+    /// software anyway if the hardware attempt fails. The default, because
+    /// what a user wants is a file, not an encoder.
+    #[default]
+    Auto,
+    /// Hardware only. A failure is reported rather than worked around, which
+    /// is what someone debugging their machine wants.
+    Hardware,
+    /// Software only: slower, and the one that always works.
+    Software,
+}
+
+/// True if `name` is an encoder that runs on the GPU. Names rather than caps:
+/// the vendor prefixes are stable and the klass string is not ("Hardware" is
+/// absent from some elements that very much are).
+pub fn is_hardware_encoder(name: &str) -> bool {
+    ["nv", "qsv", "amf", "d3d11", "va", "mf"]
+        .iter()
+        .any(|p| name.starts_with(p))
+}
+
+/// Does this machine have a hardware H.264 encoder at all?
+pub fn hardware_encoding_available() -> bool {
+    let _ = gst::init();
+    gst::Registry::get().lookup_feature(HARDWARE_H264).is_some()
+}
+
+/// The encoder factory a choice pins, if it pins one. `Auto` pins nothing and
+/// takes whatever the ranks set at start-up prefer.
+fn pinned_encoder(choice: Encoder, codec: VideoCodec) -> Option<&'static str> {
+    match (choice, codec) {
+        (Encoder::Auto, _) => None,
+        (Encoder::Hardware, VideoCodec::H264) => Some(HARDWARE_H264),
+        // No hardware VP8/VP9 encoder ships with the bundled runtime, so
+        // "hardware" for those is the software one either way.
+        (Encoder::Hardware, _) => None,
+        (Encoder::Software, VideoCodec::H264) => Some(SOFTWARE_H264),
+        (Encoder::Software, VideoCodec::Vp8) => Some("vp8enc"),
+        (Encoder::Software, VideoCodec::Vp9) => Some("vp9enc"),
     }
 }
 
@@ -506,6 +577,14 @@ fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile 
         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .build();
     let mut vb = gst_pbutils::EncodingVideoProfile::builder(&video_caps).restriction(&restriction);
+    // Pinning the encoder. Element ranks cannot do this: encodebin builds its
+    // candidate list once and caches it, so a rank changed later is invisible
+    // to it (measured — a render with the hardware encoder at rank NONE still
+    // chose it). A profile's preset name is matched against the factory name,
+    // and a factory that does not match is skipped.
+    if let Some(factory) = pinned_encoder(s.encoder, s.codec) {
+        vb = vb.preset_name(factory);
+    }
     // Target bitrate. Property name and unit differ by encoder: x264enc/NVENC use
     // "bitrate" in kbit/s (guint); vp8enc/vp9enc use "target-bitrate" in bit/s (gint).
     // ElementProperties applies to whichever matching encoder encodebin instantiates.
@@ -589,6 +668,9 @@ pub struct Project {
     /// methods are inert while set: a Space/Delete key during an export used
     /// to pause the RENDER pipeline or commit a removal mid-render.
     rendering: std::cell::Cell<bool>,
+    /// The encoder element the current or last render used (see
+    /// [`Project::render_encoder`]).
+    last_encoder: std::cell::RefCell<Option<String>>,
 }
 
 impl Project {
@@ -659,6 +741,7 @@ impl Project {
             canvas_w: CANVAS_W,
             canvas_h: CANVAS_H,
             rendering: std::cell::Cell::new(false),
+            last_encoder: std::cell::RefCell::new(None),
         })
     }
 
@@ -1393,6 +1476,7 @@ impl Project {
         // queued would otherwise be read as this render's result.
         self.flush_bus();
         self.rendering.set(true);
+        *self.last_encoder.borrow_mut() = None;
         let attempt = (|| -> Result<()> {
             let uri = gst::glib::filename_to_uri(path, None)?;
             let profile = encoding_profile(settings);
@@ -1435,6 +1519,14 @@ impl Project {
     /// Poll render progress — drive this from a UI timer. Consumes EOS/ERROR bus
     /// messages, so once it returns Done/Failed the render is finished.
     pub fn render_status(&self) -> RenderStatus {
+        // encodebin builds its chain as the pipeline rolls, so the encoder is
+        // not there the instant the render starts; catch it on the first poll
+        // that finds it and keep it for the report at the end.
+        if self.last_encoder.borrow().is_none() {
+            if let Some(name) = encoder_in(self.pipeline.upcast_ref::<gst::Bin>()) {
+                *self.last_encoder.borrow_mut() = Some(name);
+            }
+        }
         if let Some(bus) = self.pipeline.bus() {
             while let Some(msg) =
                 bus.pop_filtered(&[gst::MessageType::Eos, gst::MessageType::Error])
@@ -1460,6 +1552,12 @@ impl Project {
             _ => 0.0,
         };
         RenderStatus::Rendering(frac)
+    }
+
+    /// The encoder the running (or last finished) render used, by element name
+    /// — "nvautogpuh264enc", "x264enc", "vp9enc". None before one has rolled.
+    pub fn render_encoder(&self) -> Option<String> {
+        self.last_encoder.borrow().clone()
     }
 
     /// Stop rendering and restore the live preview (re-attaching the appsink).
@@ -1629,6 +1727,7 @@ mod tests {
                     height: 240,
                     fps: 24,
                     bitrate_kbps: 2000,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("start_render");
@@ -1764,6 +1863,92 @@ mod tests {
             1,
             "the clip that exists is still there"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The choice is carried out by pinning an encoder factory in the profile.
+    /// Ranks cannot do it: encodebin builds its candidate list once and caches
+    /// it, so a rank set afterwards is invisible — measured, with a render that
+    /// used the hardware encoder while its rank was NONE.
+    #[test]
+    fn the_encoder_choice_pins_a_factory() {
+        assert_eq!(pinned_encoder(Encoder::Auto, VideoCodec::H264), None);
+        assert_eq!(
+            pinned_encoder(Encoder::Software, VideoCodec::H264),
+            Some(SOFTWARE_H264)
+        );
+        assert_eq!(
+            pinned_encoder(Encoder::Hardware, VideoCodec::H264),
+            Some(HARDWARE_H264)
+        );
+        assert_eq!(
+            pinned_encoder(Encoder::Software, VideoCodec::Vp9),
+            Some("vp9enc")
+        );
+        // There is no hardware VP8/VP9 encoder in the bundled runtime, so
+        // "hardware" there means "whatever Auto would have taken".
+        assert_eq!(pinned_encoder(Encoder::Hardware, VideoCodec::Vp9), None);
+    }
+
+    #[test]
+    fn a_hardware_encoder_is_recognised_by_name() {
+        assert!(is_hardware_encoder("nvautogpuh264enc"));
+        assert!(is_hardware_encoder("qsvh264enc"));
+        assert!(is_hardware_encoder("amfh264enc"));
+        assert!(!is_hardware_encoder("x264enc"));
+        assert!(!is_hardware_encoder("vp9enc"));
+        assert!(!is_hardware_encoder("openh264enc"));
+    }
+
+    /// "Which encoder did that use?" was unanswerable: the export either
+    /// worked or failed with a raw engine message. A finished render now knows.
+    #[test]
+    fn a_render_reports_the_encoder_it_used() {
+        let dir = scratch("encoder-name");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(160, 120, image::Rgba([90, 160, 60, 255]))
+            .save(&png)
+            .expect("write still");
+        let out = dir.join("out.mp4");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let info = project.append_clip(&png, 0, None).expect("append still");
+        project.set_clip_duration(&info.id, 1.0).expect("1 s");
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 320,
+                    height: 240,
+                    fps: 24,
+                    bitrate_kbps: 2000,
+                    // Software: the only choice every machine (and every CI
+                    // runner) can actually satisfy.
+                    encoder: Encoder::Software,
+                },
+            )
+            .expect("begin_render");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match project.render_status() {
+                RenderStatus::Done => break,
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => {
+                    assert!(std::time::Instant::now() < deadline, "never finished");
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+        let used = project.render_encoder().expect("an encoder was recorded");
+        assert!(
+            used.contains("264"),
+            "expected an H.264 encoder, got {used}"
+        );
+        assert!(
+            !is_hardware_encoder(&used),
+            "{used} is not the software one"
+        );
+        let _ = project.end_render();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1934,6 +2119,7 @@ mod tests {
                     height: 360,
                     fps: 30,
                     bitrate_kbps: 1500,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("begin_render");
@@ -2016,6 +2202,7 @@ mod tests {
                     height: 120,
                     fps: 24,
                     bitrate_kbps: 1000,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("begin_render");
@@ -2058,6 +2245,7 @@ mod tests {
                     height: 720,
                     fps: 30,
                     bitrate_kbps: 8000,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("begin_render");
@@ -2132,6 +2320,7 @@ mod tests {
                     height: 720,
                     fps: 30,
                     bitrate_kbps: 8000,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("begin_render");
@@ -2209,6 +2398,7 @@ mod tests {
                     height: 36,
                     fps: 25,
                     bitrate_kbps: 0,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("begin_render");
@@ -2245,6 +2435,7 @@ mod tests {
             height: 9,
             fps: 999,
             bitrate_kbps: 0,
+            encoder: Encoder::Auto,
         }
         .normalized();
         // 17x9: scale = max(160/17, 96/9) = 10.67 → 181x96 → even 180x96.
@@ -2285,6 +2476,7 @@ mod tests {
                     height: 180,
                     fps: 30,
                     bitrate_kbps: 0,
+                    encoder: Encoder::Auto,
                 },
             )
             .expect("begin_render");

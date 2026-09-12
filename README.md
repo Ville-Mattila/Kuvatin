@@ -62,6 +62,11 @@ over the lane; a plain wheel scrolls it.
 
 ## Video features (new in 2.0)
 
+- **Hardware or software encoding, your choice** - the export dialog picks
+  between automatic (hardware where it works), hardware only, and software
+  only; a hardware encoder that fails under "automatic" is retried in software
+  instead of failing the export, and the finished dialog names the encoder
+  that produced the file
 - **Save and reopen a project** — the timeline, the tracks, every clip's trim
   and transform, and the canvas size go into a readable `.kuvatin` file
   (TOML). Media is referenced, not copied; a source that has moved is named

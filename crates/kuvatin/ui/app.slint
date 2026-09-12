@@ -163,6 +163,12 @@ export component AppWindow inherits Window {
     in-out property <int> export-h: 720;
     in-out property <int> export-fps: 30;            // output frames per second
     in-out property <int> export-bitrate: 8000;     // target video bitrate, kbps
+    // 0 = automatic (hardware where it works, software where it does not),
+    // 1 = hardware only, 2 = software only.
+    in-out property <int> export-encoder: 0;
+    // False on a machine with no hardware encoder: the choice is then between
+    // "automatic" and "software", which are the same thing.
+    in property <bool> hardware-encoder-available: false;
     // Timeline drag state (drives the "new track" drop indicator).
     in-out property <bool> clip-dragging: false;
     in-out property <int> clip-drag-target-row: 0;
@@ -2096,7 +2102,7 @@ export component AppWindow inherits Window {
             default-action => {
                 if (root.timeline-clips.length > 0) { root.export-config = false; root.video-export(); }
             }
-            card-width: 440px; card-height: 496px;
+            card-width: 440px; card-height: 596px;
             Text { text: "Export video"; color: Theme.ink; font-size: 15px; font-weight: 700; }
 
             Text { text: "FORMAT"; color: Theme.muted2; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
@@ -2142,6 +2148,35 @@ export component AppWindow inherits Window {
                 PillButton { text: "High"; active: root.export-bitrate == 12000; clicked => { root.export-bitrate = 12000; } }
                 PillButton { text: "Max"; active: root.export-bitrate == 24000; clicked => { root.export-bitrate = 24000; } }
                 Rectangle { horizontal-stretch: 1; }
+            }
+
+            Text { text: "ENCODER"; color: Theme.muted2; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+            HorizontalLayout {
+                spacing: 6px;
+                PillButton {
+                    text: "Automatic";
+                    active: root.export-encoder == 0;
+                    clicked => { root.export-encoder = 0; }
+                }
+                PillButton {
+                    text: root.hardware-encoder-available ? "Hardware" : "Hardware (none)";
+                    active: root.export-encoder == 1;
+                    clicked => { if (root.hardware-encoder-available) { root.export-encoder = 1; } }
+                }
+                PillButton {
+                    text: "Software";
+                    active: root.export-encoder == 2;
+                    clicked => { root.export-encoder = 2; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Text {
+                text: root.export-encoder == 1
+                    ? "Hardware only. A failure is reported rather than worked around."
+                    : (root.export-encoder == 2
+                        ? "Software only: slower, and the one that always works."
+                        : "Hardware where it works, software where it does not.");
+                color: Theme.muted; font-size: 10px; wrap: word-wrap;
             }
 
             Rectangle { vertical-stretch: 1; }

@@ -16,6 +16,11 @@ something is fixed.
 ## [Unreleased]
 
 ### Added
+- **The export encoder is a choice, and a failing one is no longer fatal.**
+  Automatic, hardware only, or software only; under automatic, a hardware
+  encoder that fails mid-export is retried in software rather than failing the
+  export with an engine message. The finished dialog names the encoder that
+  produced the file.
 - **A video project can be saved and reopened.** The timeline, the tracks,
   every clip's trim and transform and the canvas go into a readable `.kuvatin`
   file; media is referenced rather than copied, and a source that has moved is

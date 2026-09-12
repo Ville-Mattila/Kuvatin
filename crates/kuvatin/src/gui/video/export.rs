@@ -10,8 +10,9 @@ use std::rc::Rc;
 
 /// What the user is told once the preview is back and the modal closes.
 enum Ending {
-    /// The render finished: the file it wrote, and how long it took.
-    Done(PathBuf, Option<std::time::Duration>),
+    /// The render finished: the file it wrote, how long it took, the encoder
+    /// that did it, and whether it had to fall back to software on the way.
+    Done(PathBuf, Option<std::time::Duration>, Option<String>, bool),
     /// It failed, with the engine's reason.
     Failed(String),
 }
@@ -37,6 +38,12 @@ pub(crate) struct ExportState {
     starting: Rc<RefCell<Option<(PathBuf, kuvatin_video::ExportSettings)>>>,
     /// The preview is coming back (after a finish, a failure or a cancel).
     finishing: Rc<Cell<bool>>,
+    /// The settings the running render was started with, so a failure knows
+    /// what was asked for and a fallback knows what to change.
+    running: Rc<Cell<Option<kuvatin_video::ExportSettings>>>,
+    /// This export has already been retried in software; a second failure is
+    /// the file's, not the encoder's.
+    fell_back: Rc<Cell<bool>>,
     /// What to say when it is back. None after a cancel: nothing to report.
     ending: Rc<RefCell<Option<Ending>>>,
 }
@@ -74,6 +81,24 @@ fn export_status_line(fraction: f32, elapsed: std::time::Duration) -> String {
     format!("{line} \u{b7} about {} left", clock(left))
 }
 
+/// Should a failed render be tried again in software?
+///
+/// Only when the machine was asked to decide (`Auto`), only when the encoder
+/// that failed was a hardware one, and only once. A software encoder that
+/// failed will fail the same way twice, and someone who explicitly chose
+/// Hardware wants to see the failure, not a quiet substitution. `None` for the
+/// encoder means the render fell over before one was built, which a different
+/// encoder would not fix either.
+fn should_fall_back(
+    choice: kuvatin_video::Encoder,
+    encoder_used: Option<&str>,
+    already_fell_back: bool,
+) -> bool {
+    choice == kuvatin_video::Encoder::Auto
+        && !already_fell_back
+        && encoder_used.map(kuvatin_video::is_hardware_encoder) == Some(true)
+}
+
 /// Wire the export callbacks and the progress timer.
 pub(super) fn wire(
     ui: &AppWindow,
@@ -89,7 +114,25 @@ pub(super) fn wire(
     let export_started = &ex.started;
     let export_starting = &ex.starting;
     let export_finishing = &ex.finishing;
+    let export_running = &ex.running;
+    let export_fell_back = &ex.fell_back;
     let export_ending = &ex.ending;
+
+    // Whether the "Hardware" choice is offered at all. Asking costs a registry
+    // scan, so it happens on a worker rather than in front of the window.
+    {
+        let ui_weak = ui_weak.clone();
+        let _ = std::thread::Builder::new()
+            .name("kuvatin-encoder-probe".into())
+            .spawn(move || {
+                let available = kuvatin_video::hardware_encoding_available();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_hardware_encoder_available(available);
+                    }
+                });
+            });
+    }
     {
         let ui_weak = ui_weak.clone();
         let project_slot = project_slot.clone();
@@ -97,6 +140,7 @@ pub(super) fn wire(
         let export_pending = export_pending.clone();
         let export_path = export_path.clone();
         let export_starting = export_starting.clone();
+        let export_fell_back = export_fell_back.clone();
         ui.on_video_export(move || {
             if export_active.get() || export_pending.get() {
                 return;
@@ -124,6 +168,11 @@ pub(super) fn wire(
                 height: ui.get_export_h(),
                 fps: ui.get_export_fps().clamp(1, 240) as u32,
                 bitrate_kbps: ui.get_export_bitrate().max(0) as u32,
+                encoder: match ui.get_export_encoder() {
+                    1 => kuvatin_video::Encoder::Hardware,
+                    2 => kuvatin_video::Encoder::Software,
+                    _ => kuvatin_video::Encoder::Auto,
+                },
             };
             let Some(path) = rfd::FileDialog::new()
                 .add_filter(
@@ -150,6 +199,7 @@ pub(super) fn wire(
             match prepared {
                 Some(Ok(())) => {
                     export_pending.set(true);
+                    export_fell_back.set(false);
                     *export_starting.borrow_mut() = Some((path, settings));
                     ui.set_exporting(true);
                     ui.set_export_progress(0.0);
@@ -218,6 +268,8 @@ pub(super) fn wire(
         let export_starting = export_starting.clone();
         let export_finishing = export_finishing.clone();
         let export_ending = export_ending.clone();
+        let export_running = export_running.clone();
+        let export_fell_back = export_fell_back.clone();
         // Watchdog: if progress hasn't advanced for this many ticks (200ms
         // each → 20s), tell the user the render looks stuck (Cancel is right
         // there). Some pipeline stalls never post EOS/Error. The baseline
@@ -246,6 +298,7 @@ pub(super) fn wire(
                     match p.start_render(&path, settings) {
                         Ok(()) => {
                             export_started.set(Some(std::time::Instant::now()));
+                            export_running.set(Some(settings));
                             export_pending.set(false);
                             export_active.set(true);
                         }
@@ -280,10 +333,20 @@ pub(super) fn wire(
                         match ending {
                             // The dialog used to just vanish, leaving no sign
                             // that anything had been written, or where.
-                            Some(Ending::Done(path, took)) => {
+                            Some(Ending::Done(path, took, used, fell_back)) => {
                                 let mut detail = path.display().to_string();
                                 if let Some(t) = took {
                                     detail.push_str(&format!("\n\nTook {}", clock(t)));
+                                }
+                                if let Some(name) = used {
+                                    detail.push_str(&format!("\nEncoder: {name}"));
+                                }
+                                if fell_back {
+                                    detail.push_str(
+                                        "\n\nThe hardware encoder failed on this export, so it was \
+                                         encoded in software. Choosing Software in the export \
+                                         settings skips the attempt next time.",
+                                    );
                                 }
                                 show_info_at(&ui, "Export finished", detail, &path);
                             }
@@ -319,8 +382,10 @@ pub(super) fn wire(
                     kuvatin_video::RenderStatus::Done => {
                         // A preview that fails to come back is otherwise a
                         // silently black viewer for the rest of the session.
+                        let used = p.render_encoder();
                         let restore = p.begin_restore();
                         drop(slot);
+                        export_running.set(None);
                         export_active.set(false);
                         export_pending.set(true);
                         export_finishing.set(true);
@@ -330,7 +395,9 @@ pub(super) fn wire(
                             (Err(e), _) => Some(Ending::Failed(format!(
                                 "The file is written, but the preview could not be restored: {e}"
                             ))),
-                            (Ok(()), Some(path)) => Some(Ending::Done(path, took)),
+                            (Ok(()), Some(path)) => {
+                                Some(Ending::Done(path, took, used, export_fell_back.get()))
+                            }
                             (Ok(()), None) => None,
                         };
                         if let Some(ui) = ui_weak.upgrade() {
@@ -339,18 +406,60 @@ pub(super) fn wire(
                         }
                     }
                     kuvatin_video::RenderStatus::Failed(e) => {
+                        let used = p.render_encoder();
+                        let settings = export_running.get();
+                        // A hardware encoder that fails mid-session used to
+                        // fail the whole export with an engine message about
+                        // an encode session. If the machine was asked to
+                        // decide, it decides again — in software.
+                        let retry = should_fall_back(
+                            settings.map(|s| s.encoder).unwrap_or_default(),
+                            used.as_deref(),
+                            export_fell_back.get(),
+                        );
+                        if retry {
+                            if let (Some(mut settings), Some(path)) =
+                                (settings, export_path.borrow().clone())
+                            {
+                                settings.encoder = kuvatin_video::Encoder::Software;
+                                // The half-written file goes: the retry writes
+                                // the same name from the beginning.
+                                let _ = std::fs::remove_file(&path);
+                                if p.prepare_render().is_ok() {
+                                    drop(slot);
+                                    export_active.set(false);
+                                    export_pending.set(true);
+                                    export_fell_back.set(true);
+                                    export_started.take();
+                                    stall.set((0.0, 0));
+                                    *export_starting.borrow_mut() = Some((path, settings));
+                                    if let Some(ui) = ui_weak.upgrade() {
+                                        ui.set_export_progress(0.0);
+                                        ui.set_export_status(
+                                            "The hardware encoder failed \u{2014} encoding in software\u{2026}"
+                                                .into(),
+                                        );
+                                    }
+                                    return;
+                                }
+                            }
+                        }
                         let _ = p.begin_restore();
                         drop(slot);
                         export_active.set(false);
                         export_pending.set(true);
                         export_finishing.set(true);
                         export_started.take();
+                        export_running.set(None);
                         // Delete the truncated output; the reason waits for
                         // the preview so there is only ever one dialog.
                         if let Some(path) = export_path.borrow_mut().take() {
                             let _ = std::fs::remove_file(path);
                         }
-                        *export_ending.borrow_mut() = Some(Ending::Failed(e));
+                        *export_ending.borrow_mut() = Some(Ending::Failed(match used {
+                            Some(name) => format!("{e}\n\nEncoder: {name}"),
+                            None => e,
+                        }));
                         if let Some(ui) = ui_weak.upgrade() {
                             ui.set_export_status("Finishing\u{2026}".into());
                         }
@@ -404,6 +513,41 @@ mod tests {
             export_status_line(1.0, secs(75)),
             "100% \u{b7} 1:15 elapsed"
         );
+    }
+
+    /// The case this exists for: the machine was asked to decide, the hardware
+    /// encoder it picked failed, and the file is still wanted.
+    #[test]
+    fn a_hardware_failure_under_automatic_is_retried_in_software() {
+        use kuvatin_video::Encoder;
+        assert!(should_fall_back(
+            Encoder::Auto,
+            Some("nvautogpuh264enc"),
+            false
+        ));
+    }
+
+    #[test]
+    fn nothing_else_is_retried() {
+        use kuvatin_video::Encoder;
+        // The software encoder failing is not an encoder problem.
+        assert!(!should_fall_back(Encoder::Auto, Some("x264enc"), false));
+        // Asked for hardware: report the failure, do not substitute.
+        assert!(!should_fall_back(
+            Encoder::Hardware,
+            Some("nvautogpuh264enc"),
+            false
+        ));
+        // Already software.
+        assert!(!should_fall_back(Encoder::Software, Some("x264enc"), false));
+        // Once is a fallback; twice is a loop.
+        assert!(!should_fall_back(
+            Encoder::Auto,
+            Some("nvautogpuh264enc"),
+            true
+        ));
+        // It fell over before an encoder existed: something else is wrong.
+        assert!(!should_fall_back(Encoder::Auto, None, false));
     }
 
     #[test]
