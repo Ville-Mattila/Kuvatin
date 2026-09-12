@@ -49,8 +49,16 @@ if (-not $SkipChecks) {
     )
     foreach ($gate in $gates) {
         Write-Host "gate: $($gate.What)"
+        # Cargo reports progress ("Checking kuvatin-core...") on stderr, and
+        # under Windows PowerShell a native command that writes to stderr while
+        # $ErrorActionPreference is 'Stop' becomes a terminating error - so the
+        # gate "failed" with clippy perfectly happy. The exit code is the only
+        # thing worth reading here.
+        $ErrorActionPreference = 'Continue'
         & cargo $gate.Args
-        if ($LASTEXITCODE -ne 0) { throw "$($gate.What) failed - not tagging" }
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($code -ne 0) { throw "$($gate.What) failed - not tagging" }
     }
 }
 
