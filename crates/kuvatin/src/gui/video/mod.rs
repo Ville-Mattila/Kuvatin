@@ -327,25 +327,54 @@ pub(super) fn wire(
     }
 }
 
+/// The newest preview frame waiting for the interface thread, and whether a
+/// closure has already been posted to collect it.
+///
+/// The preview used to post one closure per decoded frame. A lagging interface
+/// then worked through a queue of closures that each found the slot already
+/// emptied by the one before: work posted, scheduled and discarded, thirty
+/// times a second, exactly when the interface could least afford it. One
+/// posted closure is enough — it collects whatever is newest when it runs.
+#[derive(Default)]
+struct FrameSlot {
+    newest: Mutex<Option<SharedPixelBuffer<Rgba8Pixel>>>,
+}
+
+impl FrameSlot {
+    /// Park `buf` as the frame to show. Returns true when the caller must post
+    /// a closure to collect it — that is, when none is already on its way.
+    fn put(&self, buf: SharedPixelBuffer<Rgba8Pixel>) -> bool {
+        match self.newest.lock() {
+            Ok(mut slot) => slot.replace(buf).is_none(),
+            Err(_) => false,
+        }
+    }
+
+    fn take(&self) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+        self.newest.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
 /// Create a GES editing project whose composited preview frames are pushed to
 /// the UI's `video-frame` (from a GStreamer thread, hopped to the UI thread).
 fn make_project(ui_weak: &slint::Weak<AppWindow>) -> Option<kuvatin_video::Project> {
-    // The newest frame waiting for the UI thread; if the UI lags, a later
-    // frame simply replaces it (no queue to drain).
-    let pending: Arc<Mutex<Option<SharedPixelBuffer<Rgba8Pixel>>>> = Arc::new(Mutex::new(None));
+    let pending: Arc<FrameSlot> = Arc::new(FrameSlot::default());
     let ui_for_frame = ui_weak.clone();
     match kuvatin_video::Project::new(move |view| {
         // ONE copy, on the GStreamer thread, straight from the mapped buffer
         // into the pixel buffer the UI will display (SharedPixelBuffer is
-        // Send; only slint::Image is not). The UI thread just wraps it.
+        // Send; only slint::Image is not). The UI thread just wraps it. The
+        // allocation is inherent: the displayed image owns its buffer until a
+        // newer one replaces it, so there is nothing to write back into.
         let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(view.width, view.height);
         view.copy_packed_into(buf.make_mut_bytes());
-        *pending.lock().unwrap() = Some(buf);
+        if !pending.put(buf) {
+            return; // a closure is already queued; it will take this frame
+        }
         let ui_for_frame = ui_for_frame.clone();
         let pending = pending.clone();
         let _ = slint::invoke_from_event_loop(move || {
-            if let (Some(ui), Some(buf)) = (ui_for_frame.upgrade(), pending.lock().unwrap().take())
-            {
+            if let (Some(ui), Some(buf)) = (ui_for_frame.upgrade(), pending.take()) {
                 ui.set_video_frame(Image::from_rgba8(buf));
             }
         });
@@ -502,5 +531,48 @@ fn add_sequence_to_timeline(
                 show_error(&ui, "Could not add sequence", format!("{e:#}"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(w: u32, h: u32, fill: u8) -> SharedPixelBuffer<Rgba8Pixel> {
+        let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+        buf.make_mut_bytes().fill(fill);
+        buf
+    }
+
+    /// The preview pushed a closure to the event loop for every frame it
+    /// decoded. A lagging interface then worked through a queue of closures
+    /// that each found the slot already emptied by the one before — work
+    /// posted, scheduled and thrown away, thirty times a second.
+    #[test]
+    fn only_the_first_frame_of_a_burst_posts_a_closure() {
+        let slot = FrameSlot::default();
+        assert!(slot.put(frame(2, 2, 1)), "nothing pending: post");
+        assert!(!slot.put(frame(2, 2, 2)), "a post is already queued");
+        assert!(!slot.put(frame(2, 2, 3)), "still queued");
+    }
+
+    /// Whatever the queued closure eventually runs, it shows the newest frame
+    /// — the whole point of replacing rather than queueing.
+    #[test]
+    fn the_slot_yields_the_newest_frame() {
+        let slot = FrameSlot::default();
+        slot.put(frame(2, 2, 1));
+        slot.put(frame(2, 2, 9));
+        let got = slot.take().expect("a frame");
+        assert_eq!(got.as_bytes()[0], 9);
+        assert!(slot.take().is_none(), "and only once");
+    }
+
+    #[test]
+    fn the_next_frame_after_a_take_posts_again() {
+        let slot = FrameSlot::default();
+        slot.put(frame(2, 2, 1));
+        slot.take();
+        assert!(slot.put(frame(2, 2, 2)), "the queue drained: post again");
     }
 }
