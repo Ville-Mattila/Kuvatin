@@ -25,6 +25,10 @@ something is fixed.
   a bare percentage.
 - A weekly scheduled CI run, so an advisory published in a quiet week is still
   found.
+- Keyboard control of the sliders: the quality setting, the video scrubber and
+  every inspector transform take focus and answer to the arrows, Home and End.
+- Dialogs take the keyboard when they open and run their primary action on
+  Enter.
 
 ### Changed
 - One memory budget for the whole image path. Every decode runs under an
@@ -39,6 +43,14 @@ something is fixed.
 - `scripts/release.ps1` runs format, lint and tests before it commits or tags.
 
 ### Fixed
+- A dragged clip can no longer be buried under another on the same layer: it
+  stops against its neighbour instead of hiding it.
+- A large Explorer selection on a loaded machine no longer splits into two
+  batches with two progress windows.
+- Asset discovery gives up after twenty seconds instead of wedging the import
+  worker for the rest of the session on one unreachable file.
+- Dropping a folder, or picking the first frame of a sequence, no longer freezes
+  the window while the filesystem is walked.
 - The progress window could hang a fast right-click run: the quit posted before
   the event loop started was dropped, leaving the process waiting on a window
   that was never shown.
