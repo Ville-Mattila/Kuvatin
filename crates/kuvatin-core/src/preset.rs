@@ -206,6 +206,30 @@ impl PresetStore {
         directories::BaseDirs::new().map(|d| d.config_dir().join("Kuvatin").join("presets.toml"))
     }
 
+    /// Read the store without touching the file, for callers that must not
+    /// have side effects.
+    ///
+    /// [`Self::load_or_init`] is the right call for the app itself: it creates
+    /// a missing file, preserves a corrupt one as `presets.toml.bad` and
+    /// persists a migration. The Windows 11 context-menu handler is the wrong
+    /// place for any of that — it runs inside the shell's surrogate every time
+    /// a menu opens, and building a menu should never mutate user state. An
+    /// unreadable or unusable file falls back to the built-ins, and an older
+    /// schema is upgraded in memory only.
+    pub fn load(path: &Path) -> PresetStore {
+        std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| Self::parse_tolerant(&text))
+            .map(|(mut store, warning)| {
+                store.last_load_warning = warning;
+                if store.version < Self::CURRENT_VERSION {
+                    store.migrate();
+                }
+                store
+            })
+            .unwrap_or_else(|_| PresetStore::builtin())
+    }
+
     /// Load from `path`, or return built-ins (and write them) if absent.
     ///
     /// NEVER fails on a bad file: a truncated/corrupt presets.toml (crash mid-
@@ -548,5 +572,93 @@ mod edit_tests {
 
     fn names(s: &PresetStore) -> Vec<&str> {
         s.presets.iter().map(|p| p.name.as_str()).collect()
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// The Windows 11 context-menu handler reads the store every time a menu
+    /// opens, from inside the shell's surrogate process. Opening a menu must
+    /// not touch the user's files, so `load` never creates, backs up, migrates
+    /// on disk, or saves — everything `load_or_init` deliberately does.
+    #[test]
+    fn load_never_writes_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.toml");
+
+        let store = PresetStore::load(&path);
+        assert_eq!(
+            store.presets,
+            PresetStore::builtin().presets,
+            "absent file falls back to the built-ins"
+        );
+        assert!(!path.exists(), "load created the file");
+
+        std::fs::write(&path, "this is not toml [[[").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let store = PresetStore::load(&path);
+        assert_eq!(store.presets, PresetStore::builtin().presets);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "load rewrote a corrupt file"
+        );
+        assert!(
+            !path.with_extension("toml.bad").exists(),
+            "load left a backup copy behind"
+        );
+    }
+
+    /// A store from an older schema is upgraded in memory so the menu is
+    /// correct, but the file itself is left exactly as it was.
+    #[test]
+    fn load_migrates_in_memory_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved.toml");
+        PresetStore::builtin().save(&saved).unwrap();
+        // The same content as an older file: no version key at all.
+        let older: String = std::fs::read_to_string(&saved)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("version"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = dir.path().join("presets.toml");
+        std::fs::write(&path, &older).unwrap();
+
+        let store = PresetStore::load(&path);
+        assert_eq!(
+            store.version,
+            PresetStore::CURRENT_VERSION,
+            "upgraded for this run"
+        );
+        assert_eq!(
+            store.presets.len(),
+            PresetStore::builtin().presets.len(),
+            "presets survived the migration"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            older,
+            "load persisted the migration"
+        );
+    }
+
+    /// A readable, current file is returned as written.
+    #[test]
+    fn load_reads_a_good_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.toml");
+        let mut store = PresetStore::builtin();
+        store.presets.push(Preset {
+            name: "Mine".into(),
+            job: Default::default(),
+        });
+        store.save(&path).unwrap();
+
+        let loaded = PresetStore::load(&path);
+        assert!(loaded.presets.iter().any(|p| p.name == "Mine"));
     }
 }

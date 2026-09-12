@@ -3,10 +3,11 @@
 
 use kuvatin_core::menu::{action_args, menu_items, Action, MenuItem};
 use kuvatin_core::preset::PresetStore;
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::path::{Path, PathBuf};
-use windows::core::{implement, Result, GUID, HSTRING, PWSTR};
-use windows::Win32::Foundation::{BOOL, E_NOTIMPL, S_FALSE, S_OK};
+use std::rc::Rc;
+use windows::core::{implement, Error, Result, GUID, HSTRING, PWSTR};
+use windows::Win32::Foundation::{BOOL, E_FAIL, E_INVALIDARG, E_NOTIMPL, S_FALSE, S_OK};
 use windows::Win32::System::Com::IBindCtx;
 use windows::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -85,11 +86,32 @@ fn frames_only(paths: &[PathBuf]) -> bool {
 
 /// The user's presets, or the built-ins if the store can't be read — read at
 /// menu time, so a preset saved in the GUI shows up on the next right-click.
+///
+/// Deliberately `load`, not `load_or_init`: the latter creates a missing file,
+/// copies a corrupt one aside and persists migrations. Opening a right-click
+/// menu must not write to the user's config, least of all from inside the
+/// shell's surrogate process.
 fn current_items() -> Vec<MenuItem> {
     let store = PresetStore::default_path()
-        .and_then(|p| PresetStore::load_or_init(&p).ok())
+        .map(|p| PresetStore::load(&p))
         .unwrap_or_else(PresetStore::builtin);
     menu_items(&store)
+}
+
+/// Run a COM method body with panics contained.
+///
+/// These functions are called across an `extern "system"` boundary, where an
+/// unwinding panic aborts the process — and that process is the shell's
+/// surrogate, so the whole Kuvatin menu would vanish until the shell restarts.
+/// Parsing the preset store is the realistic source.
+fn guard<T>(what: &'static str, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(_) => Err(Error::new(
+            E_FAIL,
+            format!("Kuvatin's context menu failed in {what}"),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +143,9 @@ impl IExplorerCommand_Impl for RootCommand_Impl {
     }
 
     fn GetCanonicalName(&self) -> Result<GUID> {
-        Ok(GUID::zeroed())
+        // No stable identity to offer; a zero identifier claimed the same one
+        // for the root and every item alike.
+        Err(E_NOTIMPL.into())
     }
 
     fn GetState(&self, _items: Option<&IShellItemArray>, _ok_to_be_slow: BOOL) -> Result<u32> {
@@ -140,15 +164,26 @@ impl IExplorerCommand_Impl for RootCommand_Impl {
     }
 
     fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {
-        let items: Vec<IExplorerCommand> = current_items()
-            .into_iter()
-            .map(|item| ItemCommand { item }.into())
-            .collect();
-        Ok(ItemEnum {
-            items,
-            pos: Cell::new(0),
-        }
-        .into())
+        guard("building the submenu", || {
+            // One shared answer to "is this selection all frames?", filled in
+            // by whichever item the shell asks about first.
+            let frames_only: Rc<OnceCell<bool>> = Rc::new(OnceCell::new());
+            let items: Vec<IExplorerCommand> = current_items()
+                .into_iter()
+                .map(|item| {
+                    ItemCommand {
+                        item,
+                        frames_only: frames_only.clone(),
+                    }
+                    .into()
+                })
+                .collect();
+            Ok(ItemEnum {
+                items,
+                pos: Cell::new(0),
+            }
+            .into())
+        })
     }
 }
 
@@ -156,6 +191,11 @@ impl IExplorerCommand_Impl for RootCommand_Impl {
 #[implement(IExplorerCommand)]
 struct ItemCommand {
     item: MenuItem,
+    /// Whether the selection is entirely sequence-only frames, decided once
+    /// per menu and shared by every item. The shell asks each item for its
+    /// state in turn, and re-reading a large selection for each one meant
+    /// thousands of shell round trips before the menu could draw.
+    frames_only: Rc<OnceCell<bool>>,
 }
 
 impl IExplorerCommand_Impl for ItemCommand_Impl {
@@ -172,35 +212,51 @@ impl IExplorerCommand_Impl for ItemCommand_Impl {
     }
 
     fn GetCanonicalName(&self) -> Result<GUID> {
-        Ok(GUID::zeroed())
+        // No stable identity to offer; a zero identifier claimed the same one
+        // for the root and every item alike.
+        Err(E_NOTIMPL.into())
     }
 
     fn GetState(&self, items: Option<&IShellItemArray>, _ok_to_be_slow: BOOL) -> Result<u32> {
-        // Presets can't read sequence-only frames; hide them for an all-EXR
-        // selection so the submenu is just the sequence render (+ open).
-        let hide =
-            matches!(self.item.action, Action::Preset(_)) && frames_only(&selected_paths(items));
-        Ok(if hide { ECS_HIDDEN.0 } else { ECS_ENABLED.0 } as u32)
+        guard("deciding a menu item's state", || {
+            // Presets can't read sequence-only frames; hide them for an all-EXR
+            // selection so the submenu is just the sequence render (+ open).
+            if !matches!(self.item.action, Action::Preset(_)) {
+                return Ok(ECS_ENABLED.0 as u32);
+            }
+            let hide = *self
+                .frames_only
+                .get_or_init(|| frames_only(&selected_paths(items)));
+            Ok(if hide { ECS_HIDDEN.0 } else { ECS_ENABLED.0 } as u32)
+        })
     }
 
     fn Invoke(&self, items: Option<&IShellItemArray>, _bc: Option<&IBindCtx>) -> Result<()> {
-        let paths = selected_paths(items);
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let Some(exe) = exe_path() else {
-            return Err(E_NOTIMPL.into());
-        };
-        // One process for the whole selection (the classic menu launches one
-        // per item and folds them at runtime; here the shell hands us all).
-        let mut cmd = std::process::Command::new(exe);
-        cmd.args(action_args(&self.item.action)).args(&paths);
-        if let Some(dir) = install_dir() {
-            cmd.current_dir(dir);
-        }
-        cmd.spawn()
-            .map(drop)
-            .map_err(|e| windows::core::Error::new(E_NOTIMPL, e.to_string()))
+        guard("running a menu item", || {
+            let paths = selected_paths(items);
+            if paths.is_empty() {
+                return Ok(());
+            }
+            // E_FAIL, not E_NOTIMPL: the shell reads "not implemented" as
+            // "there is no such command" and says nothing, so a failure to
+            // start looked exactly like a menu item that does nothing.
+            let Some(exe) = exe_path() else {
+                return Err(Error::new(
+                    E_FAIL,
+                    "kuvatin.exe is not next to the context-menu handler",
+                ));
+            };
+            // One process for the whole selection (the classic menu launches one
+            // per item and folds them at runtime; here the shell hands us all).
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(action_args(&self.item.action)).args(&paths);
+            if let Some(dir) = install_dir() {
+                cmd.current_dir(dir);
+            }
+            cmd.spawn()
+                .map(drop)
+                .map_err(|e| Error::new(E_FAIL, format!("could not start Kuvatin: {e}")))
+        })
     }
 
     fn GetFlags(&self) -> Result<u32> {
@@ -226,11 +282,26 @@ impl IEnumExplorerCommand_Impl for ItemEnum_Impl {
         puicommand: *mut Option<IExplorerCommand>,
         pceltfetched: *mut u32,
     ) -> windows::core::HRESULT {
+        if !pceltfetched.is_null() {
+            unsafe {
+                *pceltfetched = 0;
+            }
+        }
+        // The shell owns this array and it may be uninitialised. Asking for
+        // several without somewhere to report the count is equally unusable.
+        if puicommand.is_null() || (celt > 1 && pceltfetched.is_null()) {
+            return E_INVALIDARG;
+        }
         let mut fetched = 0u32;
         let mut pos = self.pos.get();
         while fetched < celt && pos < self.items.len() {
             unsafe {
-                *puicommand.add(fetched as usize) = Some(self.items[pos].clone());
+                // write, not assign: assigning drops whatever Rust believes is
+                // already at that address, which would release a junk pointer.
+                std::ptr::write(
+                    puicommand.add(fetched as usize),
+                    Some(self.items[pos].clone()),
+                );
             }
             fetched += 1;
             pos += 1;
@@ -265,5 +336,146 @@ impl IEnumExplorerCommand_Impl for ItemEnum_Impl {
             pos: Cell::new(self.pos.get()),
         }
         .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kuvatin_core::menu::{Action, MenuItem};
+
+    fn item(n: usize) -> MenuItem {
+        MenuItem {
+            id: format!("Kuvatin.{n:02}"),
+            label: format!("Item {n}"),
+            action: Action::Gui,
+            separator_before: false,
+        }
+    }
+
+    fn enumerator(count: usize) -> IEnumExplorerCommand {
+        let items: Vec<IExplorerCommand> = (0..count)
+            .map(|n| {
+                let cmd: IExplorerCommand = ItemCommand {
+                    item: item(n),
+                    frames_only: Default::default(),
+                }
+                .into();
+                cmd
+            })
+            .collect();
+        ItemEnum {
+            items,
+            pos: Cell::new(0),
+        }
+        .into()
+    }
+
+    fn next_one(
+        e: &IEnumExplorerCommand,
+    ) -> (windows::core::HRESULT, u32, Option<IExplorerCommand>) {
+        let mut out: [Option<IExplorerCommand>; 1] = Default::default();
+        let mut fetched = 0u32;
+        let hr = unsafe { e.Next(&mut out, Some(&mut fetched)) };
+        (hr, fetched, out[0].take())
+    }
+
+    /// The shell walks the submenu one command at a time and stops on S_FALSE;
+    /// getting that wrong either truncates the menu or spins.
+    #[test]
+    fn the_enumerator_hands_out_every_item_then_stops() {
+        let e = enumerator(3);
+        let mut titles = Vec::new();
+        for _ in 0..3 {
+            let (hr, fetched, cmd) = next_one(&e);
+            assert_eq!(hr, S_OK);
+            assert_eq!(fetched, 1);
+            let cmd = cmd.expect("a command");
+            let title = unsafe { cmd.GetTitle(None) }.expect("title");
+            titles.push(unsafe { title.to_string() }.unwrap());
+        }
+        assert_eq!(titles, ["Item 0", "Item 1", "Item 2"]);
+
+        let (hr, fetched, cmd) = next_one(&e);
+        assert_eq!(hr, S_FALSE, "exhausted");
+        assert_eq!(fetched, 0);
+        assert!(cmd.is_none());
+    }
+
+    /// An empty submenu must report exhaustion immediately rather than hand
+    /// back a command that does not exist.
+    #[test]
+    fn an_empty_enumerator_is_exhausted_at_once() {
+        let (hr, fetched, cmd) = next_one(&enumerator(0));
+        assert_eq!(hr, S_FALSE);
+        assert_eq!(fetched, 0);
+        assert!(cmd.is_none());
+    }
+
+    /// Asking for several at once fills what it can and reports how many.
+    #[test]
+    fn a_batched_request_reports_what_it_filled() {
+        let e = enumerator(2);
+        let mut out: [Option<IExplorerCommand>; 4] = Default::default();
+        let mut fetched = 0u32;
+        let hr = unsafe { e.Next(&mut out, Some(&mut fetched)) };
+        assert_eq!(hr, S_FALSE, "fewer than asked");
+        assert_eq!(fetched, 2);
+        assert!(out[0].is_some() && out[1].is_some());
+        assert!(out[2].is_none() && out[3].is_none(), "untouched slots");
+    }
+
+    /// A null output pointer is a caller error, not a crash. The safe wrapper
+    /// cannot express one, so this goes through the vtable the shell uses.
+    #[test]
+    fn a_null_destination_is_rejected() {
+        use windows::core::Interface;
+        let e = enumerator(2);
+        let mut fetched = 0u32;
+        let hr = unsafe {
+            (Interface::vtable(&e).Next)(
+                Interface::as_raw(&e),
+                1,
+                std::ptr::null_mut(),
+                &mut fetched,
+            )
+        };
+        assert_eq!(hr, windows::Win32::Foundation::E_INVALIDARG);
+        assert_eq!(fetched, 0);
+    }
+
+    #[test]
+    fn skip_clamps_and_reset_restarts() {
+        let e = enumerator(3);
+        unsafe { e.Skip(2) }.expect("skip");
+        assert_eq!(next_one(&e).1, 1, "one left after skipping two");
+        unsafe { e.Skip(99) }.expect("skip past the end");
+        assert_eq!(next_one(&e).0, S_FALSE);
+        unsafe { e.Reset() }.expect("reset");
+        assert_eq!(next_one(&e).1, 1, "enumeration restarts");
+    }
+
+    /// A clone carries the current position and then moves independently.
+    #[test]
+    fn a_clone_starts_where_the_original_stands() {
+        let e = enumerator(3);
+        assert_eq!(next_one(&e).1, 1);
+        let c = unsafe { e.Clone() }.expect("clone");
+        assert_eq!(next_one(&c).1, 1);
+        assert_eq!(next_one(&c).1, 1);
+        assert_eq!(next_one(&c).0, S_FALSE, "clone exhausted");
+        assert_eq!(next_one(&e).1, 1, "original still has items");
+    }
+
+    /// Presets cannot read sequence-only frames, so they hide for a selection
+    /// made entirely of them; anything else keeps the full submenu.
+    #[test]
+    fn frames_only_recognises_a_sequence_selection() {
+        let p = |s: &str| PathBuf::from(s);
+        assert!(frames_only(&[p("a.exr"), p("b.EXR")]), "case is ignored");
+        assert!(!frames_only(&[p("a.exr"), p("b.png")]), "mixed selection");
+        assert!(!frames_only(&[p("a.png")]));
+        assert!(!frames_only(&[]), "an empty selection hides nothing");
+        assert!(!frames_only(&[p("noextension")]));
     }
 }
