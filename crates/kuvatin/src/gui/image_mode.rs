@@ -4,7 +4,7 @@
 use super::presets::current_job;
 use super::{name_list, show_error, show_info, AppWindow, FileRow};
 use crate::collect::collect_images;
-use kuvatin_core::batch::{file_result_line, run_jobs_to, summarize};
+use kuvatin_core::batch::{file_result_line, run_jobs_to_until, summarize, BatchSummary};
 use kuvatin_core::crop::CropMode;
 use kuvatin_core::naming::{output_file_name, subfolder_name};
 use kuvatin_core::pipeline::{decode_oriented, plan_unique_outputs, Job};
@@ -15,6 +15,7 @@ use slint::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Per-file crops in ABSOLUTE pixels (x, y, w, h) keyed by input path. Files
@@ -34,6 +35,10 @@ pub(super) struct ImageState {
     pub(super) rows: Rc<VecModel<FileRow>>,
     /// The in-progress crop edit: the file being cropped and its ORIGINAL (w, h).
     pub(super) edit: Arc<Mutex<Option<(PathBuf, u32, u32)>>>,
+    /// Raised by Cancel, cleared when a run starts. The batch runner checks it
+    /// before every file, so a cancel stops the queue without killing the file
+    /// being written at that moment.
+    pub(super) cancel: Arc<AtomicBool>,
 }
 
 impl ImageState {
@@ -61,6 +66,7 @@ impl ImageState {
             thumbs,
             rows,
             edit: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -73,6 +79,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         thumbs,
         rows,
         edit,
+        cancel,
     } = st;
     {
         let files = files.clone();
@@ -307,6 +314,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         let files = files.clone();
         let store = store.clone();
         let crops = crops.clone();
+        let cancel = cancel.clone();
         let ui_weak = ui.as_weak();
         ui.on_convert(move || {
             let inputs = files.lock().unwrap().clone();
@@ -421,6 +429,8 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                     .collect()
             };
 
+            // A previous run's Cancel must not stop this one.
+            cancel.store(false, Ordering::Relaxed);
             ui.set_running(true);
             ui.set_progress(0.0);
             // A fresh run: every row goes back to "queued" (a previous run's
@@ -439,33 +449,41 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             let ui_weak2 = ui_weak.clone();
             let total = items_to.len();
             let rows_paths = inputs.clone();
+            let cancel_flag = cancel.clone();
             std::thread::spawn(move || {
                 let ui_for_progress = ui_weak2.clone();
-                let results = run_jobs_to(&items_to, move |p| {
-                    let frac = p.done as f32 / total as f32;
-                    let idx = rows_paths.iter().position(|x| *x == p.last.input);
-                    let ok = p.last.outcome.is_ok();
-                    // "410 KB (-66%)" for the row, read here on the worker so the
-                    // UI thread never touches the filesystem.
-                    let result = match &p.last.outcome {
-                        Ok(out) => file_result_line(&p.last.input, out),
-                        Err(_) => String::new(),
-                    };
-                    let ui3 = ui_for_progress.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui3.upgrade() {
-                            ui.set_progress(frac);
-                            if let Some(i) = idx {
-                                let model = ui.get_files();
-                                if let Some(mut row) = model.row_data(i) {
-                                    row.status = if ok { "done".into() } else { "error".into() };
-                                    row.result = result.into();
-                                    model.set_row_data(i, row);
+                let results = run_jobs_to_until(
+                    &items_to,
+                    move |p| {
+                        let frac = p.done as f32 / total as f32;
+                        let idx = rows_paths.iter().position(|x| *x == p.last.input);
+                        let ok = p.last.outcome.is_ok();
+                        // "410 KB (-66%)" for the row, read here on the worker so
+                        // the UI thread never touches the filesystem.
+                        let result = match &p.last.outcome {
+                            Ok(out) => file_result_line(&p.last.input, out),
+                            Err(_) => String::new(),
+                        };
+                        let ui3 = ui_for_progress.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui3.upgrade() {
+                                ui.set_progress(frac);
+                                if let Some(i) = idx {
+                                    let model = ui.get_files();
+                                    if let Some(mut row) = model.row_data(i) {
+                                        row.status =
+                                            if ok { "done".into() } else { "error".into() };
+                                        row.result = result.into();
+                                        model.set_row_data(i, row);
+                                    }
                                 }
                             }
-                        }
-                    });
-                });
+                        });
+                    },
+                    // Checked before each file: the one being written finishes,
+                    // the rest of the queue is reported as cancelled.
+                    move || cancel_flag.load(Ordering::Relaxed),
+                );
                 // The summary: counts, bytes in vs out, and which files failed.
                 let summary = summarize(&results);
                 let failed: Vec<String> = results
@@ -485,15 +503,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_running(false);
                         ui.set_progress(1.0);
-                        let title = if summary.failed == 0 {
-                            format!(
-                                "Converted {} file{}",
-                                summary.ok,
-                                if summary.ok == 1 { "" } else { "s" }
-                            )
-                        } else {
-                            format!("Converted {} of {} files", summary.ok, summary.total())
-                        };
+                        let title = run_title(&summary);
                         let mut detail = summary.size_line();
                         if !failed.is_empty() {
                             if !detail.is_empty() {
@@ -516,6 +526,30 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             });
         });
     }
+
+    {
+        // Cancel: the button the Convert button turns into while a run is on.
+        // Raising the flag is all it does — the worker notices before it starts
+        // the next file, and the run ends through its normal summary path.
+        let cancel = cancel.clone();
+        ui.on_convert_cancel(move || cancel.store(true, Ordering::Relaxed));
+    }
+}
+
+/// The heading for the dialog a finished run puts up. A cancelled run says so
+/// rather than reporting the files it did get through as the whole job.
+fn run_title(s: &BatchSummary) -> String {
+    if s.cancelled > 0 {
+        return format!("Cancelled after {} of {} files", s.ok, s.total());
+    }
+    if s.failed == 0 {
+        return format!(
+            "Converted {} file{}",
+            s.ok,
+            if s.ok == 1 { "" } else { "s" }
+        );
+    }
+    format!("Converted {} of {} files", s.ok, s.total())
 }
 
 /// A decoded thumbnail, kept as raw RGBA so it is `Send` (a `slint::Image` is
@@ -725,5 +759,45 @@ pub(super) fn add_paths(
     drop(guard);
     if !missing.is_empty() {
         spawn_thumbnails(ui_weak.clone(), files.clone(), thumbs.clone(), missing);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kuvatin_core::batch::BatchSummary;
+
+    #[test]
+    fn a_clean_run_says_how_many_files_it_converted() {
+        let s = BatchSummary {
+            ok: 3,
+            ..Default::default()
+        };
+        assert_eq!(run_title(&s), "Converted 3 files");
+        let one = BatchSummary {
+            ok: 1,
+            ..Default::default()
+        };
+        assert_eq!(run_title(&one), "Converted 1 file");
+    }
+
+    #[test]
+    fn failures_are_counted_against_the_total() {
+        let s = BatchSummary {
+            ok: 2,
+            failed: 1,
+            ..Default::default()
+        };
+        assert_eq!(run_title(&s), "Converted 2 of 3 files");
+    }
+
+    #[test]
+    fn a_cancelled_run_says_so_rather_than_claiming_success() {
+        let s = BatchSummary {
+            ok: 2,
+            cancelled: 3,
+            ..Default::default()
+        };
+        assert_eq!(run_title(&s), "Cancelled after 2 of 5 files");
     }
 }

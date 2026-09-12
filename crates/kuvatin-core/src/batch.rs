@@ -124,11 +124,32 @@ pub fn run_jobs_to<F>(items: &[(PathBuf, Job, PathBuf)], on_progress: F) -> Vec<
 where
     F: Fn(Progress) + Sync,
 {
+    run_jobs_to_until(items, on_progress, || false)
+}
+
+/// [`run_jobs_to`] with the cancellation semantics of [`run_batch_until`]: an
+/// item started after the flag is set is reported as [`CANCELLED`] without
+/// being converted, and without a progress call.
+pub fn run_jobs_to_until<F, C>(
+    items: &[(PathBuf, Job, PathBuf)],
+    on_progress: F,
+    cancelled: C,
+) -> Vec<FileResult>
+where
+    F: Fn(Progress) + Sync,
+    C: Fn() -> bool + Sync,
+{
     let total = items.len();
     let done = AtomicUsize::new(0);
     items
         .par_iter()
         .map(|(input, job, output)| {
+            if cancelled() {
+                return FileResult {
+                    input: input.clone(),
+                    outcome: Err(CANCELLED.into()),
+                };
+            }
             let outcome =
                 isolate(|| process_file_to(input, job, output).map_err(|e| e.to_string()));
             let result = FileResult {
@@ -397,6 +418,67 @@ mod tests {
             isolate(|| Ok(PathBuf::from("x"))).unwrap(),
             PathBuf::from("x")
         );
+    }
+
+    /// Exporting into a chosen folder is the one batch path that could not be
+    /// stopped: the other two take a cancel predicate and this did not, so a
+    /// few thousand files had to run to the end.
+    #[test]
+    fn run_jobs_to_stops_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = Job {
+            format: OutputFormat::Webp,
+            ..Job::default()
+        };
+        let mut items = Vec::new();
+        for n in 0..8 {
+            let src = dir.path().join(format!("{n}.png"));
+            RgbaImage::from_pixel(8, 8, Rgba([n as u8, 9, 9, 255]))
+                .save(&src)
+                .unwrap();
+            items.push((src, job.clone(), dir.path().join(format!("out/{n}.webp"))));
+        }
+
+        let results = run_jobs_to_until(&items, |_| {}, || true);
+
+        assert_eq!(results.len(), items.len(), "every item is accounted for");
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(&r.outcome, Err(e) if e == CANCELLED)),
+            "a cancelled run converts nothing"
+        );
+        assert_eq!(
+            summarize(&results).cancelled,
+            items.len(),
+            "and the summary says so"
+        );
+        assert!(
+            !dir.path().join("out").exists(),
+            "no output folder was created"
+        );
+    }
+
+    /// Not cancelled behaves exactly as before.
+    #[test]
+    fn run_jobs_to_until_without_cancellation_converts_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.png");
+        RgbaImage::from_pixel(10, 10, Rgba([4, 5, 6, 255]))
+            .save(&src)
+            .unwrap();
+        let out = dir.path().join("out").join("a.webp");
+        let items = vec![(
+            src,
+            Job {
+                format: OutputFormat::Webp,
+                ..Job::default()
+            },
+            out.clone(),
+        )];
+        let results = run_jobs_to_until(&items, |_| {}, || false);
+        assert!(results[0].outcome.is_ok(), "{:?}", results[0].outcome);
+        assert!(out.exists());
     }
 
     /// The GUI's real path: explicit targets, parents created, progress per

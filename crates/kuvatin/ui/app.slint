@@ -212,6 +212,7 @@ export component AppWindow inherits Window {
     callback remove-file(int);             // the × on a file row
     callback preset-changed(int);
     callback convert();
+    callback convert-cancel();             // stop a running batch after the current file
     callback save-preset(string);
     callback rename-preset(string);          // give the selected preset the typed name
     callback move-preset(int);               // -1 = up, +1 = down (menu order follows)
@@ -264,6 +265,9 @@ export component AppWindow inherits Window {
         if (root.seq-config) { root.seq-config = false; return EventResult.accept; }
         if (root.importing) { root.import-cancel(); return EventResult.accept; }
         if (root.confirm-delete) { root.confirm-delete = false; return EventResult.accept; }
+        // No modal is up: Esc stops a running image batch, the way it aborts an
+        // import. Harmless in Video mode, where `running` is never set.
+        if (root.running) { root.convert-cancel(); return EventResult.accept; }
         return EventResult.reject;
     }
     function video-keys(event: KeyEvent) -> EventResult {
@@ -1097,11 +1101,14 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        // One button, two jobs: Convert, then Cancel for as long
+                        // as the batch runs. Cancel stops the queue after the
+                        // file currently being written, so nothing is half-saved.
                         Rectangle {
                             height: 42px;
                             border-radius: 8px;
                             background: root.running
-                                ? #1d6b62
+                                ? (convert-ta.pressed || convert-ta.has-hover ? Theme.danger2 : #7a2a33)
                                 : (convert-ta.pressed
                                     ? Theme.accent-pressed
                                     : (convert-ta.has-hover ? Theme.accent-pressed : Theme.accent));
@@ -1109,18 +1116,19 @@ export component AppWindow inherits Window {
                             border-color: #ffffff;
                             animate background { duration: 150ms; }
                             accessible-role: button;
-                            accessible-label: root.running ? "Converting" : "Convert";
-                            accessible-enabled: !root.running;
+                            accessible-label: root.running ? "Cancel conversion" : "Convert";
                             convert-fs := FocusScope {
-                                enabled: !root.running;
                                 key-pressed(e) => {
-                                    if (!root.running && (e.text == Key.Return || e.text == " ")) { root.convert(); return accept; }
+                                    if (e.text == Key.Return || e.text == " ") {
+                                        if (root.running) { root.convert-cancel(); } else { root.convert(); }
+                                        return accept;
+                                    }
                                     return reject;
                                 }
                             }
                             Text {
-                                text: root.running ? "Converting…" : "Convert";
-                                color: root.running ? Theme.muted : Theme.on-accent;
+                                text: root.running ? "Cancel" : "Convert";
+                                color: root.running ? #ffffff : Theme.on-accent;
                                 animate color { duration: 150ms; }
                                 font-size: 14px;
                                 font-weight: 700;
@@ -1128,8 +1136,10 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center;
                             }
                             convert-ta := TouchArea {
-                                enabled: !root.running;
-                                clicked => { convert-fs.focus(); root.convert(); }
+                                clicked => {
+                                    convert-fs.focus();
+                                    if (root.running) { root.convert-cancel(); } else { root.convert(); }
+                                }
                             }
                         }
                     }
