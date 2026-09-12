@@ -248,6 +248,12 @@ The setting lives in `%APPDATA%\Kuvatin\settings.toml`.
 See [`docs/superpowers/specs/`](docs/superpowers/specs/) for the design and
 [`docs/superpowers/plans/`](docs/superpowers/plans/) for the implementation plans.
 
+## Contributing
+
+Issues and pull requests are welcome: [what to include and how to build](.github/CONTRIBUTING.md).
+Something security-sensitive goes [here](.github/SECURITY.md) instead of into a
+public issue. What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). Kuvatin links libimagequant, which is GPL-licensed for
@@ -258,8 +264,9 @@ this kind of use, so the whole application is distributed under the GPL.
 Working today: compress / convert / resize / crop / batch / presets / context menu /
 image-sequence rendering / video timeline editing / hardware video export /
 custom frameless UI / `.msi` installer with a trimmed, license-complete
-GStreamer runtime and a Start-menu shortcut. What changed in each version is
-on the [releases page](https://github.com/Ville-Mattila/Kuvatin/releases).
+GStreamer runtime and a Start-menu shortcut. What changed in each version is in
+[CHANGELOG.md](CHANGELOG.md), and at greater length on the
+[releases page](https://github.com/Ville-Mattila/Kuvatin/releases).
 
 Every master push runs `cargo fmt --check`, `clippy -D warnings`, `cargo deny`
 (licenses + advisories), the deterministic test suites and a headless smoke

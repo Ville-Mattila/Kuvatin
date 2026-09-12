@@ -1,0 +1,7 @@
+# The site is one page; the planning notes under /superpowers/ are working
+# documents kept for the record, not pages meant to be found in search.
+User-agent: *
+Allow: /
+Disallow: /superpowers/
+
+Sitemap: https://ville-mattila.github.io/Kuvatin/sitemap.xml

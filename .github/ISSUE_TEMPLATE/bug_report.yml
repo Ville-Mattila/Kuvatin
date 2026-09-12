@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Kuvatin does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If this is a security issue, please use
+        [the private advisory form](https://github.com/Ville-Mattila/Kuvatin/security/advisories/new)
+        instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        1. Right-clicked three PNGs and chose "Compress PNG"
+        2. Expected three -kuvatin.png files next to them
+        3. Got a dialog saying ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Kuvatin version
+      description: The Download button on the site names the latest; an installed copy shows its version in Apps & Features.
+      placeholder: "2.9.2"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Win+R, `winver`, and copy the line with the build number.
+      placeholder: "Windows 11 24H2 (build 26100.1742)"
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did it happen
+      multiple: true
+      options:
+        - The app window, images
+        - The app window, video
+        - The Explorer right-click menu
+        - The installer
+        - Somewhere else
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        `%LOCALAPPDATA%\Kuvatin\kuvatin.log` records right-click runs, menu
+        registration and update checks. Paste the lines around the problem, or
+        attach the file. It contains file paths, so trim anything private.
+      render: text
+  - type: textarea
+    id: files
+    attributes:
+      label: A file that shows it
+      description: |
+        If a particular image or video triggers it, attaching one makes the
+        difference between a fix and a guess. Drag it in here.

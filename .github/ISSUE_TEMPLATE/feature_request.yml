@@ -1,0 +1,29 @@
+name: Feature request
+description: Something Kuvatin should be able to do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Kuvatin tries to do a few things well rather than everything adequately,
+        so the most useful thing you can describe is the job you were trying to
+        get done — not only the control you expected to find.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The task, and how you handle it today.
+      placeholder: |
+        I export 200 stills a week and have to open each one in another app to ...
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: How you imagine it working in Kuvatin. Rough is fine.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else you have tried
+      description: Other apps, scripts, or a workaround inside Kuvatin.
