@@ -52,10 +52,53 @@ exceptions = []
 [licenses.private]
 ignore = true
 
+# Duplicate versions of the same crate used to be a warning, which is a line
+# in a log nobody reads: twenty-eight of them passed silently. They are now an
+# error, with the ones that are not ours to fix listed below — so a NEW
+# duplicate, introduced by a dependency bump of ours, fails the check instead
+# of joining the pile.
+#
+# What was ours: `toml` and `thiserror` were pinned a major behind the rest of
+# the tree and now match it, which removed seven of the twenty-eight.
+#
+# What is left, and why:
+#
+#   windows-*  We bind Win32 through `windows` 0.58; Slint's winit backend
+#              pulls 0.61 and 0.62. Moving up is a port of every `unsafe` call
+#              in the shell integration and the COM context-menu handler, not
+#              a version bump, and the handler runs inside explorer.exe — so
+#              it happens deliberately, with a real install test, or not at all.
+#
+#   bitflags, hashbrown, png, read-fonts, rustc-hash, skrifa, smol_str
+#              Slint's font and graphics stack against ours. Nothing in this
+#              workspace chooses either version.
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "allow"
 highlight = "all"
+skip = [
+    { crate = "windows" },
+    { crate = "windows-collections" },
+    { crate = "windows-core" },
+    { crate = "windows-future" },
+    { crate = "windows-implement" },
+    { crate = "windows-interface" },
+    { crate = "windows-link" },
+    { crate = "windows-numerics" },
+    { crate = "windows-result" },
+    { crate = "windows-strings" },
+    { crate = "windows-sys" },
+    { crate = "windows-targets" },
+    { crate = "windows-threading" },
+    { crate = "windows_x86_64_msvc" },
+    { crate = "bitflags" },
+    { crate = "hashbrown" },
+    { crate = "png" },
+    { crate = "read-fonts" },
+    { crate = "rustc-hash" },
+    { crate = "skrifa" },
+    { crate = "smol_str" },
+]
 
 [sources]
 unknown-registry = "deny"
