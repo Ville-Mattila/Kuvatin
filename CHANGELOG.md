@@ -15,6 +15,14 @@ something is fixed.
 
 ## [Unreleased]
 
+The video editor learns to remember. A project — the timeline, the tracks,
+every clip's trim and transform — saves to a file and comes back. Neither end
+of an export freezes the window any more, a hardware encoder that fails no
+longer loses the export, and the timeline zooms. On the image side, a photo's
+colour profile and EXIF now survive the conversion. And most of the app can be
+driven from the keyboard: the file list, the sliders, the dialogs, and the
+clips on the timeline.
+
 ### Added
 - **The export encoder is a choice, and a failing one is no longer fatal.**
   Automatic, hardware only, or software only; under automatic, a hardware
@@ -75,6 +83,12 @@ something is fixed.
   that was never shown.
 - Transparent edges no longer fringe in greyscale or 16-bit images (the
   premultiplied resample path covered only RGBA8).
+
+Checksum: see `kuvatin-2.10.0-x86_64.msi.sha256` (and
+`kuvatin-x86_64.msi.sha256` for the fixed-name copy the site links). The
+installer itself is unsigned, so SmartScreen will ask once — More info, then
+Run anyway. The Windows 11 menu package inside it *is* signed, which is what
+puts "Kuvatin" in the top-level right-click menu.
 
 ## [2.9.2] - 2026-09-11
 
