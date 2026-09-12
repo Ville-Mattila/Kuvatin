@@ -50,6 +50,22 @@ pub fn validate_preset_name(name: &str) -> Result<(), String> {
     if trimmed.chars().any(char::is_control) {
         return Err("Preset names can't contain control characters.".into());
     }
+    // Explorer expands %1, %*, %V and similar tokens inside a verb's command
+    // line, so a name carrying one would swallow the selected path and come
+    // back to Kuvatin as an unknown preset. A percent that starts no token —
+    // "Resize to 50%" — is common and harmless.
+    if trimmed.split('%').skip(1).any(|rest| {
+        rest.chars()
+            .next()
+            .map(|c| c.is_ascii_alphanumeric() || c == '*' || c == '~')
+            .unwrap_or(false)
+    }) {
+        return Err(
+            "Preset names can't contain %1, %V or similar: Windows replaces those with \
+             the selected file on the Explorer menu's command line."
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -67,6 +83,20 @@ mod name_tests {
         assert!(validate_preset_name("Say \"cheese\"").is_err());
         assert!(validate_preset_name("trailing\\").is_err());
         assert!(validate_preset_name("two\nlines").is_err());
+    }
+
+    /// Explorer expands %1, %V, %* and friends inside the verb's command line,
+    /// so a name carrying one would swallow the selected path and arrive back
+    /// as an unknown preset. A percent that starts no token is common and fine.
+    #[test]
+    fn names_carrying_an_explorer_token_are_refused() {
+        assert!(validate_preset_name("Resize to 50%").is_ok());
+        assert!(validate_preset_name("100 % of the size").is_ok());
+        assert!(validate_preset_name("ends in percent %").is_ok());
+        assert!(validate_preset_name("Half %1 size").is_err());
+        assert!(validate_preset_name("%V folder").is_err());
+        assert!(validate_preset_name("all %*").is_err());
+        assert!(validate_preset_name("short %~1 name").is_err());
     }
 
     #[test]

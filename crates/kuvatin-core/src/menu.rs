@@ -76,21 +76,28 @@ pub fn frame_items(items: &[MenuItem]) -> Vec<MenuItem> {
 /// The arguments an item passes to `kuvatin.exe` ahead of the selected paths
 /// (empty for the GUI: a bare path list opens the window).
 pub fn action_args(action: &Action) -> Vec<String> {
-    match action {
+    let mut args = match action {
         Action::Preset(preset) => vec!["--preset".into(), preset.clone()],
         Action::SequenceMp4 => vec!["--sequence-mp4".into()],
         Action::Gui => Vec::new(),
-    }
+    };
+    // Everything after this is a path, however it is spelled. Without it a
+    // file named "--sequence-mp4.png" is parsed as a flag and the run fails.
+    args.push("--".into());
+    args
 }
 
 /// The registry command line a static verb runs. `token` is Explorer's
 /// placeholder for the clicked item: `%1` (file/folder) or `%V` (background
 /// folder).
 pub fn command_line(exe: &str, action: &Action, token: &str) -> String {
+    // The `--` is the flag terminator: Explorer substitutes the clicked file
+    // for the token, and a file named like a flag would otherwise be parsed
+    // as one and fail the whole run.
     match action {
-        Action::Preset(preset) => format!("\"{exe}\" --preset \"{preset}\" \"{token}\""),
-        Action::SequenceMp4 => format!("\"{exe}\" --sequence-mp4 \"{token}\""),
-        Action::Gui => format!("\"{exe}\" \"{token}\""),
+        Action::Preset(preset) => format!("\"{exe}\" --preset \"{preset}\" -- \"{token}\""),
+        Action::SequenceMp4 => format!("\"{exe}\" --sequence-mp4 -- \"{token}\""),
+        Action::Gui => format!("\"{exe}\" -- \"{token}\""),
     }
 }
 
@@ -106,27 +113,29 @@ mod tests {
                 &Action::Preset("Convert to WebP".into()),
                 "%1"
             ),
-            r#""C:\Program Files\Kuvatin\kuvatin.exe" --preset "Convert to WebP" "%1""#
+            r#""C:\Program Files\Kuvatin\kuvatin.exe" --preset "Convert to WebP" -- "%1""#
         );
         assert_eq!(
             command_line(r"C:\k\kuvatin.exe", &Action::SequenceMp4, "%1"),
-            r#""C:\k\kuvatin.exe" --sequence-mp4 "%1""#
+            r#""C:\k\kuvatin.exe" --sequence-mp4 -- "%1""#
         );
         // The GUI item has no flag; background verbs get the folder via %V.
         assert_eq!(
             command_line(r"C:\k\kuvatin.exe", &Action::Gui, "%V"),
-            r#""C:\k\kuvatin.exe" "%V""#
+            r#""C:\k\kuvatin.exe" -- "%V""#
         );
     }
 
+    /// Every form ends with the flag terminator, so a selected file whose name
+    /// begins with a dash is a path and not a flag.
     #[test]
     fn action_args_match_the_command_lines() {
         assert_eq!(
             action_args(&Action::Preset("Convert to WebP".into())),
-            ["--preset", "Convert to WebP"]
+            ["--preset", "Convert to WebP", "--"]
         );
-        assert_eq!(action_args(&Action::SequenceMp4), ["--sequence-mp4"]);
-        assert!(action_args(&Action::Gui).is_empty());
+        assert_eq!(action_args(&Action::SequenceMp4), ["--sequence-mp4", "--"]);
+        assert_eq!(action_args(&Action::Gui), ["--"]);
     }
 
     /// The submenu mirrors the store: every preset in order (position carried

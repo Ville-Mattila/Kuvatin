@@ -189,6 +189,25 @@ mod tests {
         assert!(parse_err(&["--fps", "24", "a.png"]));
     }
 
+    /// Both menus put a flag terminator before the selected paths, so a file
+    /// whose name begins with a dash is still treated as a file.
+    #[test]
+    fn paths_after_the_terminator_are_never_flags() {
+        assert_eq!(
+            mode_of(&["--preset", "X", "--", "--sequence-mp4.png"]),
+            Mode::QuickRun {
+                preset: "X".into(),
+                paths: vec!["--sequence-mp4.png".into()]
+            }
+        );
+        assert_eq!(
+            mode_of(&["--", "-h.png"]),
+            Mode::Gui {
+                paths: vec!["-h.png".into()]
+            }
+        );
+    }
+
     /// A headless mode without any PATH is reported, not silently a no-op.
     #[test]
     fn headless_modes_need_a_path() {
