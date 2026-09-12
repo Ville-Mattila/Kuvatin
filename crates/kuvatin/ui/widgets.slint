@@ -20,6 +20,10 @@ export component QualitySlider inherits Rectangle {
     accessible-role: slider;
     accessible-label: "Quality";
     accessible-value: root.value + "";
+    // The focus ring: without it a keyboard user cannot see where they are.
+    border-radius: 6px;
+    border-width: qfs.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
 
     // track
     Rectangle {
@@ -58,7 +62,25 @@ export component QualitySlider inherits Rectangle {
             root.value = Math.clamp(Math.round(mx / root.width * 100), 0, 100);
         }
         moved => { ta.set(ta.mouse-x); }
-        clicked => { ta.set(ta.mouse-x); }
+        clicked => { qfs.focus(); ta.set(ta.mouse-x); }
+    }
+
+    // The slider announced itself as a slider and then ignored the keyboard:
+    // Tab skipped it and the arrows did nothing, so quality could only be set
+    // with a mouse.
+    qfs := FocusScope {
+        function step(by: int) {
+            root.value = Math.clamp(root.value + by, 0, 100);
+        }
+        key-pressed(e) => {
+            if (e.text == Key.LeftArrow) { qfs.step(-1); return accept; }
+            if (e.text == Key.RightArrow) { qfs.step(1); return accept; }
+            if (e.text == Key.DownArrow) { qfs.step(-10); return accept; }
+            if (e.text == Key.UpArrow) { qfs.step(10); return accept; }
+            if (e.text == Key.Home) { root.value = 0; return accept; }
+            if (e.text == Key.End) { root.value = 100; return accept; }
+            return reject;
+        }
     }
 }
 
@@ -443,6 +465,9 @@ export component Scrubber inherits Rectangle {
     accessible-role: slider;
     accessible-label: root.label;
     accessible-value: Math.round(root.value * 100) + "%";
+    border-radius: 5px;
+    border-width: sfs.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
     Rectangle {
         y: parent.height / 2 - 3px;
         height: 6px;
@@ -474,9 +499,27 @@ export component Scrubber inherits Rectangle {
     sta := TouchArea {
         function emit(mx: length) { root.changed(Math.clamp(mx / root.width, 0, 1)); }
         moved => { sta.emit(sta.mouse-x); }
-        clicked => { sta.emit(sta.mouse-x); }
+        clicked => { sfs.focus(); sta.emit(sta.mouse-x); }
         pointer-event(ev) => {
             if (ev.kind == PointerEventKind.up) { root.released(); }
+        }
+    }
+
+    // Keyboard scrubbing: a step, then the same `released` a mouse-up sends,
+    // so the seek commits exactly as it does for a drag.
+    sfs := FocusScope {
+        function step(by: float) {
+            root.changed(Math.clamp(root.value + by, 0, 1));
+            root.released();
+        }
+        key-pressed(e) => {
+            if (e.text == Key.LeftArrow) { sfs.step(-0.01); return accept; }
+            if (e.text == Key.RightArrow) { sfs.step(0.01); return accept; }
+            if (e.text == Key.DownArrow) { sfs.step(-0.1); return accept; }
+            if (e.text == Key.UpArrow) { sfs.step(0.1); return accept; }
+            if (e.text == Key.Home) { root.changed(0); root.released(); return accept; }
+            if (e.text == Key.End) { root.changed(1); root.released(); return accept; }
+            return reject;
         }
     }
 }
@@ -496,6 +539,27 @@ export component InspSlider inherits Rectangle {
     accessible-value: Math.round(root.value) + root.suffix;
     property <float> frac: (root.max - root.min) > 0
         ? Math.clamp((root.value - root.min) / (root.max - root.min), 0, 1) : 0;
+    border-radius: 6px;
+    border-width: ifs.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    // Arrows move by a hundredth of the range, up/down by a tenth — the same
+    // proportions whatever the transform's units are.
+    ifs := FocusScope {
+        function step(frac-of-range: float) {
+            root.value = Math.clamp(
+                root.value + (root.max - root.min) * frac-of-range, root.min, root.max);
+            root.changed();
+        }
+        key-pressed(e) => {
+            if (e.text == Key.LeftArrow) { ifs.step(-0.01); return accept; }
+            if (e.text == Key.RightArrow) { ifs.step(0.01); return accept; }
+            if (e.text == Key.DownArrow) { ifs.step(-0.1); return accept; }
+            if (e.text == Key.UpArrow) { ifs.step(0.1); return accept; }
+            if (e.text == Key.Home) { root.value = root.min; root.changed(); return accept; }
+            if (e.text == Key.End) { root.value = root.max; root.changed(); return accept; }
+            return reject;
+        }
+    }
     VerticalLayout {
         spacing: 5px;
         HorizontalLayout {
@@ -533,7 +597,7 @@ export component InspSlider inherits Rectangle {
                     root.changed();
                 }
                 moved => { kta.emit(kta.mouse-x); }
-                clicked => { kta.emit(kta.mouse-x); }
+                clicked => { ifs.focus(); kta.emit(kta.mouse-x); }
             }
         }
     }
