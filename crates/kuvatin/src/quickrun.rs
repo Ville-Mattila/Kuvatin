@@ -21,6 +21,34 @@ impl QuickRunReport {
     }
 }
 
+/// What a finished quick run means for the person who started it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The user cancelled: no dialog at all, even if files had already failed
+    /// before they stopped it. They know what they did.
+    Cancelled,
+    /// Some files could not be processed: name them and exit non-zero, so a
+    /// script that invoked us can tell.
+    Failed { failed: usize, total: usize },
+    /// Everything went through; log the count and say nothing.
+    Converted(usize),
+}
+
+/// Read the report the way the shell entry point does. This is the contract of
+/// the entire right-click feature, and it used to live inline in a match arm.
+pub fn verdict(report: &QuickRunReport) -> Verdict {
+    if report.cancelled > 0 {
+        return Verdict::Cancelled;
+    }
+    if report.failure_count() > 0 {
+        return Verdict::Failed {
+            failed: report.failure_count(),
+            total: report.total,
+        };
+    }
+    Verdict::Converted(report.total - report.failure_count() - report.cancelled)
+}
+
 /// Find the named preset, or explain why it isn't there.
 ///
 /// "unknown preset" on its own is misleading when the store was unreadable
@@ -124,6 +152,41 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report(total: usize, failed: usize, cancelled: usize) -> QuickRunReport {
+        QuickRunReport {
+            total,
+            failures: (0..failed)
+                .map(|n| (PathBuf::from(format!("{n}.png")), "no".to_string()))
+                .collect(),
+            cancelled,
+        }
+    }
+
+    /// The contract of the whole right-click feature: a cancelled run says
+    /// nothing, a run with failures reports them and exits non-zero, and an
+    /// ordinary run just logs. It lived in a match arm in main() with no test.
+    #[test]
+    fn a_cancelled_run_is_silent_even_when_files_had_already_failed() {
+        assert_eq!(verdict(&report(9, 2, 4)), Verdict::Cancelled);
+        assert_eq!(verdict(&report(9, 0, 9)), Verdict::Cancelled);
+    }
+
+    #[test]
+    fn failures_are_reported_against_the_total() {
+        assert_eq!(
+            verdict(&report(5, 2, 0)),
+            Verdict::Failed {
+                failed: 2,
+                total: 5
+            }
+        );
+    }
+
+    #[test]
+    fn a_clean_run_counts_what_it_converted() {
+        assert_eq!(verdict(&report(3, 0, 0)), Verdict::Converted(3));
+    }
 
     /// "unknown preset" on its own sends the user hunting for a typo when the
     /// real story is that their store could not be read and was replaced.

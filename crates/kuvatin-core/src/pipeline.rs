@@ -97,6 +97,13 @@ pub fn process_image(img: DynamicImage, job: &Job) -> DynamicImage {
 /// [`decode_with_metadata`]), attached wherever the container can carry it:
 /// PNG, JPEG and WebP can, BMP and GIF cannot, so those two lose it. Pass
 /// `&Metadata::default()` for an image built from scratch.
+///
+/// Bit depth: a 16-bit-per-channel input keeps its depth through plain PNG,
+/// lossless PNG and TIFF, and drops to 8 everywhere else — WebP and JPEG are
+/// 8-bit formats, and a quantised palette (lossy PNG) is 8-bit by
+/// construction. Nothing is refused for its depth; the conversion is silent
+/// because there is no alternative to it. The matrix is pinned by
+/// `the_bit_depth_of_every_output_is_the_documented_one`.
 pub fn encode(
     img: DynamicImage,
     format: OutputFormat,
@@ -993,6 +1000,48 @@ mod tests {
         let again = process_file(&src, &job).unwrap();
         assert_ne!(again, out);
         assert_eq!(again.parent(), Some(folder.as_path()));
+    }
+
+    /// What each output does with a 16-bit-per-channel input, pinned. Half of
+    /// these cannot keep the depth — WebP and JPEG are 8-bit formats, a
+    /// quantised palette is 8-bit by construction — and the point is that the
+    /// list is the documented one, not whatever the encoders happen to do.
+    #[test]
+    fn the_bit_depth_of_every_output_is_the_documented_one() {
+        let mut img = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::new(8, 6);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            // A transparent column, so no encoder can drop alpha as redundant.
+            *p = image::Rgba([
+                x as u16 * 5000,
+                y as u16 * 9000,
+                300,
+                if x == 0 { 0 } else { 65535 },
+            ]);
+        }
+        let src = DynamicImage::ImageRgba16(img);
+        use image::ColorType::*;
+        let cases = [
+            ("plain PNG", OutputFormat::Png, PngOptimize::None, Rgba16),
+            (
+                "lossless PNG",
+                OutputFormat::Png,
+                PngOptimize::Lossless,
+                Rgba16,
+            ),
+            ("lossy PNG", OutputFormat::Png, PngOptimize::Lossy, Rgba8),
+            ("WebP", OutputFormat::Webp, PngOptimize::None, Rgba8),
+            ("JPEG", OutputFormat::Jpeg, PngOptimize::None, Rgb8),
+            ("TIFF", OutputFormat::Tiff, PngOptimize::None, Rgba16),
+            ("BMP", OutputFormat::Bmp, PngOptimize::None, Rgba8),
+            ("GIF", OutputFormat::Gif, PngOptimize::None, Rgba8),
+        ];
+        for (name, format, png, expected) in cases {
+            let bytes = encode(src.clone(), format, 90, png, &Metadata::default())
+                .unwrap_or_else(|e| panic!("{name} refused a 16-bit image: {e}"));
+            let back = image::load_from_memory(&bytes)
+                .unwrap_or_else(|e| panic!("{name} wrote something undecodable: {e}"));
+            assert_eq!(back.color(), expected, "{name}");
+        }
     }
 
     /// A TIFF block whose only entry is the orientation tag.

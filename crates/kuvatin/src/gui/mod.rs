@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use image_mode::ImageState;
 use kuvatin_core::preset::PresetStore;
 use presets::refresh_presets;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use video::export::ExportState;
 use video::import::ImportState;
@@ -33,6 +33,7 @@ fn show_error(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
     ui.set_error_title(title.into());
     ui.set_error_detail(detail.as_ref().into());
     ui.set_dialog_info(false);
+    ui.set_dialog_reveal("".into());
     ui.set_error_visible(true);
 }
 
@@ -42,7 +43,34 @@ fn show_info(ui: &AppWindow, title: &str, detail: impl AsRef<str>) {
     ui.set_error_title(title.into());
     ui.set_error_detail(detail.as_ref().into());
     ui.set_dialog_info(true);
+    ui.set_dialog_reveal("".into());
     ui.set_error_visible(true);
+}
+
+/// [`show_info`] plus a "Show in folder" button for the file the message is
+/// about — the difference between being told something was written and being
+/// able to go and look at it.
+fn show_info_at(ui: &AppWindow, title: &str, detail: impl AsRef<str>, path: &Path) {
+    show_info(ui, title, detail);
+    ui.set_dialog_reveal(path.to_string_lossy().as_ref().into());
+}
+
+/// Open the file's folder with the file selected. Explorer wants the path
+/// verbatim after `/select,` and quoted, and it does not accept a separate
+/// argument; anything that fails here fails silently, since this is a
+/// convenience on top of a message that already names the file.
+fn reveal_in_explorer(path: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = path;
 }
 
 /// Join file names for a dialog, capped so twenty failures don't overflow it
@@ -98,6 +126,8 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     // Images mode: the file queue, per-file crops, thumbnails, the viewer.
     let image = ImageState::new(&ui, &initial_paths);
     presets::wire(&ui, &store, &store_path);
+    // "Show in folder" on any dialog that names a file it just wrote.
+    ui.on_reveal_path(|p| reveal_in_explorer(Path::new(p.as_str())));
     updates::wire(&ui);
     image_mode::wire(&ui, &image, &store);
 

@@ -2,7 +2,7 @@
 //! its inline crop editor, thumbnails, and the Convert batch.
 
 use super::presets::current_job;
-use super::{name_list, show_error, show_info, AppWindow, FileRow};
+use super::{name_list, show_error, show_info, show_info_at, AppWindow, FileRow};
 use crate::collect::collect_images;
 use kuvatin_core::batch::{file_result_line, run_jobs_to_until, summarize, BatchSummary};
 use kuvatin_core::crop::CropMode;
@@ -486,6 +486,10 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                 );
                 // The summary: counts, bytes in vs out, and which files failed.
                 let summary = summarize(&results);
+                // Any one output is enough to open the folder they landed in.
+                let written = results
+                    .iter()
+                    .find_map(|r| r.outcome.as_ref().ok().cloned());
                 let failed: Vec<String> = results
                     .iter()
                     .filter_map(|r| match &r.outcome {
@@ -516,10 +520,10 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                                 name_list(&failed)
                             ));
                         }
-                        if summary.failed == 0 {
-                            show_info(&ui, &title, detail);
-                        } else {
-                            show_error(&ui, &title, detail);
+                        match (summary.failed, &written) {
+                            (0, Some(path)) => show_info_at(&ui, &title, detail, path),
+                            (0, None) => show_info(&ui, &title, detail),
+                            _ => show_error(&ui, &title, detail),
                         }
                     }
                 });

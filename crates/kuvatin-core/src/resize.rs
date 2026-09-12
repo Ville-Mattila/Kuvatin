@@ -185,13 +185,26 @@ impl Channel for u16 {
 
 /// True when any pixel is less than fully opaque; alpha is the last channel
 /// of every type this is called with.
+///
+/// A fully opaque image is the worst case: proving a negative means looking
+/// at every pixel, with no early exit. Measured anyway, because it runs on
+/// every resize — 12 MP opaque RGBA8, release build, best of five: the scan
+/// takes 2.7 ms and the Lanczos3 resample it precedes takes 111 ms, so it is
+/// 2% of the work it protects. Walking the raw buffer as this does and going
+/// through `pixels()` with a float conversion per alpha measure the same to
+/// within noise; the compiler flattens both. Sampling only the border would
+/// be faster and wrong — one stray semi-transparent pixel in the middle is
+/// exactly the case the premultiplied path exists for. Re-measure with the
+/// ignored `alpha_scan_cost` test.
 fn any_transparency<P, C>(img: &image::ImageBuffer<P, Vec<C>>) -> bool
 where
     P: image::Pixel<Subpixel = C> + 'static,
     C: Channel + image::Primitive + 'static,
 {
-    let last = P::CHANNEL_COUNT as usize - 1;
-    img.pixels().any(|p| p.channels()[last].as_f32() < C::FULL)
+    let n = P::CHANNEL_COUNT as usize;
+    img.as_raw()
+        .chunks_exact(n)
+        .any(|p| p[n - 1] < C::DEFAULT_MAX_VALUE)
 }
 
 /// Premultiply, resample, then undo the premultiplication.
@@ -328,6 +341,46 @@ mod tests {
         let (w, h) = compute_target_dimensions(m, 1000, 5000);
         assert_eq!(h, MAX_TARGET_DIM);
         assert!((w as f64 / h as f64 - 0.2).abs() < 1e-3, "{w}x{h}");
+    }
+
+    /// What the opacity scan costs, and what it used to cost. A fully opaque
+    /// image is the worst case: the scan has to look at every pixel to prove
+    /// there is no transparency. Run with
+    /// `cargo test -p kuvatin-core --release alpha_scan_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn alpha_scan_cost() {
+        use image::Pixel;
+        use std::time::Instant;
+        let img = image::RgbaImage::from_pixel(4000, 3000, image::Rgba([9, 8, 7, 255]));
+
+        // The old shape: one pixel struct and one float conversion per pixel.
+        let via_pixels = |img: &image::RgbaImage| -> bool {
+            img.pixels().any(|p| (p.channels()[3] as f32) < 255.0)
+        };
+
+        let best = |f: &dyn Fn(&image::RgbaImage) -> bool| {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    assert!(!f(&img));
+                    t.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        println!("pixels() + f32: {:?}", best(&via_pixels));
+        println!("raw chunks:     {:?}", best(&|i| any_transparency(i)));
+
+        // What the scan is being weighed against.
+        let t = Instant::now();
+        let out = resample(DynamicImage::ImageRgba8(img.clone()), 2000, 1500);
+        println!(
+            "the resample:   {:?} ({}x{})",
+            t.elapsed(),
+            out.width(),
+            out.height()
+        );
     }
 
     /// The per-side ceiling alone still allows 32768x32768 — a billion pixels,

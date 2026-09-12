@@ -157,6 +157,9 @@ export component AppWindow inherits Window {
     in property <string> error-detail: "";
     // The same dialog in its neutral form (a batch summary): no red, a check.
     in-out property <bool> dialog-info: false;
+    // A file the message is about; non-empty adds a "Show in folder" button.
+    in-out property <string> dialog-reveal: "";
+    callback reveal-path(string);
     callback video-mode-changed(int);          // 0 = Images, 1 = Videos
     callback inspector-changed();              // any inspector slider moved
     callback inspector-duration-changed(int);  // Duration field (stills), whole seconds
@@ -2045,7 +2048,13 @@ export component AppWindow inherits Window {
                 }
             }
             HorizontalLayout {
+                spacing: 8px;
                 Rectangle { horizontal-stretch: 1; }
+                if root.dialog-reveal != "": DialogButton {
+                    text: "Show in folder";
+                    min-width: 120px;
+                    clicked => { root.reveal-path(root.dialog-reveal); root.error-visible = false; }
+                }
                 DialogButton { text: "OK"; primary: true; min-width: 88px; clicked => { root.error-visible = false; } }
             }
         }

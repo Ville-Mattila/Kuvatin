@@ -164,22 +164,17 @@ fn main() {
                 })
             });
             match outcome {
-                // The user cancelled — no dialog, even if some files had
-                // already failed before that.
-                Ok(report) if report.cancelled > 0 => {}
-                Ok(report) if report.failure_count() > 0 => fail_and_exit(
-                    "Kuvatin \u{2014} some files failed",
-                    format!(
-                        "{} of {} file(s) could not be processed:",
-                        report.failure_count(),
-                        report.total
+                Ok(report) => match quickrun::verdict(&report) {
+                    quickrun::Verdict::Cancelled => {}
+                    quickrun::Verdict::Failed { failed, total } => fail_and_exit(
+                        "Kuvatin \u{2014} some files failed",
+                        format!("{failed} of {total} file(s) could not be processed:"),
+                        &report.failures,
                     ),
-                    &report.failures,
-                ),
-                Ok(report) => applog::log(&format!(
-                    "quick run done: {} file(s) converted",
-                    report.total - report.failure_count() - report.cancelled
-                )),
+                    quickrun::Verdict::Converted(n) => {
+                        applog::log(&format!("quick run done: {n} file(s) converted"))
+                    }
+                },
                 Err(e) => fail("Kuvatin \u{2014} quick run failed", e),
             }
         }
