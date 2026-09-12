@@ -54,7 +54,9 @@ pub const CACHE_MAX_BYTES: u64 = 6 << 30;
 
 /// A numbered image sequence: files named `<prefix><NUMBER><suffix>` in `dir`,
 /// starting at `start`, `count` consecutive frames, played at `fps`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// Serialised into saved projects (see document.rs), so the media bin can
+// re-add a sequence after a reopen rather than only showing it on the timeline.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SequenceSpec {
     pub dir: PathBuf,
     /// File-name part before the frame number (may be empty).

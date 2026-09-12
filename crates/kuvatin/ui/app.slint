@@ -194,6 +194,15 @@ export component AppWindow inherits Window {
     in-out property <int> insp-duration-s: 5;  // selected clip's length, whole seconds
     in property <bool> insp-is-still: false;   // selected clip is a still image (duration is free)
     callback timeline-select(int);            // clip index
+    // Saving and reopening the timeline. `video-save-project(true)` always
+    // asks where; false writes back to the file the project came from.
+    callback video-save-project(bool);
+    callback video-open-project();
+    callback video-open-project-confirmed();
+    in-out property <bool> confirm-open-project: false;
+    // The file name of the open project, shown above the media bin. Empty
+    // until it has been saved once.
+    in property <string> project-name: "";
     // Which clip is selected (-1 = none). The model carries `selected` per
     // clip for drawing; this is the index the keyboard verbs act on.
     in property <int> timeline-selected: -1;
@@ -299,6 +308,7 @@ export component AppWindow inherits Window {
         if (root.seq-config) { root.seq-config = false; return EventResult.accept; }
         if (root.importing) { root.import-cancel(); return EventResult.accept; }
         if (root.confirm-delete) { root.confirm-delete = false; return EventResult.accept; }
+        if (root.confirm-open-project) { root.confirm-open-project = false; return EventResult.accept; }
         // No modal is up: Esc stops a running image batch, the way it aborts an
         // import. Harmless in Video mode, where `running` is never set.
         if (root.running) { root.convert-cancel(); return EventResult.accept; }
@@ -366,6 +376,16 @@ export component AppWindow inherits Window {
         }
         if (event.modifiers.control && event.text == "0") {
             root.zoom-to-fit();
+            return EventResult.accept;
+        }
+        // The same keys Images mode uses for its preset: save what you have,
+        // open something else.
+        if (event.modifiers.control && (event.text == "s" || event.text == "S")) {
+            root.video-save-project(false);
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && (event.text == "o" || event.text == "O")) {
+            root.video-open-project();
             return EventResult.accept;
         }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
@@ -1310,6 +1330,23 @@ export component AppWindow inherits Window {
                             }
                             SecondaryButton { text: "Open media…"; enabled: !root.video-engine-down; clicked => { root.video-open(); } }
                             SecondaryButton { text: "Import sequence…"; enabled: !root.video-engine-down; clicked => { root.video-open-sequence(); } }
+                            // The project itself: what was arranged, not what was imported.
+                            Rectangle { height: 6px; }
+                            Text {
+                                text: root.project-name == "" ? "PROJECT" : "PROJECT · " + root.project-name;
+                                color: Theme.muted2; font-size: 9px; font-weight: 700; letter-spacing: 1px;
+                                overflow: elide;
+                            }
+                            SecondaryButton {
+                                text: "Save project…";
+                                enabled: !root.video-engine-down && root.timeline-clips.length > 0;
+                                clicked => { root.video-save-project(true); }
+                            }
+                            SecondaryButton {
+                                text: "Open project…";
+                                enabled: !root.video-engine-down;
+                                clicked => { root.video-open-project(); }
+                            }
                         }
                     }
 
@@ -1978,6 +2015,30 @@ export component AppWindow inherits Window {
 
         // Delete-preset confirmation: a preset is user data, so the Delete button
         // asks first (Esc or Cancel keeps it).
+        if root.confirm-open-project : Modal {
+            card-width: 420px; card-height: 186px; card-spacing: 12px;
+            title: "Open another project?";
+            default-action => { root.confirm-open-project = false; root.video-open-project-confirmed(); }
+            Text { text: "Open another project?"; color: Theme.ink; font-size: 15px; font-weight: 700; }
+            Text {
+                text: "The timeline is replaced by the project you pick. Anything arranged here and not saved is lost.";
+                color: Theme.muted; font-size: 12px; wrap: word-wrap; vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                DialogButton { text: "Cancel"; clicked => { root.confirm-open-project = false; } }
+                DialogButton {
+                    text: "Save first…"; min-width: 104px;
+                    clicked => { root.confirm-open-project = false; root.video-save-project(true); }
+                }
+                DialogButton {
+                    text: "Open…"; primary: true; min-width: 92px;
+                    clicked => { root.confirm-open-project = false; root.video-open-project-confirmed(); }
+                }
+            }
+        }
+
         if root.confirm-delete : Modal {
             card-width: 400px; card-height: 176px; card-spacing: 12px;
             title: "Delete this preset?";

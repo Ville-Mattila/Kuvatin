@@ -3069,6 +3069,9 @@ dependencies = [
  "gstreamer-video",
  "image",
  "rayon",
+ "serde",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]

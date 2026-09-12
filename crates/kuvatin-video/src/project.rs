@@ -715,11 +715,24 @@ impl Project {
         inpoint: Duration,
         duration: Duration,
     ) -> Result<ClipId> {
+        let uri = gst::glib::filename_to_uri(path, None)?;
+        self.add_clip_uri(&uri, track, start, inpoint, duration)
+    }
+
+    /// URI form of [`Self::add_clip`], for sources that aren't a single file
+    /// (image sequences, and anything a saved project hands back).
+    pub fn add_clip_uri(
+        &mut self,
+        uri: &str,
+        track: usize,
+        start: Duration,
+        inpoint: Duration,
+        duration: Duration,
+    ) -> Result<ClipId> {
         if self.rendering.get() {
             anyhow::bail!("a render is in progress");
         }
-        let uri = gst::glib::filename_to_uri(path, None)?;
-        let clip = ges::UriClip::new(&uri)?;
+        let clip = ges::UriClip::new(uri)?;
         clip.set_start(gst::ClockTime::from_nseconds(start.as_nanos() as u64));
         clip.set_inpoint(gst::ClockTime::from_nseconds(inpoint.as_nanos() as u64));
         clip.set_duration(gst::ClockTime::from_nseconds(duration.as_nanos() as u64));
@@ -940,6 +953,117 @@ impl Project {
         self.timeline.commit();
         self.dirty.set(true);
         true
+    }
+
+    /// Describe the whole timeline in the form that goes in a file: every
+    /// clip's source, place, trim and transform, plus the canvas. Ordered by
+    /// track and then by start time, so a saved file reads top-to-bottom the
+    /// way the timeline looks.
+    pub fn to_document(&self) -> crate::document::ProjectFile {
+        let (w, h) = self.canvas_size();
+        let clips = self
+            .clip_records()
+            .into_iter()
+            .map(|(_, rec)| rec)
+            .collect();
+        crate::document::ProjectFile::new(w, h, clips)
+    }
+
+    /// The same records, each with the handle of the clip it came from. The
+    /// interface rebuilds its timeline rows from this after opening a project,
+    /// where it needs the handle to address the clip for later edits.
+    pub fn clip_records(&self) -> Vec<(ClipId, crate::document::ClipRecord)> {
+        let mut clips: Vec<(ClipId, crate::document::ClipRecord)> = self
+            .clips
+            .iter()
+            .filter_map(|(name, clip)| {
+                let uri = clip.downcast_ref::<ges::UriClip>()?.uri().to_string();
+                let secs = |t: gst::ClockTime| t.nseconds() as f64 / 1e9;
+                Some((
+                    ClipId(name.clone()),
+                    crate::document::ClipRecord {
+                        name: uri
+                            .rsplit(['/', '\\'])
+                            .next()
+                            .map(|s| s.split('?').next().unwrap_or(s).to_string())
+                            .unwrap_or_default(),
+                        uri,
+                        track: clip.layer().map(|l| l.priority() as usize).unwrap_or(0),
+                        start: secs(clip.start()),
+                        inpoint: secs(clip.inpoint()),
+                        duration: secs(clip.duration()),
+                        layout: self
+                            .clip_layout(&ClipId(name.clone()))
+                            .map(Into::into)
+                            .unwrap_or(crate::document::LayoutRecord {
+                                posx: 0,
+                                posy: 0,
+                                scale: 1.0,
+                                alpha: 1.0,
+                                volume: 1.0,
+                            }),
+                        // Filled in by the caller, which is the only side that
+                        // knows how a sequence clip was described when it arrived.
+                        sequence: None,
+                    },
+                ))
+            })
+            .collect();
+        clips.sort_by(|(_, a), (_, b)| {
+            a.track
+                .cmp(&b.track)
+                .then(a.start.total_cmp(&b.start))
+                .then(a.uri.cmp(&b.uri))
+        });
+        clips
+    }
+
+    /// Replace the timeline with what `doc` describes.
+    ///
+    /// Returns the sources it could not open, by name, rather than failing the
+    /// whole project: media moves, and a project that refuses to open at all
+    /// because one clip is missing is a project you cannot rescue.
+    pub fn apply_document(&mut self, doc: &crate::document::ProjectFile) -> Result<Vec<String>> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
+        for id in self.clips.keys().cloned().collect::<Vec<_>>() {
+            self.remove_clip(&ClipId(id));
+        }
+        self.set_canvas_size(doc.canvas_w, doc.canvas_h);
+        let mut missing = Vec::new();
+        for rec in &doc.clips {
+            // GES will happily build a clip around a URI that points at
+            // nothing and only fail later, at preroll, as a bus error with no
+            // file name in it. Discovery is the honest check — and it warms the
+            // asset the clip is about to use. (It is bounded: see
+            // `ensure_discovery_timeout`.)
+            let name = || {
+                if rec.name.is_empty() {
+                    rec.uri.clone()
+                } else {
+                    rec.name.clone()
+                }
+            };
+            if ges::UriClipAsset::request_sync(&rec.uri).is_err() {
+                missing.push(name());
+                continue;
+            }
+            let placed = self.add_clip_uri(
+                &rec.uri,
+                rec.track,
+                Duration::from_secs_f64(rec.start.max(0.0)),
+                Duration::from_secs_f64(rec.inpoint.max(0.0)),
+                Duration::from_secs_f64(rec.duration.max(0.0)),
+            );
+            match placed {
+                Ok(id) => self.set_clip_layout(&id, rec.layout.into()),
+                Err(_) => missing.push(name()),
+            }
+        }
+        self.timeline.commit();
+        self.dirty.set(true);
+        Ok(missing)
     }
 
     /// Reorder tracks: move the track at `from` to position `to` (0 = top).
@@ -1533,6 +1657,113 @@ mod tests {
         // The timeline is live again: transport works and edits are accepted.
         project.play().expect("play after restore");
         project.pause().expect("pause after restore");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved project has to come back as the same timeline: same sources, on
+    /// the same tracks, at the same times, with the same transforms. The whole
+    /// point is that an evening's arranging survives closing the window.
+    #[test]
+    fn a_timeline_survives_being_saved_and_reopened() {
+        let dir = scratch("save-load");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(120, 90, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("write still");
+        let file = dir.join("cut.kuvatin");
+
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.set_canvas_size(1280, 720);
+        let a = project.append_clip(&png, 0, None).expect("clip a");
+        project.set_clip_duration(&a.id, 3.0).expect("3 s");
+        // A second clip on its own track, offset, with a transform of its own.
+        let b = project
+            .add_clip(
+                &png,
+                1,
+                Duration::from_millis(1500),
+                Duration::ZERO,
+                Duration::from_secs(2),
+            )
+            .expect("clip b");
+        project.set_clip_layout(
+            &b,
+            Layout {
+                posx: 40,
+                posy: -20,
+                scale: 0.5,
+                alpha: 0.75,
+                volume: 1.0,
+            },
+        );
+        let before = project.to_document();
+        assert_eq!(before.clips.len(), 2, "both clips are in the document");
+        before.save(&file).expect("save");
+
+        // A fresh engine, as if the window had been closed and reopened.
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let doc = crate::document::ProjectFile::load(&file).expect("load");
+        reopened.apply_document(&doc).expect("apply");
+        let after = reopened.to_document();
+
+        assert_eq!(after.canvas_w, 1280);
+        assert_eq!(after.canvas_h, 720);
+        assert_eq!(after.clips.len(), 2);
+        for (was, now) in before.clips.iter().zip(after.clips.iter()) {
+            assert_eq!(was.uri, now.uri, "same source");
+            assert_eq!(was.track, now.track, "same track");
+            assert!((was.start - now.start).abs() < 1e-6, "{was:?} vs {now:?}");
+            assert!(
+                (was.duration - now.duration).abs() < 1e-6,
+                "{was:?} vs {now:?}"
+            );
+            assert!(
+                (was.inpoint - now.inpoint).abs() < 1e-6,
+                "{was:?} vs {now:?}"
+            );
+            assert!(
+                (was.layout.scale - now.layout.scale).abs() < 1e-3
+                    && (was.layout.alpha - now.layout.alpha).abs() < 1e-3
+                    && was.layout.posx == now.layout.posx,
+                "transform: {:?} vs {:?}",
+                was.layout,
+                now.layout
+            );
+        }
+        // Applying a document REPLACES the timeline rather than adding to it.
+        reopened.apply_document(&doc).expect("apply again");
+        assert_eq!(reopened.to_document().clips.len(), 2, "not four");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A project whose media has moved says which file it could not find, and
+    /// still opens with everything that is still there.
+    #[test]
+    fn a_missing_source_is_named_and_the_rest_still_opens() {
+        let dir = scratch("save-missing");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 40, 40, 255]))
+            .save(&png)
+            .expect("write still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&png, 0, None).expect("clip");
+        let mut doc = project.to_document();
+        // Point a second clip at something that was never there.
+        let mut ghost = doc.clips[0].clone();
+        ghost.uri = ghost.uri.replace("still.png", "gone.png");
+        ghost.name = "gone.png".into();
+        ghost.track = 1;
+        doc.clips.push(ghost);
+
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let missing = reopened.apply_document(&doc).expect("apply");
+        assert_eq!(missing.len(), 1, "one source could not be opened");
+        assert!(missing[0].contains("gone.png"), "{missing:?}");
+        assert_eq!(
+            reopened.to_document().clips.len(),
+            1,
+            "the clip that exists is still there"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

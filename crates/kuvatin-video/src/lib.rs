@@ -9,8 +9,10 @@ pub struct Frame {
     pub rgba: Vec<u8>,
 }
 
+pub mod document;
 pub mod project;
 pub mod sequence;
+pub use document::{path_from_uri, ClipRecord, LayoutRecord, ProjectFile};
 pub use project::{
     normalize_render_size, thumbnail, thumbnail_uri, warm_asset, warm_asset_uri, ClipGeom, ClipId,
     ClipInfo, ExportSettings, Layout, Project, RenderStatus, Step, VideoCodec, CANVAS_H, CANVAS_W,

@@ -19,7 +19,13 @@ gstreamer-pbutils = { version = "0.23", features = ["v1_20"] }
 # an import forever. The bundled SDK is 1.26, so both are present.
 gstreamer-editing-services = { version = "0.23", features = ["v1_20", "v1_24"] }
 anyhow = { workspace = true }
+# The saved project format (document.rs): the same pair the presets use.
+serde = { workspace = true }
+toml = { workspace = true }
 # EXR sequence support: GStreamer's Windows binaries ship no OpenEXR plugin, so
 # .exr frames are decoded in Rust (and tonemapped to sRGB PNG) before import.
 image = { workspace = true }
 rayon = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

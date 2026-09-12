@@ -43,7 +43,7 @@ pub(crate) struct ImportState {
     pending_seq: Rc<RefCell<Option<kuvatin_video::SequenceSpec>>>,
     /// Media-bin entry (keyed by the sequence's FIRST frame) → its import-ready
     /// spec, so a bin click re-adds the sequence, not a single still.
-    seq_by_path: Rc<RefCell<HashMap<PathBuf, kuvatin_video::SequenceSpec>>>,
+    pub(super) seq_by_path: Rc<RefCell<HashMap<PathBuf, kuvatin_video::SequenceSpec>>>,
     seq_ready: Arc<Mutex<VecDeque<SeqResult>>>,
     /// EXR-conversion progress (done, total) — the import timer mirrors it
     /// into the import modal while a sequence import is in flight.
@@ -699,6 +699,13 @@ impl ImportQueue {
                 ),
             );
         }
+    }
+
+    /// Forget what has been imported and start again from `in_bin` — what a
+    /// reopened project put there. Without this, a source the new project uses
+    /// would be refused as "already imported" from the project before it.
+    pub(crate) fn reseed(&self, in_bin: &[PathBuf]) {
+        self.seen.borrow_mut().reseed(in_bin.iter());
     }
 
     /// Abandon everything queued: later arrivals of the old generation are

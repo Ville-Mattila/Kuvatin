@@ -4,6 +4,7 @@
 
 pub(super) mod export;
 pub(super) mod import;
+mod project_file;
 mod timeline;
 
 use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
@@ -74,6 +75,7 @@ pub(super) fn wire(
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
     export::wire(ui, st, ex, timers);
+    project_file::wire(ui, st, im);
 
     let ui_weak = ui.as_weak();
     let project_slot = &st.project;

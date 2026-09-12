@@ -16,6 +16,11 @@ something is fixed.
 ## [Unreleased]
 
 ### Added
+- **A video project can be saved and reopened.** The timeline, the tracks,
+  every clip's trim and transform and the canvas go into a readable `.kuvatin`
+  file; media is referenced rather than copied, and a source that has moved is
+  named on opening while everything else still opens. Ctrl+S and Ctrl+O, or
+  the buttons under the media bin.
 - The Convert button becomes **Cancel** while a batch is running, and Esc stops
   it too. The file being written finishes; the rest of the queue is reported as
   cancelled rather than converted.
