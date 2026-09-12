@@ -1091,6 +1091,21 @@ impl Project {
     /// On ANY failure the preview is restored before returning — the sink is
     /// detached before the fallible steps, and leaving it detached used to kill
     /// the preview (black screen) for the rest of the session.
+    /// Discard whatever the preview left on the pipeline's bus.
+    ///
+    /// [`Self::render_status`] reports the first end-of-stream or error it
+    /// pops, so a preview that ran to the end of the timeline — or failed —
+    /// would have its message read as the *next* render's outcome: the export
+    /// dialog closes over a file that has barely started. Toggling the
+    /// flushing flag drops every queued message; clearing it again is what
+    /// lets the render post its own.
+    pub(crate) fn flush_bus(&self) {
+        if let Some(bus) = self.pipeline.bus() {
+            bus.set_flushing(true);
+            bus.set_flushing(false);
+        }
+    }
+
     pub fn begin_render(&self, path: &Path, settings: ExportSettings) -> Result<()> {
         // Fully tear the preview down and WAIT for NULL before switching to render
         // mode. Coming straight from a playing preview, the GPU/CUDA context is not
@@ -1101,6 +1116,9 @@ impl Project {
         let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
         // Drop the custom preview sink so render mode can route to encodebin.
         self.pipeline.preview_set_video_sink(None::<&gst::Element>);
+        // Start from a clean bus: anything the preview or the teardown left
+        // queued would otherwise be read as this render's result.
+        self.flush_bus();
         // From here until end_render, transport and edits are inert.
         self.rendering.set(true);
         let attempt = (|| -> Result<()> {
@@ -1431,6 +1449,80 @@ mod tests {
         let len = std::fs::metadata(&out).expect("output file").len();
         assert!(len > 1000, "output file too small: {len} bytes");
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// A preview that reached the end of the timeline leaves an end-of-stream
+    /// message sitting on the pipeline's bus. Nothing else drains it, so the
+    /// render that follows must, or its very first status poll consumes the
+    /// stale one and reports a finished export.
+    #[test]
+    fn flushing_the_bus_drops_a_stale_end_of_stream() {
+        let project = Project::new(|_f| {}).expect("project");
+        let bus = project.pipeline.bus().expect("bus");
+
+        bus.post(gst::message::Eos::builder().build())
+            .expect("post");
+        assert!(
+            bus.pop_filtered(&[gst::MessageType::Eos]).is_some(),
+            "the fixture itself must queue a message"
+        );
+
+        bus.post(gst::message::Eos::builder().build())
+            .expect("post");
+        project.flush_bus();
+        assert!(
+            bus.pop_filtered(&[gst::MessageType::Eos]).is_none(),
+            "a stale end-of-stream survived the flush"
+        );
+    }
+
+    /// The same hazard through the real entry point: with a stale message
+    /// queued, the first poll of a freshly started render must still say it is
+    /// rendering. Needs only a generated still, so it gates the build.
+    #[test]
+    fn a_stale_end_of_stream_does_not_finish_the_next_render() {
+        let dir = scratch("stale-eos");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(160, 120, image::Rgba([30, 90, 160, 255]))
+            .save(&png)
+            .expect("write still");
+        let out = dir.join("out.mp4");
+
+        let mut project = Project::new(|_f| {}).expect("project");
+        let info = project.append_clip(&png, 0, None).expect("append still");
+        // Long enough that a genuine end-of-stream cannot arrive in the
+        // microseconds between starting the render and the first poll.
+        project
+            .set_clip_duration(&info.id, 60.0)
+            .expect("stretch the still");
+
+        project
+            .pipeline
+            .bus()
+            .expect("bus")
+            .post(gst::message::Eos::builder().build())
+            .expect("post");
+
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 160,
+                    height: 120,
+                    fps: 24,
+                    bitrate_kbps: 1000,
+                },
+            )
+            .expect("begin_render");
+        let first = project.render_status();
+        let _ = project.cancel_render(&out, true);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            !matches!(first, RenderStatus::Done),
+            "the render consumed a stale end-of-stream: {first:?}"
+        );
     }
 
     /// Regression for the 0-byte H.264 export: play the preview (as the GUI does),
