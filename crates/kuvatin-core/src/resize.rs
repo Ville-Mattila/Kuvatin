@@ -90,39 +90,103 @@ fn fit_within(src_w: u32, src_h: u32, box_w: u32, box_h: u32) -> (u32, u32) {
 }
 
 /// Resample `img` to `w` x `h` (Lanczos3). Same size hands the image back
-/// untouched. An RGBA image with any transparency is resampled with
-/// premultiplied alpha: the filter otherwise averages the (usually black)
-/// colour of fully transparent pixels into their opaque neighbours, and every
-/// soft edge — logos, stickers, anti-aliased text — grows a dark halo.
+/// untouched. Any image carrying transparency is resampled with premultiplied
+/// alpha: the filter otherwise averages the (usually black) colour of fully
+/// transparent pixels into their opaque neighbours, and every soft edge —
+/// logos, stickers, anti-aliased text — grows a dark halo.
 pub fn resample(img: DynamicImage, w: u32, h: u32) -> DynamicImage {
     if img.width() == w && img.height() == h {
         return img;
     }
+    // Every type a supported input can decode to that carries alpha. Gating
+    // this on RGBA8 alone left grey-with-alpha and 16-bit images on the
+    // straight-alpha path, where they grew exactly the halo described above.
+    // Float pixels cannot arrive from any input format Kuvatin accepts.
     match img {
-        DynamicImage::ImageRgba8(rgba) if rgba.pixels().any(|p| p[3] < 255) => {
-            DynamicImage::ImageRgba8(resample_premultiplied(rgba, w, h))
+        DynamicImage::ImageRgba8(b) if any_transparency(&b) => {
+            DynamicImage::ImageRgba8(resample_premultiplied(b, w, h))
+        }
+        DynamicImage::ImageLumaA8(b) if any_transparency(&b) => {
+            DynamicImage::ImageLumaA8(resample_premultiplied(b, w, h))
+        }
+        DynamicImage::ImageRgba16(b) if any_transparency(&b) => {
+            DynamicImage::ImageRgba16(resample_premultiplied(b, w, h))
+        }
+        DynamicImage::ImageLumaA16(b) if any_transparency(&b) => {
+            DynamicImage::ImageLumaA16(resample_premultiplied(b, w, h))
         }
         other => other.resize_exact(w, h, image::imageops::FilterType::Lanczos3),
     }
 }
 
-fn resample_premultiplied(mut rgba: image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
-    for p in rgba.pixels_mut() {
-        let a = p[3] as u32;
-        if a < 255 {
-            p[0] = ((p[0] as u32 * a + 127) / 255) as u8;
-            p[1] = ((p[1] as u32 * a + 127) / 255) as u8;
-            p[2] = ((p[2] as u32 * a + 127) / 255) as u8;
+/// One channel, as far as premultiplication cares: its full-scale value and
+/// the conversions to and from the arithmetic type.
+trait Channel: Copy {
+    const FULL: f32;
+    fn as_f32(self) -> f32;
+    fn from_f32(v: f32) -> Self;
+}
+
+impl Channel for u8 {
+    const FULL: f32 = u8::MAX as f32;
+    fn as_f32(self) -> f32 {
+        self as f32
+    }
+    fn from_f32(v: f32) -> Self {
+        v.clamp(0.0, Self::FULL).round() as u8
+    }
+}
+
+impl Channel for u16 {
+    const FULL: f32 = u16::MAX as f32;
+    fn as_f32(self) -> f32 {
+        self as f32
+    }
+    fn from_f32(v: f32) -> Self {
+        v.clamp(0.0, Self::FULL).round() as u16
+    }
+}
+
+/// True when any pixel is less than fully opaque; alpha is the last channel
+/// of every type this is called with.
+fn any_transparency<P, C>(img: &image::ImageBuffer<P, Vec<C>>) -> bool
+where
+    P: image::Pixel<Subpixel = C> + 'static,
+    C: Channel + image::Primitive + 'static,
+{
+    let last = P::CHANNEL_COUNT as usize - 1;
+    img.pixels().any(|p| p.channels()[last].as_f32() < C::FULL)
+}
+
+/// Premultiply, resample, then undo the premultiplication.
+fn resample_premultiplied<P, C>(
+    mut img: image::ImageBuffer<P, Vec<C>>,
+    w: u32,
+    h: u32,
+) -> image::ImageBuffer<P, Vec<C>>
+where
+    P: image::Pixel<Subpixel = C> + 'static,
+    C: Channel + image::Primitive + 'static,
+{
+    let last = P::CHANNEL_COUNT as usize - 1;
+    for p in img.pixels_mut() {
+        let channels = p.channels_mut();
+        let a = channels[last].as_f32() / C::FULL;
+        if a < 1.0 {
+            for c in &mut channels[..last] {
+                *c = C::from_f32(c.as_f32() * a);
+            }
         }
     }
-    let mut out = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Lanczos3);
+    let mut out = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
     for p in out.pixels_mut() {
-        let a = p[3] as u32;
-        if a > 0 && a < 255 {
-            // Lanczos ringing can leave a channel above its alpha; clamp.
-            p[0] = ((p[0] as u32 * 255 + a / 2) / a).min(255) as u8;
-            p[1] = ((p[1] as u32 * 255 + a / 2) / a).min(255) as u8;
-            p[2] = ((p[2] as u32 * 255 + a / 2) / a).min(255) as u8;
+        let channels = p.channels_mut();
+        let a = channels[last].as_f32() / C::FULL;
+        if a > 0.0 && a < 1.0 {
+            for c in &mut channels[..last] {
+                // Lanczos ringing can leave a channel above its own alpha.
+                *c = C::from_f32((c.as_f32() / a).min(C::FULL));
+            }
         }
     }
     out
@@ -250,6 +314,63 @@ mod tests {
         assert!(edge[0] >= 250, "no dark fringe: {edge:?}");
         assert_eq!(out.get_pixel(0, 0).0, [255, 0, 0, 255]);
         assert_eq!(out.get_pixel(3, 0)[3], 0);
+    }
+
+    /// The same hazard, in the other pixel types a PNG or TIFF can decode to.
+    /// These fell through to straight alpha and grew exactly the dark fringe
+    /// the premultiplied path exists to prevent.
+    #[test]
+    fn transparent_edges_do_not_fringe_in_grey_or_sixteen_bit() {
+        // Grey with alpha: white on the left, transparent black on the right.
+        let mut grey = image::ImageBuffer::<image::LumaA<u8>, Vec<u8>>::new(8, 4);
+        for (x, _y, p) in grey.enumerate_pixels_mut() {
+            *p = if x < 4 {
+                image::LumaA([255, 255])
+            } else {
+                image::LumaA([0, 0])
+            };
+        }
+        let out = resample(DynamicImage::ImageLumaA8(grey), 4, 2);
+        let out = match out {
+            DynamicImage::ImageLumaA8(b) => b,
+            other => panic!("pixel type changed: {:?}", other.color()),
+        };
+        let edge = out.get_pixel(2, 0);
+        assert!(edge[1] > 0 && edge[1] < 255, "boundary alpha: {edge:?}");
+        assert!(edge[0] >= 250, "grey darkened at the edge: {edge:?}");
+
+        // 16-bit colour with alpha: full red on the left, transparent on the right.
+        let mut deep = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::new(8, 4);
+        for (x, _y, p) in deep.enumerate_pixels_mut() {
+            *p = if x < 4 {
+                image::Rgba([65_535, 0, 0, 65_535])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            };
+        }
+        let out = resample(DynamicImage::ImageRgba16(deep), 4, 2);
+        let out = match out {
+            DynamicImage::ImageRgba16(b) => b,
+            other => panic!("depth changed: {:?}", other.color()),
+        };
+        let edge = out.get_pixel(2, 0);
+        assert!(edge[3] > 0 && edge[3] < 65_535, "boundary alpha: {edge:?}");
+        assert!(edge[0] >= 64_000, "red darkened at the edge: {edge:?}");
+    }
+
+    /// A fully opaque image of any type takes the plain path and is unchanged
+    /// by the premultiply round trip.
+    #[test]
+    fn opaque_images_are_untouched_by_the_alpha_handling() {
+        let mut grey = image::ImageBuffer::<image::LumaA<u8>, Vec<u8>>::new(4, 4);
+        for p in grey.pixels_mut() {
+            *p = image::LumaA([200, 255]);
+        }
+        let out = resample(DynamicImage::ImageLumaA8(grey), 2, 2);
+        let out = out.as_luma_alpha8().expect("still grey with alpha").clone();
+        for p in out.pixels() {
+            assert_eq!(p.0, [200, 255], "opaque grey shifted: {p:?}");
+        }
     }
 
     /// Same size is an identity (no resample, no copy).

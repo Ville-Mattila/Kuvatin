@@ -26,6 +26,11 @@ pub struct PresetStore {
     /// corrupt or partially unreadable (for the UI to surface). Never saved.
     #[serde(skip)]
     pub last_load_warning: Option<String>,
+    /// Set when the file on disk announced a schema newer than this build
+    /// understands. Saving is refused in that case: entries this build cannot
+    /// represent were skipped on load, so writing back would destroy them.
+    #[serde(skip)]
+    pub from_future: Option<u32>,
 }
 
 /// Why a preset name can't be used, or `Ok` if it can. A name travels into
@@ -169,6 +174,7 @@ impl PresetStore {
                 },
             ],
             last_load_warning: None,
+            from_future: None,
         }
     }
 
@@ -330,9 +336,27 @@ impl PresetStore {
         // file before any typed parse does.
         let mut doc: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
         Self::migrate_document(&mut doc);
+        let declared = doc
+            .get("version")
+            .and_then(|v| v.as_integer())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
+        // A file from a newer Kuvatin may hold formats or fields this build
+        // cannot represent, and the parse below silently drops those. Record
+        // it so `save` refuses rather than writing the remainder back.
+        let future = (declared > Self::CURRENT_VERSION).then_some(declared);
+        let future_note = future.map(|v| {
+            format!(
+                "presets.toml was written by a newer version of Kuvatin (schema {v}, this build \
+                 understands {}). It is being used read-only: saving is refused so nothing \
+                 newer is lost.",
+                Self::CURRENT_VERSION
+            )
+        });
         // Fast path: the (migrated) document deserializes cleanly.
-        if let Ok(store) = doc.clone().try_into::<PresetStore>() {
-            return Ok((store, None));
+        if let Ok(mut store) = doc.clone().try_into::<PresetStore>() {
+            store.from_future = future;
+            return Ok((store, future_note));
         }
         // Tolerant path: recover per-preset.
         let version = doc
@@ -355,13 +379,16 @@ impl PresetStore {
         if presets.is_empty() {
             return Err(format!("all {skipped} preset entries were invalid"));
         }
-        let warning = (skipped > 0)
-            .then(|| format!("{skipped} invalid preset(s) in presets.toml were skipped."));
+        let warning = future_note.or_else(|| {
+            (skipped > 0)
+                .then(|| format!("{skipped} invalid preset(s) in presets.toml were skipped."))
+        });
         Ok((
             PresetStore {
                 version,
                 presets,
                 last_load_warning: None,
+                from_future: future,
             },
             warning,
         ))
@@ -371,6 +398,17 @@ impl PresetStore {
     /// target, so a crash mid-save can no longer leave a truncated file (which
     /// used to brick the next startup).
     pub fn save(&self, path: &Path) -> CoreResult<()> {
+        // Never write over a store from a newer Kuvatin: entries this build
+        // could not represent were dropped on load, so this would persist the
+        // truncation and destroy them.
+        if let Some(newer) = self.from_future {
+            return Err(CoreError::InvalidJob(format!(
+                "presets.toml was written by a newer version of Kuvatin (schema {newer}, this \
+                 build understands {}); it is read-only here so your newer presets are not lost. \
+                 Update Kuvatin, or move that file aside to start fresh.",
+                Self::CURRENT_VERSION
+            )));
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| CoreError::Io {
                 path: parent.to_path_buf(),
@@ -674,6 +712,62 @@ mod load_tests {
             older,
             "load persisted the migration"
         );
+    }
+
+    /// A presets file written by a newer Kuvatin can hold entries this build
+    /// cannot represent. Those are skipped on load, so saving would write the
+    /// truncated set back and destroy the user's newer presets. Refuse the
+    /// save instead, and say why.
+    #[test]
+    fn a_newer_store_is_never_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.toml");
+        PresetStore::builtin().save(&path).unwrap();
+        let from_the_future: String = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("version") {
+                    "version = 99".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, &from_the_future).unwrap();
+
+        let loaded = PresetStore::load(&path);
+        assert_eq!(loaded.from_future, Some(99), "the newer version is noticed");
+        assert!(
+            loaded
+                .last_load_warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("newer"),
+            "the user is told: {:?}",
+            loaded.last_load_warning
+        );
+
+        let err = loaded
+            .save(&path)
+            .expect_err("saving over a newer store must fail");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            from_the_future,
+            "the newer file was modified anyway: {err}"
+        );
+    }
+
+    /// An ordinary store still saves.
+    #[test]
+    fn a_current_store_saves_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.toml");
+        let store = PresetStore::load(&path);
+        assert_eq!(store.from_future, None);
+        store.save(&path).expect("a current store saves");
+        assert!(path.exists());
     }
 
     /// A readable, current file is returned as written.

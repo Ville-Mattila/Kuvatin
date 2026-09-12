@@ -158,7 +158,8 @@ fn main() {
             ));
             let heading = preset.clone();
             let outcome = run_job(quiet, &heading, move |sink| {
-                quickrun::run(&preset, &paths, &|f, s| sink.set(f, s), &|| {
+                let store = quickrun::load_store()?;
+                quickrun::run(&store, &preset, &paths, &|f, s| sink.set(f, s), &|| {
                     sink.cancelled()
                 })
             });
