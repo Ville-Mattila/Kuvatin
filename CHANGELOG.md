@@ -15,6 +15,7 @@ something is fixed.
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-09-12
 The video editor learns to remember. A project — the timeline, the tracks,
 every clip's trim and transform — saves to a file and comes back. Neither end
 of an export freezes the window any more, a hardware encoder that fails no
@@ -210,7 +211,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.9.2...HEAD
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.10.0
 [2.9.2]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.9.2
 [2.9.1]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.9.1
 [2.9.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.9.0
