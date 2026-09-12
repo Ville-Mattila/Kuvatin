@@ -31,6 +31,9 @@ something is fixed.
   Enter.
 - Timeline clips can be selected, moved, re-tracked and trimmed from the
   keyboard, and they announce themselves to assistive technology.
+- The timeline zooms: buttons, Ctrl+plus/minus/0, or Ctrl+wheel over the lane,
+  with a Fit that scales the whole timeline to the window. A plain wheel
+  scrolls it, which the scrollbar used to be the only way to do.
 
 ### Changed
 - One memory budget for the whole image path. Every decode runs under an

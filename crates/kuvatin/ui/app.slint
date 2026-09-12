@@ -3,7 +3,8 @@ import { Theme } from "theme.slint";
 import { Modal } from "modal.slint";
 import {
     QualitySlider, Card, SecondaryButton, DialogButton, RemoveButton, FieldLabel, CropHandle,
-    WinButton, SegToggle, Splitter, NumberDropdown, PillButton, Scrubber, InspSlider
+    WinButton, SegToggle, Splitter, NumberDropdown, PillButton, Scrubber, InspSlider,
+    TimelineChip
 } from "widgets.slint";
 export { ProgressWindow } from "progress.slint";
 
@@ -107,7 +108,34 @@ export component AppWindow inherits Window {
     // height, header rows, lane stripes, clip Y and every drag/reorder distance
     // are all derived from this (change it here and the whole timeline follows).
     property <length> track-h: Theme.track-h;
-    in property <float> timeline-pps: 14.0;   // pixels per second (zoom)
+    // Timeline scale, in pixels per second. It used to be fixed at 14, which
+    // made a two-second clip narrower than its own trim handles and a long
+    // timeline reachable only through the scrollbar.
+    in-out property <float> timeline-pps: 14.0;
+    // Below this a clip's grab handles overlap each other; above it a minute of
+    // timeline is several screens of scrolling.
+    property <float> min-pps: 2.0;
+    property <float> max-pps: 400.0;
+    // The visible width of the clip lane, published by the lane itself so the
+    // "fit" zoom can work out a scale without reaching into it.
+    property <length> tl-view-w: 600px;
+    // Scratch for zoom-at: the time under the anchor point has to be read
+    // before the scale changes and used after (Slint functions have no locals).
+    property <float> zoom-anchor-t;
+    // Multiply the scale by `factor`, keeping whatever is under `anchor-x`
+    // (measured from the left edge of the lane) exactly where it is.
+    function zoom-at(factor: float, anchor-x: length) {
+        root.zoom-anchor-t = (anchor-x + root.tl-scroll) / 1px / root.timeline-pps;
+        root.timeline-pps = Math.clamp(root.timeline-pps * factor, root.min-pps, root.max-pps);
+        root.tl-scroll = Math.max(0px, (root.zoom-anchor-t * root.timeline-pps) * 1px - anchor-x);
+    }
+    // Scale so the whole timeline fits the lane, with a little room to spare.
+    function zoom-to-fit() {
+        root.timeline-pps = root.timeline-duration > 0.1
+            ? Math.clamp((root.tl-view-w - 48px) / 1px / root.timeline-duration, root.min-pps, root.max-pps)
+            : 14.0;
+        root.tl-scroll = 0px;
+    }
     in-out property <length> tl-scroll: 0px;  // horizontal scroll offset of the lane
     in property <float> playhead: 0.0;        // seconds
     in property <float> timeline-duration: 0.0; // seconds (for the ruler end)
@@ -327,6 +355,19 @@ export component AppWindow inherits Window {
         // Transport/edit keys are dead during an export (the engine ignores
         // them too — this just keeps the play icon from flipping).
         if (root.exporting) { return EventResult.reject; }
+        // Zoom, on the keys every editor uses for it.
+        if (event.modifiers.control && (event.text == "+" || event.text == "=")) {
+            root.zoom-at(1.4, root.tl-view-w / 2);
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && event.text == "-") {
+            root.zoom-at(1 / 1.4, root.tl-view-w / 2);
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && event.text == "0") {
+            root.zoom-to-fit();
+            return EventResult.accept;
+        }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
         if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
         return root.clip-keys(event);
@@ -1533,6 +1574,24 @@ export component AppWindow inherits Window {
                                 Text { text: "TIMELINE"; color: Theme.muted2; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; vertical-alignment: center; }
                                 Rectangle { horizontal-stretch: 1; }
                                 Text { text: "drag clips to arrange"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
+                                // Zoom: discoverable buttons for the wheel gesture, and the
+                                // only way to reach it without a wheel.
+                                TimelineChip {
+                                    label: "\u{2212}";
+                                    hint: "Zoom out";
+                                    clicked => { root.zoom-at(1 / 1.4, root.tl-view-w / 2); }
+                                }
+                                TimelineChip {
+                                    label: "Fit";
+                                    hint: "Fit the timeline to the window";
+                                    wide: true;
+                                    clicked => { root.zoom-to-fit(); }
+                                }
+                                TimelineChip {
+                                    label: "+";
+                                    hint: "Zoom in";
+                                    clicked => { root.zoom-at(1.4, root.tl-view-w / 2); }
+                                }
                                 exp-btn := Rectangle {
                                     // Nothing to export from an empty timeline (or a dead engine).
                                     property <bool> can-export: root.timeline-clips.length > 0 && !root.video-engine-down;
@@ -1606,246 +1665,272 @@ export component AppWindow inherits Window {
                                 property <length> content-w: (root.timeline-duration * root.timeline-pps) * 1px + 40px;
                                 property <length> max-scroll: max(0px, self.content-w - self.width);
                                 property <length> scroll: Math.clamp(root.tl-scroll, 0px, self.max-scroll);
+                                // The "fit" zoom needs this; a binding that reached into
+                                // the lane from the root would be a cycle.
+                                init => { root.tl-view-w = self.width; }
+                                changed width => { root.tl-view-w = self.width; }
 
-                                // Scrub: click/drag empty timeline area to move the
-                                // playhead and seek. Behind the clips, so clip clicks
-                                // still select and clip drags still move.
-                                scrub-ta := TouchArea {
-                                    function seek(mx: length) {
-                                        root.timeline-seek-time(Math.max(0, (mx + lane.scroll) / 1px / root.timeline-pps));
-                                    }
-                                    moved => { scrub-ta.seek(self.mouse-x); }
-                                    pointer-event(ev) => {
-                                        if (ev.kind == PointerEventKind.down) { scrub-ta.seek(self.mouse-x); }
-                                        if (ev.kind == PointerEventKind.up) { root.seek-done(); }
-                                    }
-                                }
-
-                                // row background stripes (fixed; span the visible lane)
-                                VerticalLayout {
-                                    for lbl[t] in root.timeline-track-labels : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
-                                }
-
-                                // clip blocks. The wrapper `blk` keeps the clip's MODEL
-                                // geometry (fixed during a drag) so the hit-areas sit in a
-                                // stable frame; `vis` is the visual block that moves/resizes
-                                // live from the pointer delta. dmode says which (DragMode).
-                                for clip[i] in root.timeline-clips : blk := Rectangle {
-                                    // A clip was a coloured rectangle with no name, no role
-                                    // and no state as far as assistive technology was
-                                    // concerned. It is a selectable item in a list, and it
-                                    // says what it is, where it sits and how long it runs.
-                                    accessible-role: list-item;
-                                    accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
-                                        + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
-                                        + Math.round(clip.duration * 10) / 10 + " s long";
-                                    accessible-item-selected: clip.selected;
-                                    x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
-                                    // track 0 = GES layer 0 = top (both on-screen and composited).
-                                    y: clip.track * root.track-h + 4px;
-                                    width: (clip.duration * root.timeline-pps) * 1px;
-                                    height: 22px;
-                                    background: transparent;
-                                    // a clip dropped onto the timeline fades in
-                                    opacity: 0;
-                                    animate opacity { duration: 180ms; easing: ease-out; }
-                                    init => { self.opacity = 1; }
-                                    property <length> ddx: 0px;
-                                    property <length> ddy: 0px;
-                                    property <DragMode> dmode: DragMode.idle;
-
-                                    // live visual (previews the drag; not a drag frame)
-                                    vis := Rectangle {
-                                        // Snapped horizontal slide (DragMode.slide): the snap callback nudges
-                                        // the nearest edge onto a neighbouring clip edge or the timeline
-                                        // start. Left-trim (DragMode.trim-left) tracks the raw pointer.
-                                        property <float> snap-dx-s: root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps);
-                                        x: blk.dmode == DragMode.slide ? (self.snap-dx-s * root.timeline-pps * 1px)
-                                            : (blk.dmode == DragMode.trim-left ? blk.ddx : 0px);
-                                        // Vertical: magnetically snap to the nearest track lane, clamped
-                                        // to the ACTUAL visible lane so the block can never slide past the
-                                        // (possibly compressed) bottom and vanish. The drop TARGET below
-                                        // still uses the raw delta, so dropping past the last track adds one.
-                                        y: blk.dmode == DragMode.slide
-                                            ? Math.clamp(Math.round(blk.ddy / root.track-h) * root.track-h, -blk.y, lane.height - blk.height - blk.y - 2px)
-                                            : 0px;
-                                        // "Mass" + magnetic settle: ease toward the (snapped) target with a
-                                        // slight overshoot instead of tracking the cursor 1:1. Instant when
-                                        // not sliding so the drop commit itself doesn't animate.
-                                        animate x { duration: blk.dmode == DragMode.slide ? 75ms : 0ms; easing: cubic-bezier(0.25, 0.9, 0.3, 1.05); }
-                                        animate y { duration: blk.dmode == DragMode.slide ? 95ms : 0ms; easing: cubic-bezier(0.25, 0.9, 0.3, 1.07); }
-                                        width: max(10px, parent.width
-                                            + (blk.dmode == DragMode.trim-left ? -blk.ddx : 0px)
-                                            + (blk.dmode == DragMode.trim-right ? blk.ddx : 0px));
-                                        height: parent.height;
-                                        border-radius: 6px;
-                                        clip: true;
-                                        background: clip.kind == ClipKind.video
-                                            ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
-                                            : clip.kind == ClipKind.sequence
-                                                ? @linear-gradient(135deg, #8b5cf6 0%, #5b34c9 100%)
-                                                : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
-                                        border-width: clip.selected ? 2px : 1px;
-                                        border-color: clip.selected ? Theme.accent : #00000055;
-                                        animate border-color { duration: 130ms; }
-                                        // thumbnail (covers the gradient once generated)
-                                        Image { source: clip.thumb; image-fit: cover; width: 100%; height: 100%; }
-                                        // left scrim so the name stays legible over the thumb
-                                        Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
-                                        Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
-                                        Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
-                                        Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
-                                        // Delete affordance on the selected clip (also Delete key).
-                                        // The visible square is 16 px; the hit area spans the
-                                        // clip's full height and 24 px of width.
-                                        if clip.selected : Rectangle {
-                                            x: parent.width - self.width - 3px; y: 3px;
-                                            width: 16px; height: 16px; border-radius: 5px;
-                                            background: del-ta.has-hover ? Theme.danger2 : #00000088;
-                                            animate background { duration: 100ms; }
-                                            opacity: 0;
-                                            animate opacity { duration: 140ms; }
-                                            init => { self.opacity = 1; }
-                                            accessible-role: button;
-                                            accessible-label: "Remove " + clip.name + " from the timeline";
-                                            Text { text: "✕"; color: white; font-size: 9px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
-                                            del-ta := TouchArea {
-                                                x: -6px; y: -3px; width: 24px; height: 22px;
-                                                clicked => { root.timeline-clip-removed(i); }
-                                            }
+                                // The wheel belongs to the lane as a whole, so its handler has to be
+                                // an ANCESTOR of whatever the pointer is over. A sibling touch area
+                                // underneath the clips and the track stripes never sees the event,
+                                // however happily clicks fall through to it (measured: the scrub area
+                                // got every click and no scroll). Everything in the lane therefore
+                                // lives inside this one; the inner touch areas are deeper, so they
+                                // still take their clicks first.
+                                TouchArea {
+                                    scroll-event(ev) => {
+                                        if (ev.modifiers.control) {
+                                            root.zoom-at(ev.delta-y > 0 ? 1.2 : 1 / 1.2, self.mouse-x);
+                                            return accept;
                                         }
+                                        // A plain wheel is vertical on most mice; a horizontal one
+                                        // (a tilt wheel, or shift on some drivers) works too.
+                                        root.tl-scroll = Math.clamp(
+                                            root.tl-scroll - (ev.delta-x != 0px ? ev.delta-x : ev.delta-y),
+                                            0px, lane.max-scroll);
+                                        return accept;
                                     }
 
-                                    // body: slide (horizontal) + move to another track
-                                    // (vertical) + select. Stable frame = blk.
-                                    TouchArea {
-                                        mouse-cursor: move;
-                                        moved => {
-                                            blk.dmode = DragMode.slide;
-                                            blk.ddx = self.mouse-x - self.pressed-x;
-                                            blk.ddy = self.mouse-y - self.pressed-y;
-                                            root.clip-dragging = true;
-                                            root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
+                                    // Scrub: click/drag empty timeline area to move the
+                                    // playhead and seek. Behind the clips, so clip clicks
+                                    // still select and clip drags still move.
+                                    scrub-ta := TouchArea {
+                                        function seek(mx: length) {
+                                            root.timeline-seek-time(Math.max(0, (mx + lane.scroll) / 1px / root.timeline-pps));
                                         }
+                                        moved => { scrub-ta.seek(self.mouse-x); }
                                         pointer-event(ev) => {
-                                            if (ev.kind == PointerEventKind.up) {
-                                                if (blk.dmode == DragMode.slide && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
-                                                    // Commit the SNAPPED slide so the clip lands exactly
-                                                    // where it magnetically settled, not at the raw cursor.
-                                                    root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / root.track-h));
+                                            if (ev.kind == PointerEventKind.down) { scrub-ta.seek(self.mouse-x); }
+                                            if (ev.kind == PointerEventKind.up) { root.seek-done(); }
+                                        }
+                                    }
+
+                                    // row background stripes (fixed; span the visible lane)
+                                    VerticalLayout {
+                                        for lbl[t] in root.timeline-track-labels : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
+                                    }
+
+                                    // clip blocks. The wrapper `blk` keeps the clip's MODEL
+                                    // geometry (fixed during a drag) so the hit-areas sit in a
+                                    // stable frame; `vis` is the visual block that moves/resizes
+                                    // live from the pointer delta. dmode says which (DragMode).
+                                    for clip[i] in root.timeline-clips : blk := Rectangle {
+                                        // A clip was a coloured rectangle with no name, no role
+                                        // and no state as far as assistive technology was
+                                        // concerned. It is a selectable item in a list, and it
+                                        // says what it is, where it sits and how long it runs.
+                                        accessible-role: list-item;
+                                        accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
+                                            + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
+                                            + Math.round(clip.duration * 10) / 10 + " s long";
+                                        accessible-item-selected: clip.selected;
+                                        x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
+                                        // track 0 = GES layer 0 = top (both on-screen and composited).
+                                        y: clip.track * root.track-h + 4px;
+                                        width: (clip.duration * root.timeline-pps) * 1px;
+                                        height: 22px;
+                                        background: transparent;
+                                        // a clip dropped onto the timeline fades in
+                                        opacity: 0;
+                                        animate opacity { duration: 180ms; easing: ease-out; }
+                                        init => { self.opacity = 1; }
+                                        property <length> ddx: 0px;
+                                        property <length> ddy: 0px;
+                                        property <DragMode> dmode: DragMode.idle;
+
+                                        // live visual (previews the drag; not a drag frame)
+                                        vis := Rectangle {
+                                            // Snapped horizontal slide (DragMode.slide): the snap callback nudges
+                                            // the nearest edge onto a neighbouring clip edge or the timeline
+                                            // start. Left-trim (DragMode.trim-left) tracks the raw pointer.
+                                            property <float> snap-dx-s: root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps);
+                                            x: blk.dmode == DragMode.slide ? (self.snap-dx-s * root.timeline-pps * 1px)
+                                                : (blk.dmode == DragMode.trim-left ? blk.ddx : 0px);
+                                            // Vertical: magnetically snap to the nearest track lane, clamped
+                                            // to the ACTUAL visible lane so the block can never slide past the
+                                            // (possibly compressed) bottom and vanish. The drop TARGET below
+                                            // still uses the raw delta, so dropping past the last track adds one.
+                                            y: blk.dmode == DragMode.slide
+                                                ? Math.clamp(Math.round(blk.ddy / root.track-h) * root.track-h, -blk.y, lane.height - blk.height - blk.y - 2px)
+                                                : 0px;
+                                            // "Mass" + magnetic settle: ease toward the (snapped) target with a
+                                            // slight overshoot instead of tracking the cursor 1:1. Instant when
+                                            // not sliding so the drop commit itself doesn't animate.
+                                            animate x { duration: blk.dmode == DragMode.slide ? 75ms : 0ms; easing: cubic-bezier(0.25, 0.9, 0.3, 1.05); }
+                                            animate y { duration: blk.dmode == DragMode.slide ? 95ms : 0ms; easing: cubic-bezier(0.25, 0.9, 0.3, 1.07); }
+                                            width: max(10px, parent.width
+                                                + (blk.dmode == DragMode.trim-left ? -blk.ddx : 0px)
+                                                + (blk.dmode == DragMode.trim-right ? blk.ddx : 0px));
+                                            height: parent.height;
+                                            border-radius: 6px;
+                                            clip: true;
+                                            background: clip.kind == ClipKind.video
+                                                ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
+                                                : clip.kind == ClipKind.sequence
+                                                    ? @linear-gradient(135deg, #8b5cf6 0%, #5b34c9 100%)
+                                                    : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
+                                            border-width: clip.selected ? 2px : 1px;
+                                            border-color: clip.selected ? Theme.accent : #00000055;
+                                            animate border-color { duration: 130ms; }
+                                            // thumbnail (covers the gradient once generated)
+                                            Image { source: clip.thumb; image-fit: cover; width: 100%; height: 100%; }
+                                            // left scrim so the name stays legible over the thumb
+                                            Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
+                                            Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
+                                            Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
+                                            Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                            // Delete affordance on the selected clip (also Delete key).
+                                            // The visible square is 16 px; the hit area spans the
+                                            // clip's full height and 24 px of width.
+                                            if clip.selected : Rectangle {
+                                                x: parent.width - self.width - 3px; y: 3px;
+                                                width: 16px; height: 16px; border-radius: 5px;
+                                                background: del-ta.has-hover ? Theme.danger2 : #00000088;
+                                                animate background { duration: 100ms; }
+                                                opacity: 0;
+                                                animate opacity { duration: 140ms; }
+                                                init => { self.opacity = 1; }
+                                                accessible-role: button;
+                                                accessible-label: "Remove " + clip.name + " from the timeline";
+                                                Text { text: "✕"; color: white; font-size: 9px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                                                del-ta := TouchArea {
+                                                    x: -6px; y: -3px; width: 24px; height: 22px;
+                                                    clicked => { root.timeline-clip-removed(i); }
                                                 }
-                                                blk.dmode = DragMode.idle; blk.ddx = 0px; blk.ddy = 0px;
-                                                root.clip-dragging = false;
-                                            }
-                                            // A cancelled grab (window deactivation, grab stolen)
-                                            // must reset too, or the drop banner stays stuck.
-                                            if (ev.kind == PointerEventKind.cancel) {
-                                                blk.dmode = DragMode.idle; blk.ddx = 0px; blk.ddy = 0px;
-                                                root.clip-dragging = false;
                                             }
                                         }
-                                        clicked => { root.timeline-select(i); }
-                                    }
-                                    // left-edge trim (on top of the body); 12 px grips
-                                    Rectangle {
-                                        x: 0; width: 12px; height: parent.height; background: transparent;
+
+                                        // body: slide (horizontal) + move to another track
+                                        // (vertical) + select. Stable frame = blk.
                                         TouchArea {
-                                            mouse-cursor: ew-resize;
-                                            moved => { blk.dmode = DragMode.trim-left; blk.ddx = self.mouse-x - self.pressed-x; }
+                                            mouse-cursor: move;
+                                            moved => {
+                                                blk.dmode = DragMode.slide;
+                                                blk.ddx = self.mouse-x - self.pressed-x;
+                                                blk.ddy = self.mouse-y - self.pressed-y;
+                                                root.clip-dragging = true;
+                                                root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
+                                            }
                                             pointer-event(ev) => {
                                                 if (ev.kind == PointerEventKind.up) {
-                                                    if (blk.dmode == DragMode.trim-left && Math.abs(blk.ddx / 1px) > 2) {
-                                                        root.timeline-clip-trimmed(i, -1, (blk.ddx / 1px) / root.timeline-pps);
+                                                    if (blk.dmode == DragMode.slide && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
+                                                        // Commit the SNAPPED slide so the clip lands exactly
+                                                        // where it magnetically settled, not at the raw cursor.
+                                                        root.timeline-clip-dropped(i, root.timeline-snap-dx(i, blk.ddx / 1px / root.timeline-pps, root.timeline-pps), Math.round(blk.ddy / root.track-h));
                                                     }
-                                                    blk.dmode = DragMode.idle; blk.ddx = 0px;
+                                                    blk.dmode = DragMode.idle; blk.ddx = 0px; blk.ddy = 0px;
+                                                    root.clip-dragging = false;
                                                 }
-                                                if (ev.kind == PointerEventKind.cancel) { blk.dmode = DragMode.idle; blk.ddx = 0px; }
+                                                // A cancelled grab (window deactivation, grab stolen)
+                                                // must reset too, or the drop banner stays stuck.
+                                                if (ev.kind == PointerEventKind.cancel) {
+                                                    blk.dmode = DragMode.idle; blk.ddx = 0px; blk.ddy = 0px;
+                                                    root.clip-dragging = false;
+                                                }
+                                            }
+                                            clicked => { root.timeline-select(i); }
+                                        }
+                                        // left-edge trim (on top of the body); 12 px grips
+                                        Rectangle {
+                                            x: 0; width: 12px; height: parent.height; background: transparent;
+                                            TouchArea {
+                                                mouse-cursor: ew-resize;
+                                                moved => { blk.dmode = DragMode.trim-left; blk.ddx = self.mouse-x - self.pressed-x; }
+                                                pointer-event(ev) => {
+                                                    if (ev.kind == PointerEventKind.up) {
+                                                        if (blk.dmode == DragMode.trim-left && Math.abs(blk.ddx / 1px) > 2) {
+                                                            root.timeline-clip-trimmed(i, -1, (blk.ddx / 1px) / root.timeline-pps);
+                                                        }
+                                                        blk.dmode = DragMode.idle; blk.ddx = 0px;
+                                                    }
+                                                    if (ev.kind == PointerEventKind.cancel) { blk.dmode = DragMode.idle; blk.ddx = 0px; }
+                                                }
+                                            }
+                                        }
+                                        // right-edge trim
+                                        Rectangle {
+                                            x: parent.width - 12px; width: 12px; height: parent.height; background: transparent;
+                                            TouchArea {
+                                                mouse-cursor: ew-resize;
+                                                moved => { blk.dmode = DragMode.trim-right; blk.ddx = self.mouse-x - self.pressed-x; }
+                                                pointer-event(ev) => {
+                                                    if (ev.kind == PointerEventKind.up) {
+                                                        if (blk.dmode == DragMode.trim-right && Math.abs(blk.ddx / 1px) > 2) {
+                                                            root.timeline-clip-trimmed(i, 1, (blk.ddx / 1px) / root.timeline-pps);
+                                                        }
+                                                        blk.dmode = DragMode.idle; blk.ddx = 0px;
+                                                    }
+                                                    if (ev.kind == PointerEventKind.cancel) { blk.dmode = DragMode.idle; blk.ddx = 0px; }
+                                                }
                                             }
                                         }
                                     }
-                                    // right-edge trim
+
+                                    // playhead — the 90ms linear animate interpolates the
+                                    // ~100ms position poll into a continuous glide.
                                     Rectangle {
-                                        x: parent.width - 12px; width: 12px; height: parent.height; background: transparent;
-                                        TouchArea {
-                                            mouse-cursor: ew-resize;
-                                            moved => { blk.dmode = DragMode.trim-right; blk.ddx = self.mouse-x - self.pressed-x; }
-                                            pointer-event(ev) => {
-                                                if (ev.kind == PointerEventKind.up) {
-                                                    if (blk.dmode == DragMode.trim-right && Math.abs(blk.ddx / 1px) > 2) {
-                                                        root.timeline-clip-trimmed(i, 1, (blk.ddx / 1px) / root.timeline-pps);
-                                                    }
-                                                    blk.dmode = DragMode.idle; blk.ddx = 0px;
-                                                }
-                                                if (ev.kind == PointerEventKind.cancel) { blk.dmode = DragMode.idle; blk.ddx = 0px; }
+                                        x: (root.playhead * root.timeline-pps) * 1px - lane.scroll;
+                                        animate x { duration: 90ms; easing: linear; }
+                                        width: 2px; height: parent.height;
+                                        background: Theme.danger2;
+                                    }
+
+                                    // horizontal scrollbar (only when the timeline overflows)
+                                    if lane.max-scroll > 0px : Rectangle {
+                                        y: parent.height - 11px; x: 4px; width: parent.width - 8px; height: 7px;
+                                        border-radius: 3px; background: #00000080;
+                                        property <length> thumb-w: max(36px, self.width * self.width / lane.content-w);
+                                        Rectangle {
+                                            x: (lane.scroll / lane.max-scroll) * (parent.width - parent.thumb-w);
+                                            width: parent.thumb-w; height: parent.height;
+                                            border-radius: 3px;
+                                            background: sbta.pressed ? Theme.accent : (sbta.has-hover ? #ffffff66 : #ffffff40);
+                                            animate background { duration: 120ms; }
+                                        }
+                                        sbta := TouchArea {
+                                            function set(mx: length) {
+                                                root.tl-scroll = Math.clamp((mx - parent.thumb-w / 2) / (parent.width - parent.thumb-w) * lane.max-scroll, 0px, lane.max-scroll);
                                             }
+                                            moved => { sbta.set(self.mouse-x); }
+                                            pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { sbta.set(self.mouse-x); } }
                                         }
                                     }
-                                }
 
-                                // playhead — the 90ms linear animate interpolates the
-                                // ~100ms position poll into a continuous glide.
-                                Rectangle {
-                                    x: (root.playhead * root.timeline-pps) * 1px - lane.scroll;
-                                    animate x { duration: 90ms; easing: linear; }
-                                    width: 2px; height: parent.height;
-                                    background: Theme.danger2;
-                                }
-
-                                // horizontal scrollbar (only when the timeline overflows)
-                                if lane.max-scroll > 0px : Rectangle {
-                                    y: parent.height - 11px; x: 4px; width: parent.width - 8px; height: 7px;
-                                    border-radius: 3px; background: #00000080;
-                                    property <length> thumb-w: max(36px, self.width * self.width / lane.content-w);
+                                    // Persistent "new track" row, just below the last track.
+                                    // Subtle when idle; teal while dragging a clip; bright teal
+                                    // when the drag targets it. Topmost so nothing can hide it.
+                                    // Semi-transparent while active so the resting clip shows
+                                    // through. A dashed-look border keeps it reading as a drop
+                                    // zone. Sits above the scrollbar with room to spare.
                                     Rectangle {
-                                        x: (lane.scroll / lane.max-scroll) * (parent.width - parent.thumb-w);
-                                        width: parent.thumb-w; height: parent.height;
-                                        border-radius: 3px;
-                                        background: sbta.pressed ? Theme.accent : (sbta.has-hover ? #ffffff66 : #ffffff40);
-                                        animate background { duration: 120ms; }
-                                    }
-                                    sbta := TouchArea {
-                                        function set(mx: length) {
-                                            root.tl-scroll = Math.clamp((mx - parent.thumb-w / 2) / (parent.width - parent.thumb-w) * lane.max-scroll, 0px, lane.max-scroll);
+                                        property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
+                                        y: root.timeline-track-labels.length * root.track-h + 4px;
+                                        animate y { duration: 160ms; easing: ease-out; }
+                                        x: 4px; width: parent.width - 8px; height: 26px;
+                                        border-radius: 7px;
+                                        background: root.clip-dragging
+                                            ? (active ? #2dd4bfcc : #16342ee0)
+                                            : (nt-ta.has-hover ? #ffffff14 : #ffffff08);
+                                        border-width: root.clip-dragging ? 2px : 1px;
+                                        border-color: root.clip-dragging
+                                            ? (active ? #ffffff : Theme.accent)
+                                            : (nt-ta.has-hover ? #2dd4bf88 : #ffffff1f);
+                                        animate background, border-color { duration: 140ms; }
+                                        Text {
+                                            text: root.clip-dragging ? "+  Drop here for a new track" : "+  New track";
+                                            color: root.clip-dragging
+                                                ? (active ? Theme.on-accent : #8bf0e2)
+                                                : (nt-ta.has-hover ? #8bf0e2 : Theme.hint);
+                                            animate color { duration: 140ms; }
+                                            font-size: 10.5px; font-weight: 700;
+                                            horizontal-alignment: center; vertical-alignment: center;
                                         }
-                                        moved => { sbta.set(self.mouse-x); }
-                                        pointer-event(ev) => { if (ev.kind == PointerEventKind.down) { sbta.set(self.mouse-x); } }
-                                    }
-                                }
-
-                                // Persistent "new track" row, just below the last track.
-                                // Subtle when idle; teal while dragging a clip; bright teal
-                                // when the drag targets it. Topmost so nothing can hide it.
-                                // Semi-transparent while active so the resting clip shows
-                                // through. A dashed-look border keeps it reading as a drop
-                                // zone. Sits above the scrollbar with room to spare.
-                                Rectangle {
-                                    property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                    y: root.timeline-track-labels.length * root.track-h + 4px;
-                                    animate y { duration: 160ms; easing: ease-out; }
-                                    x: 4px; width: parent.width - 8px; height: 26px;
-                                    border-radius: 7px;
-                                    background: root.clip-dragging
-                                        ? (active ? #2dd4bfcc : #16342ee0)
-                                        : (nt-ta.has-hover ? #ffffff14 : #ffffff08);
-                                    border-width: root.clip-dragging ? 2px : 1px;
-                                    border-color: root.clip-dragging
-                                        ? (active ? #ffffff : Theme.accent)
-                                        : (nt-ta.has-hover ? #2dd4bf88 : #ffffff1f);
-                                    animate background, border-color { duration: 140ms; }
-                                    Text {
-                                        text: root.clip-dragging ? "+  Drop here for a new track" : "+  New track";
-                                        color: root.clip-dragging
-                                            ? (active ? Theme.on-accent : #8bf0e2)
-                                            : (nt-ta.has-hover ? #8bf0e2 : Theme.hint);
-                                        animate color { duration: 140ms; }
-                                        font-size: 10.5px; font-weight: 700;
-                                        horizontal-alignment: center; vertical-alignment: center;
-                                    }
-                                    // Click to add an empty track row (drops still work as before).
-                                    nt-ta := TouchArea {
-                                        enabled: !root.clip-dragging;
-                                        mouse-cursor: pointer;
-                                        clicked => { root.add-track(); }
+                                        // Click to add an empty track row (drops still work as before).
+                                        nt-ta := TouchArea {
+                                            enabled: !root.clip-dragging;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.add-track(); }
+                                        }
                                     }
                                 }
                             }

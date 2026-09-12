@@ -55,7 +55,9 @@ In Videos mode: **Space** plays and pauses, **Left/Right** walk the clips on
 the timeline, **Ctrl+Left/Right** slide the selected clip by a tenth of a
 second, **Ctrl+Up/Down** move it to another track, **Shift+Left/Right** trim
 its right edge, and **Delete** removes it. The scrubber and the inspector
-sliders take focus and answer to the arrows too.
+sliders take focus and answer to the arrows too. The timeline zooms with the
+**- / Fit / +** buttons, **Ctrl+plus / Ctrl+minus / Ctrl+0**, or **Ctrl+wheel**
+over the lane; a plain wheel scrolls it.
 
 ## Video features (new in 2.0)
 

@@ -602,3 +602,39 @@ export component InspSlider inherits Rectangle {
         }
     }
 }
+
+// A small control in the timeline toolbar (the zoom buttons). Keyboard
+// reachable and announced by its `hint`, since its label is a bare glyph.
+export component TimelineChip inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> wide: false;
+    callback clicked();
+    width: root.wide ? 34px : 22px;
+    height: 22px;
+    border-radius: 5px;
+    background: ta.has-hover ? Theme.hover : #1b1f27;
+    border-width: fs.has-focus ? 1px : 0px;
+    border-color: Theme.accent;
+    animate background { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.hint;
+    Text {
+        text: root.label;
+        color: Theme.ink2;
+        font-size: 10px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    fs := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Return || e.text == " ") { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { fs.focus(); root.clicked(); }
+    }
+}
