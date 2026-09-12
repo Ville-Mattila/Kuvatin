@@ -263,6 +263,7 @@ jobs:
           # The Windows 11 context-menu package (identity for the install dir;
           # the handler DLL is built with the exe above). Version = Cargo.toml.
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+\.\d+)"').Matches[0].Groups[1].Value
+          "KUVATIN_VERSION=$ver" | Out-File $env:GITHUB_ENV -Append
           $msix = "$env:GITHUB_WORKSPACE\target\msix\Kuvatin.msix"
           # Windows refuses an unsigned package that hosts a COM server, so the
           # package is signed when the repo has a key; its Publisher must equal
@@ -317,6 +318,12 @@ jobs:
           $hash = (Get-FileHash $msi.FullName -Algorithm SHA256).Hash.ToLower()
           # LF, not Out-File's CRLF: `sha256sum -c` (Git Bash, Linux) rejects a CR in the name.
           [IO.File]::WriteAllText("$($msi.FullName).sha256", "$hash  $($msi.Name)`n")
+          # The landing page links the fixed-name copy, whose checksum file has
+          # to name *that* file or `sha256sum -c` fails on the filename even
+          # though the bytes match.
+          [IO.File]::WriteAllText(
+            (Join-Path $msi.DirectoryName "kuvatin-x86_64.msi.sha256"),
+            "$hash  kuvatin-x86_64.msi`n")
           Get-ChildItem target\wix
 
       # Install the MSI the way a user would and drive the INSTALLED exe with
@@ -386,12 +393,17 @@ jobs:
           if ($env:SIGNED -eq 'true' -and (Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Subject -like 'CN=Ville Mattila*' })) { throw "uninstall left the signing certificate in Trusted People" }
 
       # Software bill of materials for the release (CycloneDX, from Cargo.lock).
+      # Only when packaging: it runs after a release build, so on an ordinary
+      # push it would walk the staged GStreamer runtime and the MSI for
+      # nothing. The name is taken from the version rather than the ref, which
+      # on a pull request is "123/merge" and puts a slash in the path.
       - name: SBOM (CycloneDX)
+        if: env.PACKAGE == 'true'
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: ./
           format: cyclonedx-json
-          output-file: target/kuvatin-${{ github.ref_name }}-sbom.cdx.json
+          output-file: target/kuvatin-v${{ env.KUVATIN_VERSION }}-sbom.cdx.json
           upload-artifact: false
           upload-release-assets: false
 

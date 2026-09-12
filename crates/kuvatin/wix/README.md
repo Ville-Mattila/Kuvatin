@@ -58,10 +58,20 @@ cargo build --release -p kuvatin
 # 1. Stage the trimmed GStreamer runtime + licenses; generate wix/gstreamer.wxs (gitignored).
 crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir "$PWD\target\gst-staging"
 
-# 2. Build the MSI, pointing the compiler at the staged runtime.
+# 2. Build the Windows 11 menu package. main.wxs references MsixPath
+#    unconditionally, so this is not optional.
+cargo build --release -p kuvatin-shellext
+crates\kuvatin\msix\build-msix.ps1 -Version 0.0.0 -Out target\msix\Kuvatin.msix
+
+# 3. Build the MSI, pointing the compiler at both.
 cd crates/kuvatin
-cargo wix -p kuvatin --nocapture --compiler-arg "-dGstStageDir=$(Resolve-Path ..\..\target\gst-staging)"
+cargo wix -p kuvatin --nocapture `
+  --compiler-arg "-dGstStageDir=$(Resolve-Path ..\..\target\gst-staging)" `
+  --compiler-arg "-dMsixPath=$(Resolve-Path ..\..\target\msix\Kuvatin.msix)"
 ```
+
+Add `-dSignCerPath=<cer>` and `-dSignCerThumbprint=<thumb>` to build the signed
+variant, which also installs the certificate and trusts it machine-wide.
 
 `main.wxs` references the harvested `GstRuntime` component group, so step 1 must
 run before step 2 (CI does both — see `.github/workflows/release.yml`).

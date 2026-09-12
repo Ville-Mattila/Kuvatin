@@ -193,10 +193,16 @@ cargo install cargo-wix
 # install WiX v3, build the release exe (its imports seed the DLL closure), then stage + build:
 cargo build --release -p kuvatin
 crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir target\gst-staging
+# the Windows 11 menu package; main.wxs always references it
+cargo build --release -p kuvatin-shellext
+crates\kuvatin\msix\build-msix.ps1 -Version 0.0.0 -Out target\msix\Kuvatin.msix
 cd crates\kuvatin
-cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging"
+cargo wix -p kuvatin --compiler-arg "-dGstStageDir=..\..\target\gst-staging" --compiler-arg "-dMsixPath=..\..\target\msix\Kuvatin.msix"
 # produces target/wix/kuvatin-<version>-x86_64.msi (~33 MB with the trimmed bundled runtime + licenses)
 ```
+
+The package built this way is unsigned, so the installer will carry it but the
+Windows 11 top-level menu stays inactive; see "Signing the menu package".
 
 ## Cutting a release
 
@@ -257,9 +263,13 @@ on the [releases page](https://github.com/Ville-Mattila/Kuvatin/releases).
 
 Every master push runs `cargo fmt --check`, `clippy -D warnings`, `cargo deny`
 (licenses + advisories), the deterministic test suites and a headless smoke
-render of the video engine; a tag additionally builds the MSI, installs it on
-the runner and converts an image with the installed copy before the release is
-published (with a SHA-256 file and a CycloneDX SBOM).
+render of the video engine. A tag, and any pull request touching the installer,
+additionally builds the MSI, installs it on the runner, converts an image and
+renders an MP4 with the installed copy, and checks that the Explorer entries
+are registered and then removed again. A tag publishes the result with a
+SHA-256 file and a CycloneDX SBOM.
 
-Deferred to later: audio-only tracks & transitions in the video editor, a top-level
-Windows 11 menu via `IExplorerCommand`, code signing, and macOS/Linux packaging.
+Deferred to later: audio-only tracks and transitions in the video editor,
+project save and load, undo, timeline zoom, and macOS/Linux packaging. The
+top-level Windows 11 menu and signing of the menu package shipped in 2.9.1;
+the installer itself is still unsigned, so SmartScreen still prompts once.
