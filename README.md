@@ -47,7 +47,15 @@ Presets can be renamed (type the new name, click **Rename**) and reordered
 with the arrows next to the preset list; the Explorer submenu follows that
 order. In Images mode: **Up/Down/Home/End** walk the file list, **Delete**
 removes the selected file, **Ctrl+O** adds files, **Ctrl+S** saves the
-preset, **Ctrl+Enter** converts, **Esc** closes the topmost dialog.
+preset, **Ctrl+Enter** converts, **Esc** closes the topmost dialog (and
+cancels a running conversion). The quality slider takes focus and answers to
+the arrows, **Home** and **End**.
+
+In Videos mode: **Space** plays and pauses, **Left/Right** walk the clips on
+the timeline, **Ctrl+Left/Right** slide the selected clip by a tenth of a
+second, **Ctrl+Up/Down** move it to another track, **Shift+Left/Right** trim
+its right edge, and **Delete** removes it. The scrubber and the inspector
+sliders take focus and answer to the arrows too.
 
 ## Video features (new in 2.0)
 

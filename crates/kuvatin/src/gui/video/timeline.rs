@@ -27,6 +27,8 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 return;
             };
             sel_idx.set(i);
+            // The keyboard verbs need to know what is selected too.
+            ui.set_timeline_selected(i);
             let mut name = SharedString::new();
             let mut sel_id = SharedString::new();
             let mut sel_kind = ClipKind::Video;
@@ -371,8 +373,12 @@ fn remove_timeline_clip(
         sel_idx.set(-1);
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_inspector_name("".into());
+            ui.set_timeline_selected(-1);
         }
     } else if sel > i {
         sel_idx.set(sel - 1);
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_timeline_selected(sel - 1);
+        }
     }
 }

@@ -29,6 +29,8 @@ something is fixed.
   every inspector transform take focus and answer to the arrows, Home and End.
 - Dialogs take the keyboard when they open and run their primary action on
   Enter.
+- Timeline clips can be selected, moved, re-tracked and trimmed from the
+  keyboard, and they announce themselves to assistive technology.
 
 ### Changed
 - One memory budget for the whole image path. Every decode runs under an

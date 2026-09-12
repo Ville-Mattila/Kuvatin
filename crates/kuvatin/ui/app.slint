@@ -166,6 +166,9 @@ export component AppWindow inherits Window {
     in-out property <int> insp-duration-s: 5;  // selected clip's length, whole seconds
     in property <bool> insp-is-still: false;   // selected clip is a still image (duration is free)
     callback timeline-select(int);            // clip index
+    // Which clip is selected (-1 = none). The model carries `selected` per
+    // clip for drawing; this is the index the keyboard verbs act on.
+    in property <int> timeline-selected: -1;
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
@@ -273,13 +276,60 @@ export component AppWindow inherits Window {
         if (root.running) { root.convert-cancel(); return EventResult.accept; }
         return EventResult.reject;
     }
+    // How far one keypress moves or trims a clip. Small enough to place a cut
+    // by ear, large enough that holding the key gets somewhere.
+    property <float> nudge-step: 0.1;
+    // Selecting, moving and trimming clips from the keyboard. The timeline was
+    // mouse-only: a clip could not be reached, let alone edited, without a
+    // pointer. Its own function because the Slint compiler lowers a long chain
+    // of `if … return` into nested expressions and overflows its stack.
+    function clip-keys(event: KeyEvent) -> EventResult {
+        if (root.timeline-clips.length == 0) { return EventResult.reject; }
+        // Plain arrows walk the clips; nothing selected starts at the first.
+        if (event.text == Key.RightArrow && !event.modifiers.control && !event.modifiers.shift) {
+            root.timeline-select(Math.min(root.timeline-selected + 1, root.timeline-clips.length - 1));
+            return EventResult.accept;
+        }
+        if (event.text == Key.LeftArrow && !event.modifiers.control && !event.modifiers.shift) {
+            root.timeline-select(Math.max(root.timeline-selected - 1, 0));
+            return EventResult.accept;
+        }
+        if (root.timeline-selected < 0) { return EventResult.reject; }
+        // Ctrl+arrows move the selected clip: along its track, or between tracks.
+        if (event.modifiers.control && event.text == Key.LeftArrow) {
+            root.timeline-clip-dropped(root.timeline-selected, -root.nudge-step, 0);
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && event.text == Key.RightArrow) {
+            root.timeline-clip-dropped(root.timeline-selected, root.nudge-step, 0);
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && event.text == Key.UpArrow) {
+            root.timeline-clip-dropped(root.timeline-selected, 0, -1);
+            return EventResult.accept;
+        }
+        if (event.modifiers.control && event.text == Key.DownArrow) {
+            root.timeline-clip-dropped(root.timeline-selected, 0, 1);
+            return EventResult.accept;
+        }
+        // Shift+arrows trim its right edge, the same edge the mouse grabs most.
+        if (event.modifiers.shift && event.text == Key.LeftArrow) {
+            root.timeline-clip-trimmed(root.timeline-selected, 1, -root.nudge-step);
+            return EventResult.accept;
+        }
+        if (event.modifiers.shift && event.text == Key.RightArrow) {
+            root.timeline-clip-trimmed(root.timeline-selected, 1, root.nudge-step);
+            return EventResult.accept;
+        }
+        return EventResult.reject;
+    }
     function video-keys(event: KeyEvent) -> EventResult {
         // Transport/edit keys are dead during an export (the engine ignores
         // them too — this just keeps the play icon from flipping).
         if (root.exporting) { return EventResult.reject; }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
         if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
-        return EventResult.reject;
+        return root.clip-keys(event);
     }
     function image-keys(event: KeyEvent) -> EventResult {
         // Walk the file list, remove the selected file, and the usual
@@ -1581,6 +1631,15 @@ export component AppWindow inherits Window {
                                 // stable frame; `vis` is the visual block that moves/resizes
                                 // live from the pointer delta. dmode says which (DragMode).
                                 for clip[i] in root.timeline-clips : blk := Rectangle {
+                                    // A clip was a coloured rectangle with no name, no role
+                                    // and no state as far as assistive technology was
+                                    // concerned. It is a selectable item in a list, and it
+                                    // says what it is, where it sits and how long it runs.
+                                    accessible-role: list-item;
+                                    accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
+                                        + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
+                                        + Math.round(clip.duration * 10) / 10 + " s long";
+                                    accessible-item-selected: clip.selected;
                                     x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                     // track 0 = GES layer 0 = top (both on-screen and composited).
                                     y: clip.track * root.track-h + 4px;
