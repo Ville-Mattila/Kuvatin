@@ -188,7 +188,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                 if ui.get_app_mode() == 1 {
                     // Same expansion + filtering as the image mode (folders,
                     // hidden files, junk), then the shared queue.
-                    import_q.enqueue(&ui, dropped);
+                    import_q.enqueue(dropped);
                 } else {
                     // Ignore image drops while a batch is running — adding rows
                     // would desync the progress callback's snapshot indices.

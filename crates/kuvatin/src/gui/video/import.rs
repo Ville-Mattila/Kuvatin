@@ -65,6 +65,7 @@ impl ImportState {
             done: Cell::new(0),
             gen: Arc::new(AtomicU64::new(0)),
             seen: RefCell::new(SeenSet::default()),
+            scans: Arc::new(Expansions::default()),
         });
         {
             let ready = ready.clone();
@@ -125,7 +126,6 @@ pub(super) fn wire(
     let seq_cancel = &im.seq_cancel;
     // Open media via the file dialog → the same import queue as drag-and-drop.
     {
-        let ui_weak = ui_weak.clone();
         let import_q = import_q.clone();
         ui.on_video_open(move || {
             // Videos plus every image input (stills become overlays).
@@ -137,9 +137,7 @@ pub(super) fn wire(
             else {
                 return;
             };
-            if let Some(ui) = ui_weak.upgrade() {
-                import_q.enqueue(&ui, paths);
-            }
+            import_q.enqueue(paths);
         });
     }
 
@@ -149,32 +147,80 @@ pub(super) fn wire(
     {
         let ui_weak = ui_weak.clone();
         let pending_seq = pending_seq.clone();
+        // The timer that waits for a detection running off the UI thread. It
+        // lives here so it survives the callback that starts it; a second pick
+        // replaces it, abandoning the first detection's result.
+        let detect_timer: Rc<RefCell<Option<slint::Timer>>> = Rc::new(RefCell::new(None));
         ui.on_video_open_sequence(move || {
-            let Some(ui) = ui_weak.upgrade() else {
-                return;
-            };
+            if ui_weak.upgrade().is_none() {
+                return; // window already gone: don't open a dialog for it
+            }
             let Some(path) = rfd::FileDialog::new()
                 .add_filter("First frame of a sequence", kuvatin_video::FRAME_EXTENSIONS)
                 .pick_file()
             else {
                 return;
             };
-            match kuvatin_video::detect_sequence(&path) {
-                Ok(spec) => {
-                    ui.set_seq_range(
-                        format!(
-                            "{} → {}",
-                            spec.frame_file_name(spec.start),
-                            spec.frame_file_name(spec.start + spec.count - 1)
-                        )
-                        .into(),
-                    );
-                    ui.set_seq_count(spec.count.min(i32::MAX as u64) as i32);
-                    *pending_seq.borrow_mut() = Some(spec);
-                    ui.set_seq_config(true);
+            // Detecting a run stats every frame up to the limit, which on a
+            // real render directory is thousands of files: off the UI thread,
+            // or the window freezes with nothing to show for it.
+            type Detected = Result<kuvatin_video::SequenceSpec, String>;
+            let slot: Arc<Mutex<Option<Detected>>> = Arc::new(Mutex::new(None));
+            let worker = slot.clone();
+            let file = path.clone();
+            let detect = move || {
+                let found = kuvatin_video::detect_sequence(&file).map_err(|e| format!("{e:#}"));
+                if let Ok(mut s) = worker.lock() {
+                    *s = Some(found);
                 }
-                Err(e) => show_error(&ui, "Not an image sequence", format!("{e:#}")),
+            };
+            if let Err(e) = std::thread::Builder::new()
+                .name("kuvatin-seq-detect".into())
+                .spawn(detect)
+            {
+                // No thread: detect here, as it always used to.
+                crate::applog::log(&format!("sequence detect thread failed to start: {e}"));
+                let found = kuvatin_video::detect_sequence(&path).map_err(|e| format!("{e:#}"));
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(found);
+                }
             }
+            let timer = slint::Timer::default();
+            let ui_weak = ui_weak.clone();
+            let pending_seq = pending_seq.clone();
+            let holder = detect_timer.clone();
+            timer.start(
+                slint::TimerMode::Repeated,
+                std::time::Duration::from_millis(60),
+                move || {
+                    let Some(found) = slot.lock().ok().and_then(|mut s| s.take()) else {
+                        return;
+                    };
+                    if let Some(t) = holder.borrow().as_ref() {
+                        t.stop();
+                    }
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    match found {
+                        Ok(spec) => {
+                            ui.set_seq_range(
+                                format!(
+                                    "{} → {}",
+                                    spec.frame_file_name(spec.start),
+                                    spec.frame_file_name(spec.start + spec.count - 1)
+                                )
+                                .into(),
+                            );
+                            ui.set_seq_count(spec.count.min(i32::MAX as u64) as i32);
+                            *pending_seq.borrow_mut() = Some(spec);
+                            ui.set_seq_config(true);
+                        }
+                        Err(e) => show_error(&ui, "Not an image sequence", e),
+                    }
+                },
+            );
+            *detect_timer.borrow_mut() = Some(timer);
         });
     }
 
@@ -332,8 +378,12 @@ pub(super) fn wire(
                 // Idle (no file import, no sequence import): nothing can
                 // be waiting — two Cell reads instead of two mutex locks
                 // sixteen times a second for the life of the window.
-                if import_q.total.get() == 0 && !seq_active.get() {
+                if import_q.total.get() == 0 && !seq_active.get() && !import_q.scanning() {
                     return;
+                }
+                // Folder scans that finished off-thread: queue what they found.
+                if let Some(ui) = ui_weak.upgrade() {
+                    import_q.drain_scans(&ui);
                 }
                 loop {
                     let next = ready.lock().unwrap().pop_front();
@@ -525,6 +575,46 @@ impl SeenSet {
     }
 }
 
+/// Folder expansions running off the UI thread, and the results waiting for
+/// it. Expanding a dropped folder walks it; on a frames directory or a network
+/// share that is thousands of stat calls, and it used to happen on the UI
+/// thread inside the drop timer — the window froze before any dialog appeared.
+///
+/// The drain timer sleeps while nothing is in flight, so [`busy`](Self::busy)
+/// must stay true from the moment a scan starts until its result has been
+/// collected: `finish` therefore publishes the result BEFORE it decrements the
+/// counter, and never the other way round.
+#[derive(Default)]
+struct Expansions {
+    in_flight: AtomicU64,
+    done: Mutex<Vec<(Vec<PathBuf>, Vec<PathBuf>)>>,
+}
+
+impl Expansions {
+    fn start(&self) {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn finish(&self, result: (Vec<PathBuf>, Vec<PathBuf>)) {
+        if let Ok(mut done) = self.done.lock() {
+            done.push(result);
+        }
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn busy(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst) > 0
+            || self.done.lock().map(|d| !d.is_empty()).unwrap_or(false)
+    }
+
+    fn take(&self) -> Vec<(Vec<PathBuf>, Vec<PathBuf>)> {
+        self.done
+            .lock()
+            .map(|mut d| std::mem::take(&mut *d))
+            .unwrap_or_default()
+    }
+}
+
 /// The media import queue. Dropped/opened paths go to a worker thread
 /// (discovery off the UI thread); every batch is stamped with `gen`, and a
 /// cancel bumps it, so the worker and the drain discard anything queued before
@@ -536,6 +626,8 @@ pub(crate) struct ImportQueue {
     done: Cell<usize>,
     gen: Arc<AtomicU64>,
     seen: RefCell<SeenSet>,
+    /// Folder expansion, off the UI thread (see [`Expansions`]).
+    scans: Arc<Expansions>,
 }
 
 impl ImportQueue {
@@ -543,11 +635,46 @@ impl ImportQueue {
         self.gen.load(Ordering::Relaxed)
     }
 
-    /// Expand folders, keep media, queue what's new and open the progress
-    /// modal. Explicitly dropped EXR frames get a pointer at "Import sequence…"
-    /// instead of a slow GES failure.
-    pub(crate) fn enqueue(&self, ui: &AppWindow, picked: Vec<PathBuf>) {
-        let (media, frames_only) = collect_media(&picked);
+    /// Expand folders and keep the media, off the UI thread; the drain timer
+    /// picks the result up and queues it (see [`drain_scans`](Self::drain_scans)).
+    ///
+    /// The walk itself is the slow part — a dropped frames folder is thousands
+    /// of directory entries — and it used to run inside the drop timer, which
+    /// froze the window before anything appeared on screen.
+    pub(crate) fn enqueue(&self, picked: Vec<PathBuf>) {
+        let scans = self.scans.clone();
+        scans.start();
+        let mine = picked.clone();
+        let spawned = std::thread::Builder::new()
+            .name("kuvatin-import-scan".into())
+            .spawn(move || scans.finish(collect_media(&mine)));
+        if let Err(e) = spawned {
+            // No thread to be had: walk it here rather than lose the files.
+            // The window stalls, as it always used to; the count started
+            // above is settled by the same shared counter.
+            crate::applog::log(&format!("import scan thread failed to start: {e}"));
+            self.scans.finish(collect_media(&picked));
+        }
+    }
+
+    /// Collect finished scans and queue what they found. Called by the drain
+    /// timer on the UI thread, where the bookkeeping lives.
+    pub(crate) fn drain_scans(&self, ui: &AppWindow) {
+        for (media, frames_only) in self.scans.take() {
+            self.queue_collected(ui, media, frames_only);
+        }
+    }
+
+    /// True while a scan is running or its result is waiting to be collected,
+    /// so the drain timer stays awake for it.
+    pub(crate) fn scanning(&self) -> bool {
+        self.scans.busy()
+    }
+
+    /// Queue what a scan found and open the progress modal. Explicitly dropped
+    /// EXR frames get a pointer at "Import sequence…" instead of a slow
+    /// GES failure.
+    fn queue_collected(&self, ui: &AppWindow, media: Vec<PathBuf>, frames_only: Vec<PathBuf>) {
         let gen = self.current_gen();
         let mut queued = 0;
         for path in media {
@@ -588,6 +715,53 @@ impl ImportQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// The drain timer sleeps while nothing is in flight, so a scan that has
+    /// started — or has finished but not been collected — must keep it awake.
+    /// If `busy` ever dipped false with a result pending, the files would sit
+    /// in the queue until something else woke the timer.
+    #[test]
+    fn a_scan_keeps_the_drain_awake_until_its_result_is_collected() {
+        let ex = Expansions::default();
+        assert!(!ex.busy());
+        ex.start();
+        assert!(ex.busy(), "a scan is running");
+        ex.finish((paths(&["a.mp4"]), Vec::new()));
+        assert!(ex.busy(), "the result is waiting to be collected");
+        let taken = ex.take();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].0, paths(&["a.mp4"]));
+        assert!(!ex.busy(), "nothing left");
+    }
+
+    #[test]
+    fn results_are_handed_over_exactly_once() {
+        let ex = Expansions::default();
+        ex.start();
+        ex.finish((paths(&["a.mp4"]), paths(&["f.exr"])));
+        assert_eq!(ex.take().len(), 1);
+        assert!(ex.take().is_empty(), "a second drain finds nothing");
+    }
+
+    /// Two drops in quick succession: both scans are accounted for, and the
+    /// drain gets both results whether or not they finished together.
+    #[test]
+    fn two_scans_are_both_accounted_for() {
+        let ex = Expansions::default();
+        ex.start();
+        ex.start();
+        ex.finish((paths(&["a.mp4"]), Vec::new()));
+        assert!(ex.busy());
+        assert_eq!(ex.take().len(), 1);
+        assert!(ex.busy(), "the second scan is still running");
+        ex.finish((paths(&["b.mp4"]), Vec::new()));
+        assert_eq!(ex.take().len(), 1);
+        assert!(!ex.busy());
+    }
 
     /// Different spellings of one file are one "seen" entry (Windows paths
     /// are case-insensitive; a `..` segment is the same file too).
