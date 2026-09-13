@@ -110,12 +110,42 @@ fn run_job<T: Send + 'static>(
     or_fail("Kuvatin \u{2014} could not start", outcome)
 }
 
+/// Size the image batch's memory budget from this machine's RAM before any
+/// conversion can start: half of it, with a floor (see
+/// `kuvatin_core::batch::budget_for_ram`). Without it a batch uses a fixed
+/// default that suits neither a 64 GB workstation nor an 8 GB laptop.
+fn configure_batch_memory() {
+    use kuvatin_core::batch::{budget_for_ram, set_memory_budget};
+    set_memory_budget(budget_for_ram(physical_memory()));
+}
+
+/// Total physical RAM in bytes, or 0 when Windows won't say.
+#[cfg(windows)]
+fn physical_memory() -> u64 {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `status` is a live MEMORYSTATUSEX and dwLength says so.
+    match unsafe { GlobalMemoryStatusEx(&mut status) } {
+        Ok(()) => status.ullTotalPhys,
+        Err(_) => 0,
+    }
+}
+
+#[cfg(not(windows))]
+fn physical_memory() -> u64 {
+    0
+}
+
 fn main() {
     // A windowed exe run from a terminal joins that terminal's console, so
     // `--register` / errors print where the user is looking.
     shell::attach_parent_console();
     applog::install_panic_hook();
     configure_bundled_gstreamer();
+    configure_batch_memory();
     let args: Vec<std::ffi::OsString> = std::env::args_os()
         .map(|a| cli::repair_drive_root(&a))
         .collect();
@@ -230,5 +260,19 @@ fn main() {
             };
             or_fail("Kuvatin \u{2014} could not start", gui::run(paths))
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod memory_tests {
+    /// The batch budget is sized from this. A silent failure would floor every
+    /// machine at 1 GB and make a large batch crawl one file at a time.
+    #[test]
+    fn windows_reports_the_machines_physical_memory() {
+        let bytes = super::physical_memory();
+        assert!(
+            bytes >= 2 << 30,
+            "no machine runs Windows 11 on under 2 GB; got {bytes}"
+        );
     }
 }

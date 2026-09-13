@@ -1,8 +1,12 @@
-use crate::pipeline::{process_file, process_file_to, Job};
-use rayon::prelude::*;
+use crate::crop::compute_crop_rect;
+use crate::format::OutputFormat;
+use crate::pipeline::{process_file, process_file_to, Job, PngOptimize, WebpMode};
+use crate::resize::compute_target_dimensions;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 /// Run one fallible file operation with panic isolation: a panicking codec or
 /// dependency becomes an `Err` like any other failure instead of unwinding the
@@ -43,7 +47,232 @@ impl Progress {
 /// Outcome message of inputs skipped because the batch was cancelled.
 pub const CANCELLED: &str = "cancelled";
 
-/// Run `job` over every input in parallel. `on_progress` is called once per
+/// Floor of the batch memory budget: what a failed memory query or a small VM
+/// still gets, so a batch slows to one file at a time rather than stopping.
+pub const MIN_MEMORY_BUDGET: u64 = 1 << 30;
+
+/// The budget until the app sets one from the machine's RAM.
+pub const DEFAULT_MEMORY_BUDGET: u64 = 4 << 30;
+
+static MEMORY_BUDGET: AtomicU64 = AtomicU64::new(DEFAULT_MEMORY_BUDGET);
+
+/// The budget for a machine with `total_physical` bytes of RAM: half of it, so
+/// the rest of the desktop keeps working, and never under [`MIN_MEMORY_BUDGET`].
+pub fn budget_for_ram(total_physical: u64) -> u64 {
+    (total_physical / 2).max(MIN_MEMORY_BUDGET)
+}
+
+/// Set the memory budget every later batch runs under. The app calls this once
+/// at startup with [`budget_for_ram`] of the machine.
+pub fn set_memory_budget(bytes: u64) {
+    MEMORY_BUDGET.store(bytes.max(MIN_MEMORY_BUDGET), Ordering::Relaxed);
+}
+
+fn memory_budget() -> u64 {
+    MEMORY_BUDGET.load(Ordering::Relaxed)
+}
+
+/// Peak memory of converting one file, as a multiple of its RGBA8 working
+/// buffer (width x height x 4).
+///
+/// Measured, not guessed: the peak private commit of one release-build process
+/// per case, converting a 4000x3000 photo (48 MB as RGBA8), 2026-09-13. JPEG
+/// 38 MB, lossy WebP 131, lossless WebP 362, plain PNG 113, lossless PNG 559,
+/// lossy PNG 483, BMP 137, TIFF 133, GIF 117 — each rounded up to a whole
+/// multiple. The PNG figures include oxipng's parallel trials. Unthrottled,
+/// sixteen of those photos as lossless PNG peaked at 6.8 GB on 24 threads.
+fn peak_factor(job: &Job) -> u64 {
+    match job.format {
+        OutputFormat::Jpeg => 1,
+        OutputFormat::Webp => match job.webp {
+            WebpMode::Lossy => 3,
+            WebpMode::Lossless => 8,
+        },
+        OutputFormat::Png => match job.png {
+            PngOptimize::None => 3,
+            PngOptimize::Lossless => 12,
+            PngOptimize::Lossy => 11,
+        },
+        OutputFormat::Bmp | OutputFormat::Tiff | OutputFormat::Gif => 3,
+    }
+}
+
+/// What converting `input` costs against the memory budget, in bytes: its
+/// largest pixel buffer (the source, or an upscale's output) times
+/// [`peak_factor`]. Reads the header only — 0.22 ms for a 4000x3000 JPEG,
+/// against 29 ms to decode it. A file whose header can't be read costs 0: its
+/// decode fails straight away and allocates nothing.
+pub fn estimate_cost(input: &Path, job: &Job) -> u64 {
+    use image::ImageDecoder;
+    let Some(decoder) = image::ImageReader::open(input)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+        .and_then(|r| r.into_decoder().ok())
+    else {
+        return 0;
+    };
+    let (w, h) = decoder.dimensions();
+    // A 16-bit source keeps 8 bytes a pixel through plain PNG and TIFF.
+    let bytes_per_pixel = u64::from(decoder.color_type().bytes_per_pixel()).max(4);
+    let (_, _, cw, ch) = compute_crop_rect(job.crop, w, h);
+    let (tw, th) = compute_target_dimensions(job.resize, cw, ch);
+    let pixels = (u64::from(w) * u64::from(h)).max(u64::from(tw) * u64::from(th));
+    pixels * bytes_per_pixel * peak_factor(job)
+}
+
+/// Bytes of budget in use, and a signal for when some come back.
+struct Budget {
+    total: u64,
+    used: Mutex<u64>,
+    freed: Condvar,
+}
+
+impl Budget {
+    /// Wait until `cost` fits beside what is running — or nothing is running,
+    /// so an item bigger than the whole budget still gets its turn, alone —
+    /// then take it. `false` if cancelled first.
+    fn take<C: Fn() -> bool>(&self, cost: u64, cancelled: &C) -> bool {
+        loop {
+            if cancelled() {
+                return false;
+            }
+            {
+                let mut used = self.used.lock().unwrap();
+                if *used == 0 || *used + cost <= self.total {
+                    *used += cost;
+                    return true;
+                }
+            }
+            // On a pool thread, run a queued job instead of sleeping: with one
+            // thread, the job being waited for is queued right here.
+            if let Some(rayon::Yield::Executed) = rayon::yield_now() {
+                continue;
+            }
+            let used = self.used.lock().unwrap();
+            if *used != 0 && *used + cost > self.total {
+                // Bounded, so a cancel is noticed within this long.
+                let _ = self
+                    .freed
+                    .wait_timeout(used, Duration::from_millis(20))
+                    .unwrap();
+            }
+        }
+    }
+
+    fn give_back(&self, cost: u64) {
+        *self.used.lock().unwrap() -= cost;
+        self.freed.notify_all();
+    }
+}
+
+/// Gives an admitted item's budget back when its task ends, however it ends.
+struct Admitted<'a> {
+    budget: &'a Budget,
+    cost: u64,
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        self.budget.give_back(self.cost);
+    }
+}
+
+/// Run `work` over `items` on the rayon pool, starting each only once its
+/// `cost_of` fits under `budget` beside what is already running. Results come
+/// back in input order, `None` for an item that never started because
+/// `cancelled()` turned true first.
+///
+/// Admission happens here, on the one thread handing out work, and never
+/// inside a worker. A worker waiting for budget could be the very thread that
+/// holds it: while a thread waits on its own nested tasks (oxipng's parallel
+/// trials), rayon lets it pick up the next top-level item, which would then
+/// wait forever for budget its own thread has.
+fn admit_all<T, R, K, C, W>(
+    items: &[T],
+    cost_of: K,
+    budget: u64,
+    cancelled: C,
+    work: W,
+) -> Vec<Option<R>>
+where
+    T: Sync,
+    R: Send,
+    K: Fn(&T) -> u64 + Sync,
+    C: Fn() -> bool + Sync,
+    W: Fn(&T) -> R + Sync,
+{
+    let budget = Budget {
+        total: budget.max(1),
+        used: Mutex::new(0),
+        freed: Condvar::new(),
+    };
+    let slots: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    rayon::scope(|scope| {
+        for (item, slot) in items.iter().zip(&slots) {
+            let cost = cost_of(item).min(budget.total);
+            if !budget.take(cost, &cancelled) {
+                break;
+            }
+            let (budget, work, cancelled) = (&budget, &work, &cancelled);
+            scope.spawn(move |_| {
+                let _admitted = Admitted { budget, cost };
+                if !cancelled() {
+                    *slot.lock().unwrap() = Some(work(item));
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap())
+        .collect()
+}
+
+/// The loop every public entry point shares: admission under the memory
+/// budget, panic isolation, one progress call per finished file, and
+/// [`CANCELLED`] for whatever never started.
+fn run_governed<T, F, C>(
+    items: &[T],
+    input_of: impl Fn(&T) -> &PathBuf + Sync,
+    cost_of: impl Fn(&T) -> u64 + Sync,
+    process: impl Fn(&T) -> Result<PathBuf, String> + Sync,
+    on_progress: F,
+    cancelled: C,
+) -> Vec<FileResult>
+where
+    T: Sync,
+    F: Fn(Progress) + Sync,
+    C: Fn() -> bool + Sync,
+{
+    let total = items.len();
+    let done = AtomicUsize::new(0);
+    let finished = admit_all(items, cost_of, memory_budget(), cancelled, |item| {
+        let result = FileResult {
+            input: input_of(item).clone(),
+            outcome: isolate(|| process(item)),
+        };
+        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+        on_progress(Progress {
+            done: n,
+            total,
+            last: result.clone(),
+        });
+        result
+    });
+    items
+        .iter()
+        .zip(finished)
+        .map(|(item, result)| {
+            result.unwrap_or_else(|| FileResult {
+                input: input_of(item).clone(),
+                outcome: Err(CANCELLED.into()),
+            })
+        })
+        .collect()
+}
+
+/// Run `job` over every input in parallel, as many at once as the memory
+/// budget allows (see [`set_memory_budget`]). `on_progress` is called once per
 /// finished file (from worker threads — it must be `Sync`). A single failing
 /// file never aborts the batch; its error is captured in the returned results.
 pub fn run_batch<F>(inputs: &[PathBuf], job: &Job, on_progress: F) -> Vec<FileResult>
@@ -90,31 +319,14 @@ where
     F: Fn(Progress) + Sync,
     C: Fn() -> bool + Sync,
 {
-    let total = items.len();
-    let done = AtomicUsize::new(0);
-    items
-        .par_iter()
-        .map(|(input, job)| {
-            if cancelled() {
-                return FileResult {
-                    input: input.clone(),
-                    outcome: Err(CANCELLED.into()),
-                };
-            }
-            let outcome = isolate(|| process_file(input, job).map_err(|e| e.to_string()));
-            let result = FileResult {
-                input: input.clone(),
-                outcome,
-            };
-            let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-            on_progress(Progress {
-                done: n,
-                total,
-                last: result.clone(),
-            });
-            result
-        })
-        .collect()
+    run_governed(
+        items,
+        |(input, _)| input,
+        |(input, job)| estimate_cost(input, job),
+        |(input, job)| process_file(input, job).map_err(|e| e.to_string()),
+        on_progress,
+        cancelled,
+    )
 }
 
 /// Like [`run_jobs`], but each item also carries the exact output path to write
@@ -139,32 +351,14 @@ where
     F: Fn(Progress) + Sync,
     C: Fn() -> bool + Sync,
 {
-    let total = items.len();
-    let done = AtomicUsize::new(0);
-    items
-        .par_iter()
-        .map(|(input, job, output)| {
-            if cancelled() {
-                return FileResult {
-                    input: input.clone(),
-                    outcome: Err(CANCELLED.into()),
-                };
-            }
-            let outcome =
-                isolate(|| process_file_to(input, job, output).map_err(|e| e.to_string()));
-            let result = FileResult {
-                input: input.clone(),
-                outcome,
-            };
-            let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-            on_progress(Progress {
-                done: n,
-                total,
-                last: result.clone(),
-            });
-            result
-        })
-        .collect()
+    run_governed(
+        items,
+        |(input, _, _)| input,
+        |(input, job, _)| estimate_cost(input, job),
+        |(input, job, output)| process_file_to(input, job, output).map_err(|e| e.to_string()),
+        on_progress,
+        cancelled,
+    )
 }
 
 /// What a finished batch amounts to: how many files succeeded, and the bytes
@@ -322,8 +516,8 @@ mod summary_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::OutputFormat;
     use image::{Rgba, RgbaImage};
+    use rayon::prelude::*;
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -561,5 +755,249 @@ mod tests {
             .unwrap();
         assert_eq!(ra.extension().unwrap(), "jpg");
         assert_eq!(rb.extension().unwrap(), "webp");
+    }
+    /// Run `f` on its own thread, and fail rather than hang the whole suite if
+    /// it has not come back within ten seconds.
+    fn within_ten_seconds<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("deadlocked: still running after ten seconds")
+    }
+
+    /// The point of the governor: the cost of what is running at once never
+    /// passes the budget — and it still runs in parallel under it.
+    #[test]
+    fn the_budget_bounds_what_runs_at_once() {
+        use std::sync::atomic::AtomicU64;
+        let in_flight = AtomicU64::new(0);
+        let most = AtomicU64::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        let items: Vec<u64> = vec![30; 12];
+        let out = pool.install(|| {
+            admit_all(
+                &items,
+                |c| *c,
+                100,
+                || false,
+                |c| {
+                    let now = in_flight.fetch_add(*c, Ordering::SeqCst) + *c;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    in_flight.fetch_sub(*c, Ordering::SeqCst);
+                    *c
+                },
+            )
+        });
+        assert_eq!(out.iter().flatten().count(), 12, "everything ran");
+        let most = most.load(Ordering::SeqCst);
+        assert!(
+            most <= 100,
+            "never more than the budget in flight, saw {most}"
+        );
+        assert!(most >= 60, "and still in parallel under it, saw {most}");
+    }
+
+    /// A file bigger than the whole budget is not refused — a 100-megapixel
+    /// scan on a small machine is still a file the user asked for. It waits
+    /// for the pool to empty and then runs with nothing beside it.
+    #[test]
+    fn an_item_bigger_than_the_whole_budget_runs_alone() {
+        let running = AtomicUsize::new(0);
+        let alone = std::sync::atomic::AtomicBool::new(true);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        let items: Vec<u64> = vec![40, 40, 500, 40, 40];
+        let out = pool.install(|| {
+            admit_all(
+                &items,
+                |c| *c,
+                100,
+                || false,
+                |c| {
+                    let n = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    if *c == 500 && n != 1 {
+                        alone.store(false, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    if *c == 500 && running.load(Ordering::SeqCst) != 1 {
+                        alone.store(false, Ordering::SeqCst);
+                    }
+                    running.fetch_sub(1, Ordering::SeqCst);
+                },
+            )
+        });
+        assert_eq!(out.iter().flatten().count(), 5, "everything ran");
+        assert!(
+            alone.load(Ordering::SeqCst),
+            "nothing else ran beside the oversized item"
+        );
+    }
+
+    /// With one pool thread, the job being waited for is queued on the very
+    /// thread doing the waiting. Blocking there would wait forever.
+    #[test]
+    fn a_single_thread_pool_does_not_deadlock_waiting_for_budget() {
+        let out = within_ten_seconds(|| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap();
+            let items: Vec<u64> = vec![60; 6];
+            pool.install(|| admit_all(&items, |c| *c, 100, || false, |c| *c))
+        });
+        assert_eq!(out.into_iter().flatten().count(), 6);
+    }
+
+    /// What oxipng does: parallel work inside an item. A pool thread waiting
+    /// on its own sub-tasks may pick up the next top-level item, which then
+    /// waits for budget that same thread holds — the deadlock a governor inside
+    /// the workers would have.
+    #[test]
+    fn parallel_work_inside_an_item_does_not_deadlock() {
+        let out = within_ten_seconds(|| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap();
+            let items: Vec<u64> = vec![100; 16];
+            pool.install(|| {
+                admit_all(
+                    &items,
+                    |c| *c,
+                    100,
+                    || false,
+                    |_| (0..20_000u64).into_par_iter().map(|x| x % 7).sum::<u64>(),
+                )
+            })
+        });
+        assert_eq!(out.into_iter().flatten().count(), 16);
+    }
+
+    /// Cancel arrives while the rest are queued behind the budget: they must
+    /// not start once it frees up, and they report as never started.
+    #[test]
+    fn cancelling_while_waiting_for_budget_starts_nothing_more() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let ran = AtomicUsize::new(0);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let items: Vec<u64> = vec![100; 6];
+        let out = pool.install(|| {
+            admit_all(
+                &items,
+                |c| *c,
+                100,
+                || stop.load(Ordering::SeqCst),
+                |_| {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    stop.store(true, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                },
+            )
+        });
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            1,
+            "only the item already running"
+        );
+        assert_eq!(
+            out.iter().filter(|o| o.is_none()).count(),
+            5,
+            "the rest report as never started"
+        );
+    }
+
+    /// A file is priced at its largest working buffer — the source, or the
+    /// output of an upscale — times what its encoder was measured to need.
+    #[test]
+    fn a_file_costs_its_largest_buffer_times_the_measured_factor() {
+        use crate::pipeline::PngOptimize;
+        use crate::resize::ResizeMode;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.png");
+        RgbaImage::from_pixel(100, 50, Rgba([1, 2, 3, 255]))
+            .save(&src)
+            .unwrap();
+        let jpeg = Job {
+            format: OutputFormat::Jpeg,
+            ..Job::default()
+        };
+        assert_eq!(
+            estimate_cost(&src, &jpeg),
+            100 * 50 * 4 * peak_factor(&jpeg)
+        );
+
+        let lossless_png = Job {
+            format: OutputFormat::Png,
+            png: PngOptimize::Lossless,
+            ..Job::default()
+        };
+        assert!(
+            estimate_cost(&src, &lossless_png) > estimate_cost(&src, &jpeg),
+            "oxipng was measured at many times a JPEG encode"
+        );
+
+        let upscale = Job {
+            format: OutputFormat::Jpeg,
+            resize: ResizeMode::Pixels {
+                width: Some(400),
+                height: Some(200),
+                keep_aspect: false,
+            },
+            ..Job::default()
+        };
+        assert_eq!(
+            estimate_cost(&src, &upscale),
+            400 * 200 * 4 * peak_factor(&upscale)
+        );
+
+        // Unreadable: costs nothing to admit, because its decode fails at once.
+        let bad = dir.path().join("bad.png");
+        std::fs::write(&bad, b"nope").unwrap();
+        assert_eq!(estimate_cost(&bad, &jpeg), 0);
+    }
+
+    /// Half the machine, with a floor so a failed memory query (which reports
+    /// 0) or a tiny VM still converts.
+    #[test]
+    fn the_budget_is_half_the_machine_but_never_under_the_floor() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(budget_for_ram(32 * GIB), 16 * GIB);
+        assert_eq!(budget_for_ram(8 * GIB), 4 * GIB);
+        assert_eq!(budget_for_ram(GIB), MIN_MEMORY_BUDGET);
+        assert_eq!(budget_for_ram(0), MIN_MEMORY_BUDGET);
+    }
+
+    /// The scheduler is no longer a plain ordered `par_iter`, so pin what it
+    /// replaced: results line up with the inputs.
+    #[test]
+    fn results_come_back_in_input_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let inputs: Vec<PathBuf> = (0..20)
+            .map(|i| {
+                let p = dir.path().join(format!("{i}.png"));
+                RgbaImage::from_pixel(8 + i, 8, Rgba([1, 2, 3, 255]))
+                    .save(&p)
+                    .unwrap();
+                p
+            })
+            .collect();
+        let job = Job {
+            format: OutputFormat::Jpeg,
+            ..Job::default()
+        };
+        let results = run_batch(&inputs, &job, |_| {});
+        let order: Vec<&PathBuf> = results.iter().map(|r| &r.input).collect();
+        assert_eq!(order, inputs.iter().collect::<Vec<_>>());
     }
 }

@@ -22,6 +22,14 @@ something is fixed.
   under fully transparent ones, which libwebp is otherwise free to rewrite —
   and hides the quality slider, which it does not use.
 
+### Fixed
+- **A large batch can no longer run the machine out of memory.** Every core
+  converted a file at once, whatever the files cost: sixteen 12-megapixel
+  photos saved as optimised PNG peaked at 6.8 GB. Each file is now priced from
+  its header before it starts, against what its encoder was measured to need,
+  and a batch runs only as much at once as fits in half the machine's RAM. A
+  file bigger than that still converts, on its own.
+
 ## [2.10.0] - 2026-09-12
 The video editor learns to remember. A project — the timeline, the tracks,
 every clip's trim and transform — saves to a file and comes back. Neither end
