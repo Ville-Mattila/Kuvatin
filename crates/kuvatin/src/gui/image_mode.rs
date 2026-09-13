@@ -219,6 +219,12 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                     // Decode exactly as the conversion will (EXIF orientation applied,
                     // animated GIFs refused), so the crop the user draws lands on the
                     // same pixels the pipeline crops.
+                    //
+                    // The conversion decodes this file again instead of reusing this
+                    // image, on purpose. Measured on a 4000x3000 JPEG, release build:
+                    // the decode is 29 ms, less than the 43 ms the 1280 px preview below
+                    // takes to make from it. Keeping the full image in case the user
+                    // converts next would hold 48 MB per selection to save 29 ms once.
                     let decoded = decode_oriented(&path)
                         .ok()
                         .filter(|i| i.width() > 0 && i.height() > 0);
