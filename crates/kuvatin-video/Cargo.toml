@@ -9,7 +9,7 @@ authors.workspace = true
 description = "GStreamer Editing Services-backed video engine for Kuvatin: layered timeline, composited preview, hardware export, image-sequence rendering"
 
 [dependencies]
-gstreamer = "0.23"
+gstreamer = "0.25"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
 # v1_20 enables set_element_properties (per-encoder bitrate) on EncodingProfile.
