@@ -128,14 +128,10 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 row.inpoint = geom.inpoint.as_secs_f32();
                 row.duration = geom.duration.as_secs_f32();
             }
-            // Vertical: move to another track (or a new bottom track). Clamp
-            // to [0, count]; count means "one past the last" = a new track.
-            // Visible label rows count too — a click-added track may not have
-            // a GES layer yet, and layer() creates any intermediates on
-            // demand, so dropping onto ANY visible row lands exactly there.
+            // Vertical: move to another track, or a new bottom track.
             if delta_rows != 0 {
-                let count = (p.track_count() as i32).max(tracks.row_count() as i32);
-                let target = (row.track + delta_rows).clamp(0, count);
+                let target =
+                    drop_target_track(row.track, delta_rows, p.track_count(), tracks.row_count());
                 if target != row.track {
                     if let Some(t) = p.move_clip_to_track(&cid, target as usize) {
                         row.track = t as i32;
@@ -164,50 +160,20 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
     {
         let tl_clips = tl_clips.clone();
         ui.on_timeline_snap_dx(move |i, dx_s, pps| {
-            if pps <= 0.0 || i < 0 {
+            if i < 0 {
                 return dx_s;
             }
             let i = i as usize;
-            let n = tl_clips.row_count();
             let Some(dragged) = tl_clips.row_data(i) else {
                 return dx_s;
             };
-            let start = dragged.start;
-            let prop_start = start + dx_s;
-            let prop_end = start + dragged.duration + dx_s;
-            // Snap targets: timeline origin + every OTHER clip's start/end edge.
-            let mut targets: Vec<f32> = Vec::with_capacity(2 * n + 1);
-            targets.push(0.0);
-            for j in 0..n {
-                if j == i {
-                    continue;
-                }
-                if let Some(c) = tl_clips.row_data(j) {
-                    targets.push(c.start);
-                    targets.push(c.start + c.duration);
-                }
-            }
-            // Pick the target within threshold needing the smallest nudge,
-            // measured against whichever edge (start/end) is closest to it.
-            let threshold = 8.0 / pps; // 8 px expressed in seconds
-            let mut best_adjust = 0.0f32;
-            let mut best_dist = threshold;
-            for t in targets {
-                for edge in [prop_start, prop_end] {
-                    let a = t - edge;
-                    if a.abs() < best_dist {
-                        best_dist = a.abs();
-                        best_adjust = a;
-                    }
-                }
-            }
-            let snapped = dx_s + best_adjust;
-            // Never slide a clip's start before the timeline origin.
-            if start + snapped < 0.0 {
-                -start
-            } else {
-                snapped
-            }
+            // Every OTHER clip, in model order: the order decides a tie.
+            let others: Vec<(f32, f32)> = (0..tl_clips.row_count())
+                .filter(|&j| j != i)
+                .filter_map(|j| tl_clips.row_data(j))
+                .map(|c| (c.start, c.duration))
+                .collect();
+            snap_slide(dragged.start, dragged.duration, &others, dx_s, pps)
         });
     }
 
@@ -367,18 +333,206 @@ fn remove_timeline_clip(
         // old length.
         ui.set_timeline_duration(d.map(|d| d.as_secs_f32()).unwrap_or(0.0));
     }
-    // Keep selection consistent: the removed clip is gone; rows above it shift down.
+    // Keep the selection on the same clip, or clear it if that clip is gone.
     let sel = sel_idx.get();
-    if sel == i {
-        sel_idx.set(-1);
+    let next = selection_after_removal(sel, i);
+    if next != sel {
+        sel_idx.set(next);
         if let Some(ui) = ui_weak.upgrade() {
-            ui.set_inspector_name("".into());
-            ui.set_timeline_selected(-1);
+            if next < 0 {
+                ui.set_inspector_name("".into());
+            }
+            ui.set_timeline_selected(next);
         }
-    } else if sel > i {
-        sel_idx.set(sel - 1);
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_timeline_selected(sel - 1);
+    }
+}
+
+/// Magnetic snap for a clip at `start` lasting `duration`, being slid by
+/// `dx_s` seconds. If either edge comes within 8 px of the timeline origin or
+/// of an edge of one of `others` (each `(start, duration)`, the dragged clip
+/// left out), the slide is nudged so that edge lands exactly there, taking the
+/// smallest nudge; on a tie the earlier target wins, the origin first. The
+/// start never goes before zero. `pps` is the zoom in pixels per second, and
+/// with none yet the drag comes back untouched.
+fn snap_slide(start: f32, duration: f32, others: &[(f32, f32)], dx_s: f32, pps: f32) -> f32 {
+    if pps <= 0.0 {
+        return dx_s;
+    }
+    let prop_start = start + dx_s;
+    let prop_end = start + duration + dx_s;
+    let targets = std::iter::once(0.0).chain(others.iter().flat_map(|&(s, d)| [s, s + d]));
+    let threshold = 8.0 / pps; // 8 px expressed in seconds
+    let mut best_adjust = 0.0f32;
+    let mut best_dist = threshold;
+    for t in targets {
+        for edge in [prop_start, prop_end] {
+            let a = t - edge;
+            if a.abs() < best_dist {
+                best_dist = a.abs();
+                best_adjust = a;
+            }
         }
+    }
+    let snapped = dx_s + best_adjust;
+    if start + snapped < 0.0 {
+        -start
+    } else {
+        snapped
+    }
+}
+
+/// The track a clip dropped `delta_rows` rows away from track `current` lands
+/// on: clamped to the rows there are, where one past the last means a new
+/// track. A row counts whether or not the engine has a track for it yet — a
+/// track added with "+ New track" gets its layer only when a clip first lands
+/// there, and `layer()` creates any in between on demand, so a drop onto any
+/// visible row lands exactly on it.
+fn drop_target_track(
+    current: i32,
+    delta_rows: i32,
+    engine_tracks: usize,
+    visible_rows: usize,
+) -> i32 {
+    let count = (engine_tracks as i32).max(visible_rows as i32);
+    (current + delta_rows).clamp(0, count)
+}
+
+/// Which row is selected after row `removed` is deleted: none if it was the
+/// selected one, one fewer if the selection sat after it (those rows move up),
+/// otherwise the same.
+fn selection_after_removal(selected: i32, removed: i32) -> i32 {
+    if selected == removed {
+        -1
+    } else if selected > removed {
+        selected - 1
+    } else {
+        selected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Close enough for positions in seconds that went through f32 maths.
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    // ---- magnetic snap ------------------------------------------------------
+
+    /// Away from every edge, a drag stays exactly where the pointer put it.
+    #[test]
+    fn a_drag_far_from_every_edge_is_not_nudged() {
+        let others = [(0.0, 5.0), (20.0, 5.0)];
+        assert_eq!(snap_slide(10.0, 2.0, &others, 1.0, 100.0), 1.0);
+    }
+
+    /// The start edge lands exactly on the end of the clip before it.
+    #[test]
+    fn a_start_edge_near_a_neighbours_end_lands_on_it() {
+        // The neighbour ends at 5.0; this puts the start at 5.04, 4 px away.
+        let dx = snap_slide(7.0, 2.0, &[(0.0, 5.0)], -1.96, 100.0);
+        assert!(near(7.0 + dx, 5.0), "start landed at {}", 7.0 + dx);
+    }
+
+    /// The end edge snaps too: dragged up against the next clip.
+    #[test]
+    fn an_end_edge_near_a_neighbours_start_lands_on_it() {
+        // The next clip starts at 10.0; this puts the end at 9.95.
+        let dx = snap_slide(4.0, 2.0, &[(10.0, 3.0)], 3.95, 100.0);
+        assert!(near(6.0 + dx, 10.0), "end landed at {}", 6.0 + dx);
+    }
+
+    /// Two edges in range: the one needing the smaller nudge wins.
+    #[test]
+    fn the_nearer_of_two_edges_in_range_wins() {
+        // The start would sit 0.05 past an end at 5.0, the end 0.03 short of a
+        // start at 8.0. The end is nearer.
+        let others = [(0.0, 5.0), (8.0, 1.0)];
+        let dx = snap_slide(6.0, 2.92, &others, -0.95, 100.0);
+        assert!(near(8.92 + dx, 8.0), "end landed at {}", 8.92 + dx);
+    }
+
+    /// Just outside the window nothing happens: the snap must not reach
+    /// further than it looks like it does.
+    #[test]
+    fn an_edge_nine_pixels_away_does_not_snap() {
+        assert_eq!(snap_slide(7.0, 2.0, &[(0.0, 5.0)], -1.91, 100.0), -1.91);
+    }
+
+    /// The window is eight pixels, so zooming out widens it in seconds.
+    #[test]
+    fn the_window_is_eight_pixels_at_any_zoom() {
+        // Half a second away: 50 px at 100 px/s, 5 px at 10 px/s.
+        assert_eq!(snap_slide(7.0, 2.0, &[(0.0, 5.0)], -1.5, 100.0), -1.5);
+        let dx = snap_slide(7.0, 2.0, &[(0.0, 5.0)], -1.5, 10.0);
+        assert!(near(7.0 + dx, 5.0), "start landed at {}", 7.0 + dx);
+    }
+
+    /// The timeline origin is an edge even with no clip there.
+    #[test]
+    fn the_timeline_origin_is_an_edge() {
+        let dx = snap_slide(3.0, 2.0, &[], -2.95, 100.0);
+        assert!(near(3.0 + dx, 0.0), "start landed at {}", 3.0 + dx);
+    }
+
+    /// However far left the drag goes, the start stops at zero.
+    #[test]
+    fn a_clip_never_slides_before_the_timeline_start() {
+        assert_eq!(snap_slide(3.0, 2.0, &[], -10.0, 100.0), -3.0);
+    }
+
+    /// No zoom yet is a layout that hasn't happened; leave the drag alone
+    /// rather than divide by it.
+    #[test]
+    fn no_zoom_yet_means_no_snap() {
+        assert_eq!(snap_slide(7.0, 2.0, &[(0.0, 5.0)], -1.96, 0.0), -1.96);
+    }
+
+    // ---- where a dropped clip lands -----------------------------------------
+
+    #[test]
+    fn dragging_above_the_top_track_stops_at_the_top() {
+        assert_eq!(drop_target_track(1, -5, 3, 3), 0);
+    }
+
+    /// One past the last row is a new track, and so is anything further: a
+    /// long drag makes one track, not a gap.
+    #[test]
+    fn dragging_below_the_last_track_makes_one_new_track() {
+        assert_eq!(drop_target_track(1, 1, 2, 2), 2);
+        assert_eq!(drop_target_track(1, 9, 2, 2), 2);
+    }
+
+    /// A track added with "+ New track" has a row but no engine layer until a
+    /// clip lands on it. It is still somewhere a clip can be dropped.
+    #[test]
+    fn a_row_the_engine_has_no_track_for_yet_is_still_a_target() {
+        assert_eq!(drop_target_track(0, 3, 2, 4), 3);
+        assert_eq!(drop_target_track(0, 9, 2, 4), 4);
+    }
+
+    // ---- selection after a clip is removed ----------------------------------
+
+    #[test]
+    fn removing_the_selected_clip_clears_the_selection() {
+        assert_eq!(selection_after_removal(2, 2), -1);
+    }
+
+    /// The rows after the removed one shift down, so the index follows them.
+    #[test]
+    fn removing_an_earlier_clip_keeps_the_same_clip_selected() {
+        assert_eq!(selection_after_removal(3, 1), 2);
+    }
+
+    #[test]
+    fn removing_a_later_clip_changes_nothing() {
+        assert_eq!(selection_after_removal(1, 3), 1);
+    }
+
+    #[test]
+    fn with_nothing_selected_nothing_becomes_selected() {
+        assert_eq!(selection_after_removal(-1, 0), -1);
     }
 }
