@@ -70,7 +70,7 @@ jobs:
     # run concurrently; without a cap one hang would burn the six-hour default.
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so a pull request can be diffed against its base to
           # decide whether the installer needs building (see the next step).
@@ -536,7 +536,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: CHANGELOG.md
           sparse-checkout-cone-mode: false
