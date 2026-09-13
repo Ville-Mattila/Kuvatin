@@ -15,6 +15,14 @@ something is fixed.
 
 ## [Unreleased]
 
+A smaller release, mostly about images. WebP can now be lossless, for the
+screenshots and logos where the lossy encoder smears hard edges and saves
+little doing it. A large batch no longer runs the machine out of memory:
+files start only as fast as memory allows, so a folder of big photos saved as
+optimised PNG stays within half the machine's RAM instead of taking all of it.
+And the release's bill of materials now lists the media runtime the installer
+bundles, file by file.
+
 ### Added
 - **Lossless WebP.** A WEBP OPTIMIZATION control next to the format, the same
   shape as the PNG one: lossy (the default, driven by the quality slider) or
@@ -34,6 +42,12 @@ something is fixed.
   its header before it starts, against what its encoder was measured to need,
   and a batch runs only as much at once as fits in half the machine's RAM. A
   file bigger than that still converts, on its own.
+
+Checksum: see `kuvatin-2.11.0-x86_64.msi.sha256` (and
+`kuvatin-x86_64.msi.sha256` for the fixed-name copy the site links). The
+installer itself is unsigned, so SmartScreen will ask once — More info, then
+Run anyway. The Windows 11 menu package inside it *is* signed, which is what
+puts "Kuvatin" in the top-level right-click menu.
 
 ## [2.10.0] - 2026-09-12
 The video editor learns to remember. A project — the timeline, the tracks,
