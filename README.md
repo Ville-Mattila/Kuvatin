@@ -163,14 +163,18 @@ background (right-click inside an open folder).
 
 Windows refuses an unsigned package that hosts a COM server (`0x80073D2B`), so
 the Windows 11 entry only appears when `Kuvatin.msix` is signed with a
-certificate the machine trusts. The release pipeline signs it when the
-repository has two secrets, `KUVATIN_SIGN_PFX_BASE64` (a code-signing PFX,
-base64) and `KUVATIN_SIGN_PFX_PASSWORD`; the manifest's Publisher is taken from
-the certificate's Subject. The public certificate is installed with the app and
+certificate the machine trusts. The release pipeline signs it on a version
+tag, with two secrets kept in the repository's `release-signing` environment:
+`KUVATIN_SIGN_PFX_BASE64` (a code-signing PFX, base64) and
+`KUVATIN_SIGN_PFX_PASSWORD`. The manifest's Publisher is taken from the
+certificate's Subject. The environment's only deployment rule is tags matching
+`v*`, so a master push, a pull request or a manual run on any branch never
+sees the key, even with a modified workflow; and a tag run without the key
+fails instead of publishing an unsigned package. The public certificate is installed with the app and
 the installer adds it to the machine's **Trusted People** store before
 registering (and removes it on uninstall); a CA-issued certificate needs no
-such trust but is not hurt by it. Without the secrets the package ships
-unsigned, `--register` logs `Windows 11 menu: not registered (...)`, and the
+such trust but is not hurt by it. Without the key (any run that is not a
+tag) the package is built unsigned, `--register` logs `Windows 11 menu: not registered (...)`, and the
 classic menu is all there is. A self-signed key is enough:
 
 ```powershell
@@ -179,8 +183,13 @@ $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Ville Mattila'
   -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
 $pw = Read-Host -AsSecureString 'PFX password'
 Export-PfxCertificate -Cert $c -FilePath kuvatin-sign.pfx -Password $pw | Out-Null
-gh secret set KUVATIN_SIGN_PFX_BASE64 --body ([Convert]::ToBase64String([IO.File]::ReadAllBytes('kuvatin-sign.pfx')))
-gh secret set KUVATIN_SIGN_PFX_PASSWORD   # paste the password
+# The environment, reachable from v* tags only (once per repository):
+gh api -X PUT 'repos/{owner}/{repo}/environments/release-signing' `
+  -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api -X POST 'repos/{owner}/{repo}/environments/release-signing/deployment-branch-policies' -f 'name=v*' -f type=tag
+# The secrets go in the environment, never in the repository's own secrets:
+gh secret set KUVATIN_SIGN_PFX_BASE64 --env release-signing --body ([Convert]::ToBase64String([IO.File]::ReadAllBytes('kuvatin-sign.pfx')))
+gh secret set KUVATIN_SIGN_PFX_PASSWORD --env release-signing   # paste the password
 ```
 
 Keep the `.pfx` out of the repository. For local testing, build the package

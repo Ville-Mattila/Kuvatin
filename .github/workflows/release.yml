@@ -66,6 +66,15 @@ jobs:
   build:
     name: Build, test, package
     runs-on: windows-latest
+    # The signing key lives in the release-signing environment, whose only
+    # deployment rule is tags matching v*. Naming it on a tag run alone keeps
+    # the key from everything else this job runs for: master pushes, pull
+    # requests, the weekly audit, and manual runs on any branch, where a
+    # modified copy of this workflow could otherwise print it. An empty name
+    # is no environment at all, and naming it outright on a branch is refused
+    # by the tag rule; both were checked on a probe branch before this relied
+    # on them.
+    environment: ${{ github.ref_type == 'tag' && 'release-signing' || '' }}
     # The video suite drives real media pipelines, which have deadlocked when
     # run concurrently; without a cap one hang would burn the six-hour default.
     timeout-minutes: 75
@@ -329,8 +338,10 @@ jobs:
         if: env.PACKAGE == 'true'
         shell: pwsh
         env:
-          # Optional: a code-signing PFX (base64) + its password. Signs the
-          # Windows 11 context-menu package; see README, "Signing the menu package".
+          # A code-signing PFX (base64) + its password, which sign the Windows 11
+          # context-menu package. They live in the release-signing environment,
+          # so only a v* tag run has them; everywhere else they are empty. See
+          # README, "Signing the menu package".
           SIGN_PFX_BASE64: ${{ secrets.KUVATIN_SIGN_PFX_BASE64 }}
           SIGN_PFX_PASSWORD: ${{ secrets.KUVATIN_SIGN_PFX_PASSWORD }}
         run: |
@@ -347,11 +358,11 @@ jobs:
           "KUVATIN_VERSION=$ver" | Out-File $env:GITHUB_ENV -Append
           $msix = "$env:GITHUB_WORKSPACE\target\msix\Kuvatin.msix"
           # Windows refuses an unsigned package that hosts a COM server, so the
-          # package is signed when the repo has a key; its Publisher must equal
-          # the certificate's Subject. The public certificate rides along in
-          # the MSI, which trusts it machine-wide before registering. Without a
-          # key the package ships unsigned: the exe logs that it could not
-          # register and the classic menu is unaffected.
+          # package is signed when the run has the key (a tag run); its Publisher
+          # must equal the certificate's Subject. The public certificate rides
+          # along in the MSI, which trusts it machine-wide before registering.
+          # Without a key the package is built unsigned: the exe logs that it
+          # could not register and the classic menu is unaffected.
           $cer = ''
           if ($env:SIGN_PFX_BASE64) {
             $pfx = "$env:RUNNER_TEMP\kuvatin-sign.pfx"
@@ -376,6 +387,14 @@ jobs:
             Write-Host "package signed as $($cert.Subject) ($thumb)"
             'SIGNED=true' | Out-File $env:GITHUB_ENV -Append
           } else {
+            # A tag publishes, and an unsigned package there is a release whose
+            # Windows 11 entry never registers. A missing key on a tag means the
+            # environment's secrets are missing, so the release stops here
+            # rather than shipping that. Manual and pull-request runs never have
+            # the key and carry on unsigned.
+            if ($env:GITHUB_REF -like 'refs/tags/*') {
+              throw 'No signing key on a tag run: set KUVATIN_SIGN_PFX_BASE64 and KUVATIN_SIGN_PFX_PASSWORD in the release-signing environment (README, "Signing the menu package").'
+            }
             & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix
             Write-Host '::warning::No signing key (KUVATIN_SIGN_PFX_BASE64): Kuvatin.msix ships unsigned, so the Windows 11 top-level menu will not register.'
             'SIGNED=false' | Out-File $env:GITHUB_ENV -Append
