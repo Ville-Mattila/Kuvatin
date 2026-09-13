@@ -15,6 +15,7 @@ something is fixed.
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-09-13
 A smaller release, mostly about images. WebP can now be lossless, for the
 screenshots and logos where the lossy encoder smears hard edges and saves
 little doing it. A large batch no longer runs the machine out of memory:
@@ -245,7 +246,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.10.0...HEAD
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.11.0...HEAD
+[2.11.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.10.0
 [2.9.2]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.9.2
 [2.9.1]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.9.1
