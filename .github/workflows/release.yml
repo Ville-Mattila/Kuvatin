@@ -337,7 +337,10 @@ jobs:
           # The bundle script walks kuvatin.exe's imports to compute the DLL
           # closure; the release binary exists from the smoke step.
           $stage = "$env:GITHUB_WORKSPACE\target\gst-staging"
-          & crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir $stage -HeatExe "$env:USERPROFILE\wix3-bin\heat.exe"
+          # The runtime's SBOM goes outside the workspace: the SBOM scan below
+          # reads any SBOM-named file it finds, and would add these files twice.
+          & crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir $stage -HeatExe "$env:USERPROFILE\wix3-bin\heat.exe" `
+            -SbomOut "$env:RUNNER_TEMP\gstreamer-runtime.cdx.json" -DistributionSha256 "$env:GST_RUNTIME_SHA256"
           # The Windows 11 context-menu package (identity for the install dir;
           # the handler DLL is built with the exe above). Version = Cargo.toml.
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+\.\d+)"').Matches[0].Groups[1].Value
@@ -479,7 +482,8 @@ jobs:
           if ($build -ge 22000 -and (Get-AppxPackage VilleMattila.Kuvatin)) { throw "uninstall left the sparse package registered" }
           if ($env:SIGNED -eq 'true' -and (Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Subject -like 'CN=Ville Mattila*' })) { throw "uninstall left the signing certificate in Trusted People" }
 
-      # Software bill of materials for the release (CycloneDX, from Cargo.lock).
+      # Software bill of materials for the release (CycloneDX). The scan knows
+      # the Rust crates; the step after it adds the bundled GStreamer runtime.
       # Only when packaging: it runs after a release build, so on an ordinary
       # push it would walk the staged GStreamer runtime and the MSI for
       # nothing. The name is taken from the version rather than the ref, which
@@ -493,6 +497,16 @@ jobs:
           output-file: target/kuvatin-v${{ env.KUVATIN_VERSION }}-sbom.cdx.json
           upload-artifact: false
           upload-release-assets: false
+
+      # Most of what the installer redistributes is the GStreamer runtime, and
+      # the staging script wrote down exactly which files of it ship.
+      - name: Add the bundled runtime to the SBOM
+        if: env.PACKAGE == 'true'
+        shell: pwsh
+        run: |
+          & crates\kuvatin\wix\merge-sbom.ps1 `
+            -Sbom "target\kuvatin-v$env:KUVATIN_VERSION-sbom.cdx.json" `
+            -Add "$env:RUNNER_TEMP\gstreamer-runtime.cdx.json"
 
       - name: Collect release files
         if: env.PACKAGE == 'true'

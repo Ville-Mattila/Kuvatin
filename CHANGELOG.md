@@ -21,6 +21,11 @@ something is fixed.
   lossless. Lossless returns every pixel unchanged — including the colour
   under fully transparent ones, which libwebp is otherwise free to rewrite —
   and hides the quality slider, which it does not use.
+- **The release SBOM names the bundled media runtime.** It used to list only
+  the Rust crates, while most of what the installer redistributes is GStreamer.
+  Every bundled plugin and library is now in it with its SHA-256 and where it
+  installs, under the runtime's version, its upstream download and source, and
+  the license texts that ship with it.
 
 ### Fixed
 - **A large batch can no longer run the machine out of memory.** Every core

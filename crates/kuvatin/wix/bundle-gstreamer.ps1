@@ -30,6 +30,7 @@
     <StageDir>\licenses\<component>\*     (license texts, all components)
     <StageDir>\THIRD-PARTY-NOTICES.txt    (what is bundled + source offer)
     <OutWxs>                              (heat-generated fragment, ComponentGroup "GstRuntime")
+    <SbomOut>                             (CycloneDX: every staged file and its hash; see merge-sbom.ps1)
 
   Run before `cargo wix`, then build with:
     cargo wix -p kuvatin --compiler-arg "-dGstStageDir=<StageDir>"
@@ -41,10 +42,18 @@ param(
     [string]$HeatExe  = "heat",
     # The built app; its imports seed the DLL closure.
     [string]$AppExe   = (Join-Path (Resolve-Path "$PSScriptRoot\..\..\..").Path "target\release\kuvatin.exe"),
+    # A CycloneDX description of what was staged, for the release SBOM. Never
+    # inside StageDir: heat puts everything in there into the installer.
+    [string]$SbomOut  = (Join-Path (Resolve-Path "$PSScriptRoot\..\..\..").Path "target\gstreamer-runtime.cdx.json"),
+    # SHA-256 of the upstream runtime MSI the files came from, when known.
+    [string]$DistributionSha256 = "",
     # Escape hatch: stage every plugin and every bin DLL (the pre-2.7 behaviour).
     [switch]$AllPlugins
 )
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 can write an array as {"value":[...],"Count":n}
+# because of an extended Count property. PowerShell 7 never does.
+if ($PSVersionTable.PSVersion.Major -lt 6) { Remove-TypeData System.Array -ErrorAction SilentlyContinue }
 
 if (-not (Test-Path "$GstRoot\bin")) { throw "GStreamer not found at $GstRoot" }
 if (-not $AllPlugins -and -not (Test-Path $AppExe)) { throw "app exe not found at $AppExe (build release first, or pass -AppExe)" }
@@ -246,6 +255,66 @@ Bundled shared libraries ($($stagedFlat.Count))
 $($stagedFlat -join "`r`n")
 "@
 Set-Content -Path (Join-Path $StageDir "THIRD-PARTY-NOTICES.txt") -Value $notices -Encoding utf8
+
+# ---------------------------------------------------------------------------
+# Bill of materials for the staged runtime. The release SBOM is a scan of the
+# source tree and knows only the Rust crates, while most of what the installer
+# redistributes is these files, and this is the one place that knows exactly
+# which ones ship. Each file gets its hash and where it installs; licenses are
+# not guessed per file, because nothing here maps a DLL to its upstream
+# component. The license-text folders that ship are named instead.
+# ---------------------------------------------------------------------------
+$runtimeRef = "gstreamer-runtime@$gstVersion"
+$stagedFiles = New-Object System.Collections.Generic.List[object]
+foreach ($f in (Get-ChildItem $pluginDir -Filter *.dll | Sort-Object Name)) {
+    $stagedFiles.Add([pscustomobject]@{ Role = 'plugin'; Path = "gstreamer-plugins/$($f.Name)"; File = $f })
+}
+foreach ($f in (Get-ChildItem $StageDir -Filter *.dll | Sort-Object Name)) {
+    $stagedFiles.Add([pscustomobject]@{ Role = 'shared-library'; Path = $f.Name; File = $f })
+}
+$fileComponents = @(foreach ($x in $stagedFiles) {
+    [ordered]@{
+        'bom-ref'  = "$runtimeRef/$($x.Path)"
+        type       = 'library'
+        name       = $x.File.Name
+        hashes     = @([ordered]@{ alg = 'SHA-256'; content = (Get-FileHash $x.File.FullName -Algorithm SHA256).Hash.ToLower() })
+        properties = @(
+            [ordered]@{ name = 'kuvatin:installed-path'; value = $x.Path },
+            [ordered]@{ name = 'kuvatin:role'; value = $x.Role }
+        )
+    }
+})
+$distribution = [ordered]@{
+    type = 'distribution'
+    url  = "https://gstreamer.freedesktop.org/data/pkg/windows/$gstVersion/msvc/gstreamer-1.0-msvc-x86_64-$gstVersion.msi"
+}
+if ($DistributionSha256) {
+    $distribution['hashes'] = @([ordered]@{ alg = 'SHA-256'; content = $DistributionSha256.ToLower() })
+}
+$runtimeBom = [ordered]@{
+    bomFormat   = 'CycloneDX'
+    specVersion = '1.5'
+    version     = 1
+    components  = @(
+        [ordered]@{
+            'bom-ref'          = $runtimeRef
+            type               = 'framework'
+            name               = 'GStreamer runtime for Windows (MSVC x86_64)'
+            version            = $gstVersion
+            description        = "The subset of the official GStreamer binary distribution that the installer bundles, unmodified: $($stagedPlugins.Count) plugins and $($stagedFlat.Count) shared libraries. The license and copyright texts of every upstream component are installed with it, one folder per component."
+            externalReferences = @(
+                $distribution,
+                [ordered]@{ type = 'source-distribution'; url = 'https://gstreamer.freedesktop.org/src/' },
+                [ordered]@{ type = 'build-meta'; url = "https://gitlab.freedesktop.org/gstreamer/cerbero/-/tree/$gstVersion" }
+            )
+            properties         = @($components | Sort-Object | ForEach-Object { [ordered]@{ name = 'kuvatin:license-texts'; value = $_ } })
+            components         = $fileComponents
+        }
+    )
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $SbomOut) | Out-Null
+[IO.File]::WriteAllText($SbomOut, ($runtimeBom | ConvertTo-Json -Depth 16), (New-Object Text.UTF8Encoding $false))
+Write-Host ("Runtime SBOM: {0} files -> {1}" -f $fileComponents.Count, $SbomOut)
 
 $dllCount = (Get-ChildItem $StageDir -Recurse -Filter *.dll).Count
 $mb = [math]::Round(((Get-ChildItem $StageDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)

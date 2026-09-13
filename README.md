@@ -298,9 +298,10 @@ render of the video engine. A tag, and any pull request touching the installer,
 additionally builds the MSI, installs it on the runner, converts an image and
 renders an MP4 with the installed copy, and checks that the Explorer entries
 are registered and then removed again. A tag publishes the result with a
-SHA-256 file and a CycloneDX SBOM.
+SHA-256 file and a CycloneDX SBOM that lists the Rust crates and every file of
+the bundled GStreamer runtime, with its hash.
 
-Deferred to later: audio-only tracks and transitions in the video editor,
-project save and load, undo, timeline zoom, and macOS/Linux packaging. The
+Deferred to later: audio-only tracks and transitions in the video editor, undo,
+and macOS/Linux packaging. The
 top-level Windows 11 menu and signing of the menu package shipped in 2.9.1;
 the installer itself is still unsigned, so SmartScreen still prompts once.
