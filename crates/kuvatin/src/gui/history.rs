@@ -33,8 +33,8 @@ pub(super) struct History<S> {
     /// Oldest first, each step with the time it last changed.
     undo: VecDeque<(S, Instant)>,
     redo: Vec<S>,
-    /// Set by an undo or redo, cleared by the next record: a change made right
-    /// after an undo is a new step, never part of the one before it.
+    /// Set by an undo or redo, cleared by the next non-empty record: a change
+    /// made right after an undo is a new step, never part of the one before it.
     sealed: bool,
 }
 
@@ -56,7 +56,8 @@ impl<S: Step> History<S> {
     /// Add a step the caller has just applied. It merges into the step on top
     /// when that step continues the same gesture within [`MERGE_WINDOW`];
     /// otherwise it is pushed, dropping the oldest past [`MAX_STEPS`]. Any
-    /// record clears redo.
+    /// non-empty record clears redo. A step that merges back to nothing is
+    /// removed, and the next change starts a step of its own.
     pub(super) fn record(&mut self, step: S, now: Instant) {
         if step.is_empty() {
             return;
@@ -71,9 +72,12 @@ impl<S: Step> History<S> {
                 top.absorb(step);
                 *last = now;
                 // A drag that ends where it began changed nothing after all.
+                // It still separates what came before from what comes next,
+                // so the next change must not merge across it.
                 let emptied = top.is_empty();
                 if emptied {
                     self.undo.pop_back();
+                    self.sealed = true;
                 }
                 return;
             }
@@ -143,6 +147,13 @@ impl<S: Step> History<S> {
         self.undo.clear();
         self.redo.clear();
         self.sealed = false;
+    }
+
+    /// Make the next change a step of its own, whatever it is. For a caller
+    /// whose undo or redo failed partway: the step on top no longer matches
+    /// what is on screen, so nothing may merge into it.
+    pub(super) fn seal(&mut self) {
+        self.sealed = true;
     }
 
     /// Every step on both stacks, for rewriting a handle that changed (a clip
@@ -274,17 +285,17 @@ mod tests {
         assert!(h.can_undo(), "two steps");
     }
 
-    /// Nudge, undo, nudge again at once: the second nudge must not fold into a
-    /// step that is no longer on the timeline.
+    /// Undo during a gesture, then carry on: the next change must not fold
+    /// into the step beneath the undone one, even inside the merge window.
     #[test]
     fn a_change_right_after_an_undo_is_its_own_step() {
         let t0 = Instant::now();
         let mut h = History::new();
         h.record(set("a", 0, 1), at(t0, 0));
-        h.record(set("a", 1, 2), at(t0, 5000));
+        h.record(set("b", 0, 1), at(t0, 100));
         h.commit_undo();
-        h.record(set("a", 1, 5), at(t0, 5100));
-        assert_eq!(h.peek_undo(), Some(&set("a", 1, 5)));
+        h.record(set("a", 1, 2), at(t0, 200));
+        assert_eq!(h.peek_undo(), Some(&set("a", 1, 2)));
         h.commit_undo();
         assert_eq!(h.peek_undo(), Some(&set("a", 0, 1)));
     }
@@ -309,9 +320,16 @@ mod tests {
 
     #[test]
     fn a_step_that_changed_nothing_is_ignored() {
+        let t0 = Instant::now();
         let mut h = History::new();
-        h.record(set("a", 3, 3), Instant::now());
+        h.record(set("a", 3, 3), at(t0, 0));
         assert!(!h.can_undo());
+        // ...and it leaves redo alone: re-applying a crop that is already
+        // there must not throw away what could be redone.
+        h.record(set("a", 0, 1), at(t0, 100));
+        h.commit_undo();
+        h.record(set("a", 0, 0), at(t0, 200));
+        assert!(h.can_redo());
     }
 
     /// Undo is two-phase: until the caller says the step was applied, it stays.
@@ -337,9 +355,10 @@ mod tests {
 
     #[test]
     fn clear_empties_both_stacks() {
+        let t0 = Instant::now();
         let mut h = History::new();
-        h.record(set("a", 0, 1), Instant::now());
-        h.record(set("b", 0, 1), Instant::now() + Duration::from_secs(2));
+        h.record(set("a", 0, 1), at(t0, 0));
+        h.record(set("b", 0, 1), at(t0, 2000));
         h.commit_undo();
         h.clear();
         assert!(!h.can_undo() && !h.can_redo());
@@ -357,5 +376,33 @@ mod tests {
         }
         assert_eq!(h.peek_undo().map(|s| s.what), Some("c"));
         assert_eq!(h.peek_redo().map(|s| s.what), Some("c"));
+    }
+
+    /// A gesture that cancels itself out between an undo and the next change
+    /// must not let that change merge into the step beneath: the seal holds.
+    #[test]
+    fn a_cancelled_gesture_keeps_the_seal() {
+        let t0 = Instant::now();
+        let mut h = History::new();
+        h.record(set("a", 0, 1), at(t0, 0));
+        h.record(set("b", 0, 1), at(t0, 100));
+        h.commit_undo();
+        h.record(set("c", 0, 1), at(t0, 200));
+        h.record(set("c", 1, 0), at(t0, 300));
+        h.record(set("a", 1, 2), at(t0, 400));
+        assert_eq!(h.peek_undo(), Some(&set("a", 1, 2)));
+        h.commit_undo();
+        assert_eq!(h.peek_undo(), Some(&set("a", 0, 1)));
+    }
+
+    #[test]
+    fn a_sealed_history_starts_a_new_step() {
+        let t0 = Instant::now();
+        let mut h = History::new();
+        h.record(set("a", 0, 1), at(t0, 0));
+        h.seal();
+        h.record(set("a", 1, 2), at(t0, 100));
+        h.commit_undo();
+        assert!(h.can_undo(), "two steps");
     }
 }
