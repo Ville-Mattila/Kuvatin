@@ -7,10 +7,10 @@
 
 use super::project_file::kind_of;
 use crate::gui::history::{History, Step};
-use crate::gui::{AppWindow, TimelineClip};
+use crate::gui::{name_list, show_error, AppWindow, TimelineClip};
 use kuvatin_video::ClipRecord;
-use slint::{Model, SharedString, VecModel};
-use std::cell::RefCell;
+use slint::{ComponentHandle, Model, SharedString, VecModel};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
@@ -311,6 +311,40 @@ pub(super) fn selection_after(
         .unwrap_or(-1)
 }
 
+/// Writes that bring the rows in line with the engine's clips, whatever the
+/// rows show now: every row whose clip is gone, then every clip as it is.
+pub(super) fn applied_from_engine(
+    rows: &[TimelineClip],
+    records: Vec<(kuvatin_video::ClipId, ClipRecord)>,
+) -> Vec<Applied> {
+    let live: HashSet<String> = records.iter().map(|(id, _)| id.0.clone()).collect();
+    let gone = rows
+        .iter()
+        .filter(|r| !live.contains(r.id.as_str()))
+        .map(|r| Applied {
+            id: r.id.to_string(),
+            now_id: r.id.to_string(),
+            record: None,
+        });
+    let present = records.into_iter().map(|(id, record)| Applied {
+        id: id.0.clone(),
+        now_id: id.0,
+        record: Some(record),
+    });
+    gone.chain(present).collect()
+}
+
+/// Make the timeline show exactly `count` track rows, named in order.
+pub(super) fn set_track_rows(tracks: &VecModel<SharedString>, count: usize) {
+    while tracks.row_count() > count {
+        tracks.remove(tracks.row_count() - 1);
+    }
+    while tracks.row_count() < count {
+        let n = tracks.row_count() + 1;
+        tracks.push(SharedString::from(format!("Track {n}")));
+    }
+}
+
 /// What recording a step needs: the history, the timeline rows (for a clip's
 /// name, and the rows a step keeps) and the track rows. Cheap to clone into
 /// each handler.
@@ -373,6 +407,265 @@ pub(super) fn refresh(ui: &AppWindow, history: &History<TimelineStep>) {
     ui.set_video_can_redo(history.can_redo());
     ui.set_video_undo_hint(history.undo_hint().into());
     ui.set_video_redo_hint(history.redo_hint().into());
+}
+
+/// Wire the Undo and Redo chips and keys (both arrive as `video-undo` and
+/// `video-redo`).
+pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::ExportState) {
+    for dir in [Direction::Undo, Direction::Redo] {
+        let ui_weak = ui.as_weak();
+        let project = st.project.clone();
+        let sel_idx = st.sel_idx.clone();
+        let pending_xform = st.pending_xform.clone();
+        let active = ex.active.clone();
+        let pending = ex.pending.clone();
+        let rec = st.recorder(ui);
+        let run = move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            // The engine refuses edits during an export, and there is nothing
+            // to undo on an engine that never started.
+            if active.get() || pending.get() || ui.get_video_engine_down() {
+                return;
+            }
+            // A transform still waiting for the preview tick would be applied,
+            // and recorded, after the undo.
+            pending_xform.borrow_mut().take();
+            apply_step(&ui, &project, &rec, &sel_idx, dir);
+        };
+        match dir {
+            Direction::Undo => ui.on_video_undo(run),
+            Direction::Redo => ui.on_video_redo(run),
+        }
+    }
+}
+
+/// Take the timeline to the other side of the newest undo (or redo) step.
+fn apply_step(
+    ui: &AppWindow,
+    project: &Rc<RefCell<Option<kuvatin_video::Project>>>,
+    rec: &Recorder,
+    sel_idx: &Rc<Cell<i32>>,
+    dir: Direction,
+) {
+    let verb = match dir {
+        Direction::Undo => "undo",
+        Direction::Redo => "redo",
+    };
+    // Read what to do, then let go of the history: applying reads the rows,
+    // and recording must never see it borrowed.
+    let (ops, tracks, subject, kept) = {
+        let history = rec.history.borrow();
+        let step = match dir {
+            Direction::Undo => history.peek_undo(),
+            Direction::Redo => history.peek_redo(),
+        };
+        let Some(step) = step else {
+            return;
+        };
+        (
+            plan(step, dir),
+            target_tracks(step, dir),
+            step.subject.clone(),
+            step.kept_rows.clone(),
+        )
+    };
+
+    // A step that only changed track rows (a track added before any clip was
+    // placed) needs no engine, which may not exist yet.
+    if project.borrow().is_none() {
+        if ops == Plan::default() {
+            set_track_rows(&rec.tracks, tracks);
+            let mut history = rec.history.borrow_mut();
+            match dir {
+                Direction::Undo => history.commit_undo(),
+                Direction::Redo => history.commit_redo(Instant::now()),
+            }
+            refresh(ui, &history);
+        }
+        return;
+    }
+    let mut slot = project.borrow_mut();
+    let Some(p) = slot.as_mut() else {
+        return;
+    };
+
+    // A deleted clip whose file has gone since: say which, and change nothing.
+    let missing: Vec<String> = ops
+        .restores
+        .iter()
+        .filter(|(_, record)| !p.source_available(&record.uri))
+        .map(|(id, record)| match kept.get(id) {
+            Some(row) => row.name.to_string(),
+            None => record.name.clone(),
+        })
+        .collect();
+    if !missing.is_empty() {
+        drop(slot);
+        show_error(
+            ui,
+            &format!("Could not {verb}"),
+            format!(
+                "{} no longer where {} was, so nothing was changed:\n{}",
+                if missing.len() == 1 {
+                    "This file is"
+                } else {
+                    "These files are"
+                },
+                if missing.len() == 1 { "it" } else { "they" },
+                name_list(&missing)
+            ),
+        );
+        return;
+    }
+
+    let mut applied = Vec::new();
+    let mut failed: Option<String> = None;
+    // The plan's order: removals, then every write as one batch (so clips
+    // trading places never collide on the way), then restores.
+    for id in &ops.removes {
+        p.remove_clip(&kuvatin_video::ClipId(id.clone()));
+        applied.push(Applied {
+            id: id.clone(),
+            now_id: id.clone(),
+            record: None,
+        });
+    }
+    let batch: Vec<(kuvatin_video::ClipId, ClipRecord)> = ops
+        .writes
+        .iter()
+        .map(|(id, record)| (kuvatin_video::ClipId(id.clone()), record.clone()))
+        .collect();
+    let refused = p.set_clip_records(&batch);
+    for (id, record) in batch {
+        if refused.contains(&id) {
+            if failed.is_none() {
+                failed = Some(record.name);
+            }
+        } else {
+            applied.push(Applied {
+                id: id.0.clone(),
+                now_id: id.0,
+                record: Some(record),
+            });
+        }
+    }
+    if failed.is_none() {
+        for (id, record) in &ops.restores {
+            // A retry after a restore failed partway: the ones that worked are
+            // back already, under the IDs every step now uses.
+            if p.clip_track(&kuvatin_video::ClipId(id.clone())).is_some() {
+                applied.push(Applied {
+                    id: id.clone(),
+                    now_id: id.clone(),
+                    record: Some(record.clone()),
+                });
+                continue;
+            }
+            match p.restore_clip(&kuvatin_video::ClipId(id.clone()), record) {
+                Ok(now) => applied.push(Applied {
+                    id: id.clone(),
+                    now_id: now.0,
+                    record: Some(record.clone()),
+                }),
+                Err(e) => {
+                    failed = Some(format!("{}: {e:#}", record.name));
+                    break;
+                }
+            }
+        }
+    }
+    p.prune_tracks(tracks);
+
+    let rows: Vec<TimelineClip> = rec.tl_clips.iter().collect();
+    let selected_id = usize::try_from(sel_idx.get())
+        .ok()
+        .and_then(|i| rows.get(i))
+        .map(|r| r.id.to_string());
+    // A restore keeps a clip's ID; should one ever hand back a new one,
+    // every step must use it from now on.
+    let renames: Vec<(String, String)> = applied
+        .iter()
+        .filter(|a| a.id != a.now_id)
+        .map(|a| (a.id.clone(), a.now_id.clone()))
+        .collect();
+    // On a failure, the rows follow the engine rather than the plan, and the
+    // engine knows a restored clip by the ID it has now.
+    let (to_rows, kept) = if failed.is_some() {
+        let mut kept = kept;
+        for (old, new) in &renames {
+            if let Some(row) = kept.remove(old) {
+                kept.insert(new.clone(), row);
+            }
+        }
+        (applied_from_engine(&rows, p.clip_records()), kept)
+    } else {
+        (applied, kept)
+    };
+    let new_rows = rows_after(&rows, &to_rows, &kept);
+    let track_rows = tracks.max(p.track_count());
+    let duration = p.duration();
+    drop(slot);
+
+    set_track_rows(&rec.tracks, track_rows);
+    ui.set_timeline_duration(duration.map(|d| d.as_secs_f32()).unwrap_or(0.0));
+
+    let subject_now = subject.map(|s| {
+        renames
+            .iter()
+            .find(|(old, _)| *old == s)
+            .map(|(_, new)| new.clone())
+            .unwrap_or(s)
+    });
+    let next = selection_after(&new_rows, subject_now.as_deref(), selected_id.as_deref());
+    // A clip deleted before its thumbnail arrived comes back without one:
+    // decode it again.
+    let without_thumb: Vec<(kuvatin_video::ClipId, ClipRecord)> = ops
+        .restores
+        .iter()
+        .filter(|(id, _)| {
+            new_rows
+                .iter()
+                .any(|r| r.id.as_str() == id.as_str() && r.thumb.size().width == 0)
+        })
+        .map(|(id, record)| (kuvatin_video::ClipId(id.clone()), record.clone()))
+        .collect();
+    rec.tl_clips.set_vec(new_rows);
+    super::project_file::spawn_thumbnails(ui.as_weak(), without_thumb);
+
+    {
+        let mut history = rec.history.borrow_mut();
+        if failed.is_none() {
+            match dir {
+                Direction::Undo => history.commit_undo(),
+                Direction::Redo => history.commit_redo(Instant::now()),
+            }
+        } else {
+            // The step stays to be tried again, but it no longer matches the
+            // timeline, so the next edit must not merge into it.
+            history.seal();
+        }
+        for (old, new) in &renames {
+            for step in history.steps_mut() {
+                step.rename_clip(old, new);
+            }
+        }
+        refresh(ui, &history);
+    }
+
+    // Highlights the row and fills the inspector, or clears both for -1.
+    ui.invoke_timeline_select(next);
+
+    if let Some(what) = failed {
+        show_error(
+            ui,
+            &format!("Could not {verb}"),
+            format!(
+                "The engine refused a change, so the timeline shows what it holds now and the step is still there to try again.\n{what}"
+            ),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -793,5 +1086,34 @@ mod tests {
         let s = history.peek_undo().expect("a step");
         assert_eq!(s.describe(), "adding intro.mp4");
         assert!(s.kept_rows.contains_key("a"), "the row a redo brings back");
+    }
+
+    /// After a write failed partway, the rows are rebuilt from what the engine
+    /// actually holds, so the screen never disagrees with the edit.
+    #[test]
+    fn rows_can_be_resynced_from_the_engine() {
+        let rows = vec![row("a", &rec(0, 0.0, 2.0)), row("gone", &rec(1, 0.0, 2.0))];
+        let engine = vec![
+            (kuvatin_video::ClipId("a".into()), rec(0, 5.0, 2.0)),
+            (kuvatin_video::ClipId("new".into()), rec(1, 1.0, 1.0)),
+        ];
+        let applied = applied_from_engine(&rows, engine);
+        let out = rows_after(&rows, &applied, &HashMap::new());
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "new"]);
+        assert_eq!(out[0].start, 5.0);
+    }
+
+    #[test]
+    fn track_rows_grow_and_shrink_to_a_count() {
+        let tracks = VecModel::from(vec![
+            SharedString::from("Track 1"),
+            SharedString::from("Track 2"),
+        ]);
+        set_track_rows(&tracks, 4);
+        assert_eq!(tracks.row_count(), 4);
+        assert_eq!(tracks.row_data(3).unwrap().as_str(), "Track 4");
+        set_track_rows(&tracks, 1);
+        assert_eq!(tracks.row_count(), 1);
     }
 }

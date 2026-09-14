@@ -281,7 +281,7 @@ fn restore_models(
 
 /// Decode one thumbnail per clip on a worker and drop each into its row (and
 /// the matching media-bin row) as it arrives.
-fn spawn_thumbnails(
+pub(super) fn spawn_thumbnails(
     ui_weak: slint::Weak<AppWindow>,
     records: Vec<(kuvatin_video::ClipId, kuvatin_video::ClipRecord)>,
 ) {

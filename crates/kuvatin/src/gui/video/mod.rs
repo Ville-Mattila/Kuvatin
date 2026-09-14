@@ -91,6 +91,7 @@ pub(super) fn wire(
     timeline::wire(ui, st);
     export::wire(ui, st, ex, timers);
     project_file::wire(ui, st, im);
+    undo::wire(ui, st, ex);
 
     let ui_weak = ui.as_weak();
     let project_slot = &st.project;
