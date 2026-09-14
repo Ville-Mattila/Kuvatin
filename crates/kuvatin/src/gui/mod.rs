@@ -2,12 +2,14 @@
 //! timers, wires each mode's callbacks from its own module, and tears down
 //! in order. Nothing else here knows about GStreamer or image codecs.
 //!
+//! - `history`: undo/redo stacks shared by both modes.
 //! - `image_mode`: the file list, viewer/crop editor and Convert.
 //! - `presets`: the Settings controls ↔ `PresetStore` round trip.
 //! - `video`: the GES project, its preview, and (in submodules) media
 //!   import, the timeline editor and export.
 //! - `win_drop`: the Win32 glue (drag-and-drop, frameless window controls).
 
+mod history;
 mod image_mode;
 mod presets;
 mod updates;
