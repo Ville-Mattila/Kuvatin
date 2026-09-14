@@ -326,7 +326,7 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
 }
 
 /// Seconds as a record stores them, back to the nanoseconds they came from.
-/// Exact for any timeline shorter than about 104 days.
+/// Exact for any timeline shorter than about 26 days.
 fn clock_time(secs: f64) -> gst::ClockTime {
     gst::ClockTime::from_nseconds((secs.max(0.0) * 1e9).round() as u64)
 }
@@ -338,6 +338,25 @@ fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> boo
         && clip.inpoint() == clock_time(record.inpoint)
         && clip.duration() == clock_time(record.duration)
         && clip.layer().map(|l| l.priority() as usize) == Some(record.track)
+}
+
+/// Set a clip's times, the shrinking one of in-point and duration first (the
+/// order `trim_clip` uses), so in-point plus duration never passes the
+/// source's max-duration on the way, which GES refuses.
+fn set_clip_times(
+    clip: &ges::Clip,
+    start: gst::ClockTime,
+    inpoint: gst::ClockTime,
+    duration: gst::ClockTime,
+) {
+    if duration <= clip.duration() {
+        clip.set_duration(duration);
+        clip.set_inpoint(inpoint);
+    } else {
+        clip.set_inpoint(inpoint);
+        clip.set_duration(duration);
+    }
+    clip.set_start(start);
 }
 
 /// Where a two-step pipeline operation has got to. `Pending` means the state
@@ -968,7 +987,7 @@ impl Project {
             let new_inp = gst::ClockTime::from_nseconds(ni as u64);
             let new_dur = gst::ClockTime::from_nseconds(nd as u64);
             // Apply the shrinking property first so inpoint + duration never
-            // transiently exceeds max-duration (which GES would clamp).
+            // transiently exceeds max-duration (which GES refuses).
             if nd <= dur {
                 clip.set_duration(new_dur);
                 clip.set_inpoint(new_inp);
@@ -1008,9 +1027,15 @@ impl Project {
     /// tracks or places would collide halfway. Every clip whose place or times
     /// change is therefore parked alone on a new layer below the timeline
     /// first, then set and moved to its track, and the parking layers are
-    /// removed. Returns the IDs of the clips that did not land where their
-    /// record says (unknown clips included): empty when every write landed.
-    /// While rendering, nothing is written and every ID is returned.
+    /// removed. Every clip is read back. One that did not land goes back as it
+    /// was or, if a clip that landed has taken its place, stays parked on the
+    /// first free parking layer: a refused write changes nothing else, and
+    /// trying it again adds no tracks.
+    ///
+    /// Returns the IDs of the clips that did not land where their record says
+    /// (unknown clips included): empty when every write landed. Each ID may
+    /// appear at most once. While rendering, nothing is written and every ID is
+    /// returned.
     pub fn set_clip_records(
         &mut self,
         writes: &[(ClipId, crate::document::ClipRecord)],
@@ -1036,6 +1061,11 @@ impl Project {
             .iter()
             .filter(|(_, record, clip)| !clip_placed_as(clip, record))
             .collect();
+        // Where each moving clip was, so one that cannot land can go back.
+        let origins: Vec<_> = moving
+            .iter()
+            .map(|(_, _, clip)| (clip.layer(), clip.start(), clip.inpoint(), clip.duration()))
+            .collect();
         for (k, (_, _, clip)) in moving.iter().enumerate() {
             let layer = self.layer(parking + k);
             // If parking fails, the writes below are still tried and the
@@ -1043,18 +1073,12 @@ impl Project {
             let _ = clip.move_to_layer(&layer);
         }
         for (_, record, clip) in &moving {
-            let inpoint = clock_time(record.inpoint);
-            let duration = clock_time(record.duration);
-            // The order trim_clip uses, so in-point plus duration never passes
-            // the source's max-duration on the way, which GES would clamp.
-            if duration <= clip.duration() {
-                clip.set_duration(duration);
-                clip.set_inpoint(inpoint);
-            } else {
-                clip.set_inpoint(inpoint);
-                clip.set_duration(duration);
-            }
-            clip.set_start(clock_time(record.start));
+            set_clip_times(
+                clip,
+                clock_time(record.start),
+                clock_time(record.inpoint),
+                clock_time(record.duration),
+            );
             let target = self.layer(record.track);
             let _ = clip.move_to_layer(&target);
         }
@@ -1063,7 +1087,25 @@ impl Project {
                 failed.push((*id).clone());
             }
         }
-        // Empty again, unless a clip could not leave its parking layer.
+        // A clip that did not land goes back as it was. If a clip that did
+        // land has taken its old place, it stays parked, packed onto the first
+        // parking layers so no empty track is left above it.
+        let mut stuck = 0;
+        for (k, ((_, record, clip), (layer, start, inpoint, duration))) in
+            moving.iter().zip(origins).enumerate()
+        {
+            if clip_placed_as(clip, record) {
+                continue;
+            }
+            let _ = clip.move_to_layer(&self.layers[parking + k]);
+            set_clip_times(clip, start, inpoint, duration);
+            if layer.is_some_and(|l| clip.move_to_layer(&l).is_ok()) {
+                continue;
+            }
+            let _ = clip.move_to_layer(&self.layers[parking + stuck]);
+            stuck += 1;
+        }
+        // Empty again, unless a clip could not go back to its place.
         while self.layers.len() > parking {
             if self.layers.last().is_some_and(|l| !l.clips().is_empty()) {
                 break;
@@ -1072,7 +1114,8 @@ impl Project {
                 let _ = self.timeline.remove_layer(&last);
             }
         }
-        for (id, record, _) in &found {
+        // A refused clip is back as it was, transform included.
+        for (id, record, _) in found.iter().filter(|(id, _, _)| !failed.contains(*id)) {
             self.set_clip_layout(id, record.layout.into());
         }
         if !found.is_empty() {
@@ -2751,27 +2794,10 @@ mod tests {
             .expect("the clip is on the timeline")
     }
 
-    /// Times to the nanosecond; the transform within what reading it back from
-    /// pixel sizes allows.
+    /// Exactly: undo compares records with `==`, so a clip written back must
+    /// read back identical, transform included.
     fn assert_same_record(a: &crate::document::ClipRecord, b: &crate::document::ClipRecord) {
-        assert_eq!(
-            (a.uri.as_str(), a.track),
-            (b.uri.as_str(), b.track),
-            "source and track"
-        );
-        for (x, y, what) in [
-            (a.start, b.start, "start"),
-            (a.inpoint, b.inpoint, "inpoint"),
-            (a.duration, b.duration, "duration"),
-        ] {
-            assert!((x - y).abs() < 1e-9, "{what}: {x} vs {y}");
-        }
-        assert_eq!(
-            (a.layout.posx, a.layout.posy),
-            (b.layout.posx, b.layout.posy)
-        );
-        assert!((a.layout.scale - b.layout.scale).abs() < 1e-3, "scale");
-        assert!((a.layout.alpha - b.layout.alpha).abs() < 1e-6, "alpha");
+        assert_eq!(a, b);
     }
 
     fn secs(n: f64) -> Duration {
@@ -2899,7 +2925,8 @@ mod tests {
     }
 
     /// GES refuses a clip on top of another without an error; the batch must
-    /// say so rather than report a write that did not happen.
+    /// say so, put the clip back as it was, and leave no track behind however
+    /// often the write is tried.
     #[test]
     fn undo_reports_a_write_the_engine_refused() {
         let (dir, png, mut project) = undo_fixture("undo-refused");
@@ -2909,16 +2936,73 @@ mod tests {
         let _b = project
             .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
             .expect("b");
-        let mut onto_b = record_of(&project, &a);
+        let before = record_of(&project, &a);
+        let mut onto_b = before.clone();
         onto_b.start = 2.0;
-        assert_eq!(
-            project.set_clip_records(&[(a.clone(), onto_b)]),
-            vec![a.clone()]
-        );
-        assert!(
-            project.clip_track(&a).is_some(),
-            "a is still on the timeline"
-        );
+        for _try in 0..2 {
+            assert_eq!(
+                project.set_clip_records(&[(a.clone(), onto_b.clone())]),
+                vec![a.clone()]
+            );
+            assert_eq!(record_of(&project, &a), before, "a is back as it was");
+            assert_eq!(project.track_count(), 1, "no parking layer is left behind");
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// b cannot land (c is there) and cannot go back (a took its place): it
+    /// stays parked, on the first track below the timeline, with its old times.
+    #[test]
+    fn undo_parks_a_clip_that_can_go_neither_way_on_one_track() {
+        let (dir, png, mut project) = undo_fixture("undo-neither");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        project
+            .add_clip(&png, 0, secs(4.0), Duration::ZERO, secs(2.0))
+            .expect("c");
+        let (mut to_a, rb) = (record_of(&project, &a), record_of(&project, &b));
+        let mut onto_c = rb.clone();
+        to_a.start = 2.0;
+        onto_c.start = 4.0;
+        assert_eq!(
+            project.set_clip_records(&[(a.clone(), to_a.clone()), (b.clone(), onto_c)]),
+            vec![b.clone()]
+        );
+        assert_eq!(record_of(&project, &a), to_a, "a landed");
+        let now_b = record_of(&project, &b);
+        assert_eq!(
+            (now_b.track, now_b.start),
+            (1, rb.start),
+            "b parked with its old start"
+        );
+        assert_eq!(project.track_count(), 2, "one parking track, none empty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undoing a left trim grows the duration back while the in-point shrinks;
+    /// in the wrong order in-point plus duration passes the source's length and
+    /// GES refuses. Stills have no length, so this needs real media.
+    #[test]
+    fn undo_writes_a_left_trim_of_real_media_back() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping undo_writes_a_left_trim_of_real_media_back: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(std::path::Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        let full = record_of(&project, &a);
+        project.trim_clip(&a, -1, 0.5).expect("trim");
+        let trimmed = record_of(&project, &a);
+        assert!(write_back(&mut project, &[(&a, &full)]), "undo the trim");
+        assert_eq!(record_of(&project, &a), full);
+        assert!(write_back(&mut project, &[(&a, &trimmed)]), "redo it");
+        assert_eq!(record_of(&project, &a), trimmed);
     }
 }
