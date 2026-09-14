@@ -325,6 +325,21 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     }
 }
 
+/// Seconds as a record stores them, back to the nanoseconds they came from.
+/// Exact for any timeline shorter than about 104 days.
+fn clock_time(secs: f64) -> gst::ClockTime {
+    gst::ClockTime::from_nseconds((secs.max(0.0) * 1e9).round() as u64)
+}
+
+/// Whether a clip already sits where `record` puts it: its times to the
+/// nanosecond, and its track.
+fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> bool {
+    clip.start() == clock_time(record.start)
+        && clip.inpoint() == clock_time(record.inpoint)
+        && clip.duration() == clock_time(record.duration)
+        && clip.layer().map(|l| l.priority() as usize) == Some(record.track)
+}
+
 /// Where a two-step pipeline operation has got to. `Pending` means the state
 /// change is still running; the caller should look again on its next tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -981,6 +996,90 @@ impl Project {
         }
         let current = self.clips.get(&id.0)?.duration().nseconds() as f64 / 1e9;
         self.trim_clip(id, 1, secs - current)
+    }
+
+    /// Write clips' start, in-point, duration, track and transform exactly as
+    /// their records give them. Nothing is clamped: this puts back a state the
+    /// engine already accepted, which is what undo needs — a slide or trim
+    /// replayed in reverse would be clamped again and land somewhere else.
+    ///
+    /// GES refuses, without an error, any moment where one clip sits fully on
+    /// top of another, even when the end state is fine, so clips that trade
+    /// tracks or places would collide halfway. Every clip whose place or times
+    /// change is therefore parked alone on a new layer below the timeline
+    /// first, then set and moved to its track, and the parking layers are
+    /// removed. Returns the IDs of the clips that did not land where their
+    /// record says (unknown clips included): empty when every write landed.
+    /// While rendering, nothing is written and every ID is returned.
+    pub fn set_clip_records(
+        &mut self,
+        writes: &[(ClipId, crate::document::ClipRecord)],
+    ) -> Vec<ClipId> {
+        if self.rendering.get() {
+            return writes.iter().map(|(id, _)| id.clone()).collect();
+        }
+        let mut failed = Vec::new();
+        let mut found = Vec::with_capacity(writes.len());
+        for (id, record) in writes {
+            match self.clips.get(&id.0) {
+                Some(clip) => found.push((id, record, clip.clone())),
+                None => failed.push(id.clone()),
+            }
+        }
+        // Parking layers go below every track a record names, so none of them
+        // is also a destination.
+        let parking = found
+            .iter()
+            .map(|(_, record, _)| record.track + 1)
+            .fold(self.layers.len(), usize::max);
+        let moving: Vec<_> = found
+            .iter()
+            .filter(|(_, record, clip)| !clip_placed_as(clip, record))
+            .collect();
+        for (k, (_, _, clip)) in moving.iter().enumerate() {
+            let layer = self.layer(parking + k);
+            // If parking fails, the writes below are still tried and the
+            // read-back reports the clip.
+            let _ = clip.move_to_layer(&layer);
+        }
+        for (_, record, clip) in &moving {
+            let inpoint = clock_time(record.inpoint);
+            let duration = clock_time(record.duration);
+            // The order trim_clip uses, so in-point plus duration never passes
+            // the source's max-duration on the way, which GES would clamp.
+            if duration <= clip.duration() {
+                clip.set_duration(duration);
+                clip.set_inpoint(inpoint);
+            } else {
+                clip.set_inpoint(inpoint);
+                clip.set_duration(duration);
+            }
+            clip.set_start(clock_time(record.start));
+            let target = self.layer(record.track);
+            let _ = clip.move_to_layer(&target);
+        }
+        for (id, record, clip) in &found {
+            if !clip_placed_as(clip, record) {
+                failed.push((*id).clone());
+            }
+        }
+        // Empty again, unless a clip could not leave its parking layer.
+        while self.layers.len() > parking {
+            if self.layers.last().is_some_and(|l| !l.clips().is_empty()) {
+                break;
+            }
+            if let Some(last) = self.layers.pop() {
+                let _ = self.timeline.remove_layer(&last);
+            }
+        }
+        for (id, record, _) in &found {
+            self.set_clip_layout(id, record.layout.into());
+        }
+        if !found.is_empty() {
+            self.timeline.commit();
+            self.dirty.set(true);
+        }
+        failed
     }
 
     /// Number of tracks (GES layers, 0 = top) in the timeline.
@@ -2631,5 +2730,195 @@ mod tests {
             );
             project.refresh_preview();
         }
+    }
+
+    /// A still image for the undo tests, and a project to put it in.
+    fn undo_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, Project) {
+        let dir = scratch(tag);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(120, 90, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("write still");
+        (dir, png, Project::new(|_f| {}).expect("project"))
+    }
+
+    fn record_of(project: &Project, id: &ClipId) -> crate::document::ClipRecord {
+        project
+            .clip_records()
+            .into_iter()
+            .find(|(i, _)| i == id)
+            .map(|(_, r)| r)
+            .expect("the clip is on the timeline")
+    }
+
+    /// Times to the nanosecond; the transform within what reading it back from
+    /// pixel sizes allows.
+    fn assert_same_record(a: &crate::document::ClipRecord, b: &crate::document::ClipRecord) {
+        assert_eq!(
+            (a.uri.as_str(), a.track),
+            (b.uri.as_str(), b.track),
+            "source and track"
+        );
+        for (x, y, what) in [
+            (a.start, b.start, "start"),
+            (a.inpoint, b.inpoint, "inpoint"),
+            (a.duration, b.duration, "duration"),
+        ] {
+            assert!((x - y).abs() < 1e-9, "{what}: {x} vs {y}");
+        }
+        assert_eq!(
+            (a.layout.posx, a.layout.posy),
+            (b.layout.posx, b.layout.posy)
+        );
+        assert!((a.layout.scale - b.layout.scale).abs() < 1e-3, "scale");
+        assert!((a.layout.alpha - b.layout.alpha).abs() < 1e-6, "alpha");
+    }
+
+    fn secs(n: f64) -> Duration {
+        Duration::from_secs_f64(n)
+    }
+
+    /// Write records back through the batch, as undo does; true if all landed.
+    fn write_back(
+        project: &mut Project,
+        writes: &[(&ClipId, &crate::document::ClipRecord)],
+    ) -> bool {
+        let owned: Vec<(ClipId, crate::document::ClipRecord)> = writes
+            .iter()
+            .map(|(id, record)| ((*id).clone(), (*record).clone()))
+            .collect();
+        project.set_clip_records(&owned).is_empty()
+    }
+
+    /// The slide was clamped against a neighbour; reversing the amount would
+    /// not put the clip back, writing the old record does.
+    #[test]
+    fn undo_writes_a_clamped_slide_back_exactly() {
+        let (dir, png, mut project) = undo_fixture("undo-slide");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 0, secs(3.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let before = record_of(&project, &b);
+        let geom = project.slide_clip(&b, -10.0).expect("slide");
+        assert_eq!(geom.start, secs(2.0), "stopped against a");
+        assert!(write_back(&mut project, &[(&b, &before)]));
+        assert_same_record(&record_of(&project, &b), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_writes_a_clamped_trim_back_exactly() {
+        let (dir, png, mut project) = undo_fixture("undo-trim");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let before = record_of(&project, &a);
+        let geom = project.trim_clip(&a, 1, -10.0).expect("trim");
+        assert!(geom.duration < secs(1.0), "clamped at the minimum");
+        assert!(write_back(&mut project, &[(&a, &before)]));
+        assert_same_record(&record_of(&project, &a), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_writes_a_track_and_a_transform_back() {
+        let (dir, png, mut project) = undo_fixture("undo-move");
+        let a = project
+            .add_clip(&png, 0, secs(1.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 40,
+                posy: -20,
+                scale: 0.5,
+                alpha: 0.75,
+                volume: 1.0,
+            },
+        );
+        let before = record_of(&project, &a);
+        project.move_clip_to_track(&a, 1).expect("move");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 0,
+                posy: 0,
+                scale: 1.0,
+                alpha: 1.0,
+                volume: 1.0,
+            },
+        );
+        assert!(write_back(&mut project, &[(&a, &before)]));
+        assert_same_record(&record_of(&project, &a), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reorder moves layers, not clips; writing each clip's record puts
+    /// every clip back on its old track. The two clips trade layers at the
+    /// same time, which GES refuses one write at a time.
+    #[test]
+    fn undo_puts_clips_back_after_a_track_reorder() {
+        let (dir, png, mut project) = undo_fixture("undo-reorder");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let (ra, rb) = (record_of(&project, &a), record_of(&project, &b));
+        project.move_track(0, 1);
+        assert_eq!(project.clip_track(&a), Some(1), "the reorder moved a");
+        assert!(write_back(&mut project, &[(&a, &ra), (&b, &rb)]));
+        assert_same_record(&record_of(&project, &a), &ra);
+        assert_same_record(&record_of(&project, &b), &rb);
+        assert_eq!(project.track_count(), 2, "no parking layer is left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_lets_two_clips_trade_places_on_a_track() {
+        let (dir, png, mut project) = undo_fixture("undo-trade");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let mut to_a = record_of(&project, &a);
+        let mut to_b = record_of(&project, &b);
+        to_a.start = 2.0;
+        to_b.start = 0.0;
+        assert!(write_back(&mut project, &[(&a, &to_a), (&b, &to_b)]));
+        assert_same_record(&record_of(&project, &a), &to_a);
+        assert_same_record(&record_of(&project, &b), &to_b);
+        assert_eq!(project.track_count(), 1, "no parking layer is left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GES refuses a clip on top of another without an error; the batch must
+    /// say so rather than report a write that did not happen.
+    #[test]
+    fn undo_reports_a_write_the_engine_refused() {
+        let (dir, png, mut project) = undo_fixture("undo-refused");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let _b = project
+            .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let mut onto_b = record_of(&project, &a);
+        onto_b.start = 2.0;
+        assert_eq!(
+            project.set_clip_records(&[(a.clone(), onto_b)]),
+            vec![a.clone()]
+        );
+        assert!(
+            project.clip_track(&a).is_some(),
+            "a is still on the timeline"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
