@@ -46,8 +46,9 @@ transform and thumbnail).
   Inspector sliders fire `changed` continuously, and the 100 ms timer applies
   only the latest transform; there is no release event.
 - **Toolbars.** The timeline toolbar uses `TimelineChip { label, hint }` for the
-  zoom controls. The Images toolbar is a `SecondaryButton` row ("Add files…",
-  "Clear", then a stretch spacer).
+  zoom controls; `hint` is only the chip's accessible label, and the app has no
+  visible tooltip anywhere. The Images toolbar is a `SecondaryButton` row ("Add
+  files…", "Clear", then a stretch spacer).
 
 ## Measurements
 
@@ -94,8 +95,9 @@ used by both modes:
 - **Undo and redo are two-phase.** The caller looks at the top step, applies it,
   and only then tells the history it succeeded, which moves the step to the
   other stack. A failed apply leaves the step where it was.
-- Each step has a **label** ("Trim intro.mp4") used for the button hints:
-  "Undo trim of intro.mp4", "Redo trim of intro.mp4", "Nothing to undo".
+- Each step **describes** itself as a noun phrase ("trim of intro.mp4"), which
+  the button hints complete: "Undo trim of intro.mp4", "Redo trim of
+  intro.mp4", "Nothing to undo".
 - The current time is passed in rather than read, so tests use a fake clock.
 - `clear()` empties both stacks.
 
@@ -208,8 +210,9 @@ skipped, and the user is told how many files could not come back.
 
 ### Lifetime and refusals
 
-- The timeline history is cleared when a project is opened and when a fresh
-  engine is created. The Images history lasts the session.
+- The timeline history is cleared when a project is opened. The engine is
+  created once per session, before anything can be recorded, so a new engine
+  always starts with an empty history. The Images history lasts the session.
 - Undo and redo are refused, and both buttons are disabled:
   - during an export, including while it is starting;
   - while an Images batch is running;
@@ -218,24 +221,29 @@ skipped, and the user is told how many files could not come back.
 
 ## Interface
 
+- **Tooltip.** Slint has no tooltip element. A `Tooltip` global holds a text and
+  a position; a hovered control that has a `hint` writes it there with its
+  `absolute-position`, and a `TooltipLayer`, the window's last child, draws it
+  above everything. The existing zoom chips get visible hints from this too.
 - **Videos mode.** Two `TimelineChip`s, "Undo" and "Redo", in the timeline
-  toolbar, left of the zoom chips. Their hint is the step label ("Undo trim of
-  intro.mp4") or "Nothing to undo" / "Nothing to redo". They are greyed out
-  when unavailable.
+  toolbar, left of the zoom chips. Their hint ("Undo trim of intro.mp4", or
+  "Nothing to undo" / "Nothing to redo") shows on hover. `TimelineChip` gains
+  an `enabled` property and they are greyed out when unavailable; the hint
+  still shows on a greyed chip.
 - **Images mode.** Two `SecondaryButton`s, "Undo" and "Redo", at the right end
-  of the "Add files… / Clear" row. `SecondaryButton` gains an optional hover
-  hint that behaves like `TimelineChip`'s.
+  of the "Add files… / Clear" row. `SecondaryButton` gains an optional `hint`,
+  shown on hover and used as its accessible description.
 - **Shortcuts.** Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo. They are handled
   in `video-keys` and `image-keys` and act on the current mode's history. A
   focused text field keeps Ctrl+Z for its own text. `modal-keys` runs first,
   and undo keys do nothing while a dialog is open.
 - **Accessibility.** Each button's hint is also its accessible description.
-- **Labels.**
-  - Videos: "Move intro.mp4", "Trim intro.mp4", "Transform intro.mp4",
-    "Set duration of still.png", "Delete intro.mp4", "Add intro.mp4",
-    "Reorder tracks", "Add track".
-  - Images: "Add 12 files", "Remove photo.jpg", "Clear the list (40 files)",
-    "Crop photo.jpg".
+- **How steps describe themselves** (the hint prefixes "Undo " or "Redo "):
+  - Videos: "move of intro.mp4", "trim of intro.mp4", "transform of
+    intro.mp4", "duration of still.png", "deleting intro.mp4", "adding
+    intro.mp4", "track reorder", "new track".
+  - Images: "adding 12 files", "removing photo.jpg", "clearing the list (40
+    files)", "crop of photo.jpg".
 
 ## Contract for later edits
 
