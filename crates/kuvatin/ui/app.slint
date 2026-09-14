@@ -314,6 +314,7 @@ export component AppWindow inherits Window {
     changed importing => { if (!self.importing) { kbd.focus(); } }
     changed exporting => { if (!self.exporting) { kbd.focus(); } }
     changed confirm-delete => { if (!self.confirm-delete) { kbd.focus(); } }
+    changed confirm-open-project => { if (!self.confirm-open-project) { kbd.focus(); } }
 
     // Global key handling. The FocusScope wraps every child of the window
     // (main layout, drop banner, modals), so a key the focused element rejects
@@ -343,16 +344,20 @@ export component AppWindow inherits Window {
             || root.confirm-delete || root.confirm-open-project || root.exporting;
     }
     // Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo, in whichever mode is showing.
-    // A focused text field takes Ctrl+Z first, so there it undoes the typing.
+    // A focused text field takes Ctrl+Z and Ctrl+Y first, but on Windows Slint
+    // does not treat Ctrl+Shift+Z as a text redo, so that combination reaches
+    // here and redoes in the current mode even while typing.
     // A drag in progress holds it back (Gesture.held, Step 5b).
     function undo-keys(event: KeyEvent) -> EventResult {
         if (!event.modifiers.control || root.modal-open() || Gesture.held) { return EventResult.reject; }
         if ((event.text == "z" || event.text == "Z") && !event.modifiers.shift) {
             if (root.app-mode == 1) { root.video-undo(); } else { root.image-undo(); }
+            kbd.focus();
             return EventResult.accept;
         }
         if (event.text == "z" || event.text == "Z" || event.text == "y" || event.text == "Y") {
             if (root.app-mode == 1) { root.video-redo(); } else { root.image-redo(); }
+            kbd.focus();
             return EventResult.accept;
         }
         return EventResult.reject;
@@ -405,6 +410,11 @@ export component AppWindow inherits Window {
         return EventResult.reject;
     }
     function video-keys(event: KeyEvent) -> EventResult {
+        // A drag in progress holds the rows and the selection: only play/pause
+        // gets through. This also keeps an arrow key from destroying a dragged
+        // slider, which would end the drag without the release that clears
+        // Gesture.held.
+        if (Gesture.held && event.text != " ") { return EventResult.reject; }
         // Transport/edit keys are dead during an export (the engine ignores
         // them too — this just keeps the play icon from flipping).
         if (root.exporting) { return EventResult.reject; }
@@ -432,9 +442,7 @@ export component AppWindow inherits Window {
             return EventResult.accept;
         }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
-        // A drag in progress keeps its row: deleting it would end the gesture
-        // without the release that clears Gesture.held.
-        if ((event.text == Key.Delete || event.text == Key.Backspace) && !Gesture.held) { root.delete-selected-clip(); return EventResult.accept; }
+        if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
         return root.clip-keys(event);
     }
     function image-keys(event: KeyEvent) -> EventResult {
@@ -1482,6 +1490,7 @@ export component AppWindow inherits Window {
                                     mouse-cursor: eta.mode == EditMode.resize ? MouseCursor.nwse-resize : MouseCursor.move;
                                     pointer-event(ev) => {
                                         Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                        if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                         if (ev.kind == PointerEventKind.down) {
                                             eta.b-posx = root.insp-posx;
                                             eta.b-posy = root.insp-posy;
@@ -1677,14 +1686,14 @@ export component AppWindow inherits Window {
                                     wide: true;
                                     hint: root.video-undo-hint;
                                     enabled: root.video-can-undo && !root.modal-open();
-                                    clicked => { root.video-undo(); }
+                                    clicked => { root.video-undo(); kbd.focus(); }
                                 }
                                 TimelineChip {
                                     label: "Redo";
                                     wide: true;
                                     hint: root.video-redo-hint;
                                     enabled: root.video-can-redo && !root.modal-open();
-                                    clicked => { root.video-redo(); }
+                                    clicked => { root.video-redo(); kbd.focus(); }
                                 }
                                 // Zoom: discoverable buttons for the wheel gesture, and the
                                 // only way to reach it without a wheel.
@@ -1756,6 +1765,7 @@ export component AppWindow inherits Window {
                                         moved => { hdr.ddy = self.mouse-y - self.pressed-y; }
                                         pointer-event(ev) => {
                                             Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                            if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                             if (ev.kind == PointerEventKind.up) {
                                                 if (Math.abs(hdr.ddy / 1px) > 15) {
                                                     root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-track-labels.length - 1));
@@ -1926,6 +1936,7 @@ export component AppWindow inherits Window {
                                             }
                                             pointer-event(ev) => {
                                                 Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                                if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                                 if (ev.kind == PointerEventKind.up) {
                                                     if (blk.dmode == DragMode.slide && (Math.abs(blk.ddx / 1px) > 2 || Math.abs(blk.ddy / 1px) > 2)) {
                                                         // Commit the SNAPPED slide so the clip lands exactly
@@ -1952,6 +1963,7 @@ export component AppWindow inherits Window {
                                                 moved => { blk.dmode = DragMode.trim-left; blk.ddx = self.mouse-x - self.pressed-x; }
                                                 pointer-event(ev) => {
                                                     Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                                    if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                                     if (ev.kind == PointerEventKind.up) {
                                                         if (blk.dmode == DragMode.trim-left && Math.abs(blk.ddx / 1px) > 2) {
                                                             root.timeline-clip-trimmed(i, -1, (blk.ddx / 1px) / root.timeline-pps);
@@ -1970,6 +1982,7 @@ export component AppWindow inherits Window {
                                                 moved => { blk.dmode = DragMode.trim-right; blk.ddx = self.mouse-x - self.pressed-x; }
                                                 pointer-event(ev) => {
                                                     Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                                    if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                                     if (ev.kind == PointerEventKind.up) {
                                                         if (blk.dmode == DragMode.trim-right && Math.abs(blk.ddx / 1px) > 2) {
                                                             root.timeline-clip-trimmed(i, 1, (blk.ddx / 1px) / root.timeline-pps);
@@ -2389,6 +2402,7 @@ export component AppWindow inherits Window {
             y: 0;
             width: root.width;
             height: root.height;
+            suppressed: root.modal-open();
         }
     }
 

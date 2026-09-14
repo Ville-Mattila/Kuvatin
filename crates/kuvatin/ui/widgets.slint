@@ -113,6 +113,7 @@ export component SecondaryButton inherits Rectangle {
     accessible-label: root.text;
     accessible-description: root.hint;
     accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
     changed hint => {
         if (ta.has-hover && root.hint != "") {
             Tooltip.text = root.hint;
@@ -649,6 +650,7 @@ export component TimelineChip inherits Rectangle {
     accessible-role: button;
     accessible-label: root.hint;
     accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
     // The hint changes under the pointer after a click (the next step to undo).
     changed hint => {
         if (ta.has-hover) {
@@ -706,7 +708,8 @@ export global Tooltip {
 // Fills the window and draws nothing but the current tooltip, kept inside the
 // window's edges. Rectangles take no input, so clicks pass straight through.
 export component TooltipLayer inherits Rectangle {
-    if Tooltip.shown && Tooltip.text != "": Rectangle {
+    in property <bool> suppressed;
+    if !root.suppressed && Tooltip.shown && Tooltip.text != "": Rectangle {
         x: Math.max(4px, Math.min(Tooltip.left, root.width - self.width - 4px));
         y: Math.min(Tooltip.top, root.height - self.height - 4px);
         width: tip.preferred-width + 16px;
@@ -721,6 +724,7 @@ export component TooltipLayer inherits Rectangle {
             text: Tooltip.text;
             color: Theme.ink2;
             font-size: 11px;
+            accessible-role: none;
         }
     }
 }
