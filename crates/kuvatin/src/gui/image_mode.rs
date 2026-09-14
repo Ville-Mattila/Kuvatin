@@ -160,17 +160,18 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                 .drain()
                 .filter(|(p, _)| old.binary_search(p).is_ok())
                 .collect();
+            sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
+            drop(crops_guard);
+            drop(guard);
             record_step(
                 &history,
                 ImageStep::ClearList {
-                    paths: old.clone(),
+                    paths: old,
                     crops: kept_crops,
                     thumbs: kept_thumbs,
                 },
                 &ui_weak,
             );
-            sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
-            drop(crops_guard);
             ui.set_selected_index(-1);
             ui.set_viewer_image(Image::default());
             ui.set_cropping(false);
@@ -203,6 +204,9 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             let removed = guard.remove(i as usize);
             let mut crops_guard = crops.lock().unwrap();
             let crop = crops_guard.remove(&removed);
+            sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
+            drop(crops_guard);
+            drop(guard);
             record_step(
                 &history,
                 ImageStep::RemoveFile {
@@ -211,9 +215,6 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                 },
                 &ui_weak,
             );
-            sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
-            drop(crops_guard);
-            drop(guard);
             let sel = ui.get_selected_index();
             if sel == i {
                 ui.set_selected_index(-1);
@@ -318,6 +319,14 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                         let Some(ui) = ui_weak.upgrade() else {
                             return;
                         };
+                        // A remove, a Clear or an undo since may have taken the
+                        // file away: its crop state must not outlive it.
+                        let current = usize::try_from(ui.get_selected_index())
+                            .ok()
+                            .and_then(|i| files.lock().unwrap().get(i).cloned());
+                        if current.as_ref() != Some(&path) {
+                            return;
+                        }
                         let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&raw, pw, ph);
                         ui.set_viewer_image(Image::from_rgba8(buf));
 
@@ -373,6 +382,15 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             y = y.min(oh.saturating_sub(1));
             w = w.min(ow - x).max(1);
             h = h.min(oh - y).max(1);
+
+            // Only a file in the list has a crop; and leaving the editor
+            // untouched on an uncropped file is not a crop.
+            let listed = files.lock().unwrap().binary_search(&path).is_ok();
+            let full = (x, y, w, h) == (0, 0, ow, oh);
+            if !listed || (full && !crops.lock().unwrap().contains_key(&path)) {
+                ui.set_cropping(false);
+                return;
+            }
 
             // insert hands back the crop it replaced: exactly what undo needs.
             let before = crops.lock().unwrap().insert(path.clone(), (x, y, w, h));
@@ -973,7 +991,13 @@ pub(super) fn wire_history(ui: &AppWindow, st: &ImageState) {
                 selected.as_ref().and_then(&index_of),
             ) {
                 // The step's own file: selecting it again also redraws its crop.
-                (Some(i), _) => ui.invoke_select_file(i),
+                // An editor open on another file closes rather than follow it.
+                (Some(i), _) => {
+                    if selected != outcome.select {
+                        ui.set_cropping(false);
+                    }
+                    ui.invoke_select_file(i)
+                }
                 // The selected file is still there, perhaps on another row.
                 (None, Some(i)) => ui.set_selected_index(i),
                 (None, None) => {
