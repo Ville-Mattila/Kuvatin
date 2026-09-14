@@ -344,14 +344,13 @@ export component AppWindow inherits Window {
             || root.confirm-delete || root.confirm-open-project || root.exporting;
     }
     // Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo, in whichever mode is showing.
-    // A focused text field takes Ctrl+Z and Ctrl+Y first, but on Windows Slint
-    // does not treat Ctrl+Shift+Z as a text redo, so that combination reaches
-    // here and redoes in the current mode even while typing. Pressing it in a
-    // text field also moves focus to the window, so the next Space plays or
-    // pauses.
-    // A drag in progress holds it back (Gesture.held, Step 5b).
+    // A focused text field keeps all three keys: Ctrl+Z and Ctrl+Y are its own
+    // text undo/redo, and Ctrl+Shift+Z, which Slint does not treat as a text
+    // redo on Windows, is refused here too while a text field has focus,
+    // rather than reaching in and redoing the mode's edit out from under it.
+    // A drag in progress holds it back (Gesture.held).
     function undo-keys(event: KeyEvent) -> EventResult {
-        if (!event.modifiers.control || root.modal-open() || Gesture.held) { return EventResult.reject; }
+        if (!event.modifiers.control || root.modal-open() || Gesture.held || TextInputInterface.text-input-focused) { return EventResult.reject; }
         if ((event.text == "z" || event.text == "Z") && !event.modifiers.shift) {
             if (root.app-mode == 1) { root.video-undo(); } else { root.image-undo(); }
             kbd.focus();
@@ -754,6 +753,9 @@ export component AppWindow inherits Window {
                                 clicked => { root.clear-files(); }
                             }
                             Rectangle { horizontal-stretch: 1; }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
                             SecondaryButton {
                                 text: "Undo";
                                 min-width: 72px;
@@ -768,6 +770,7 @@ export component AppWindow inherits Window {
                                 enabled: root.image-can-redo && !root.running && !root.modal-open();
                                 clicked => { root.image-redo(); }
                             }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                     }
                 }
@@ -1701,7 +1704,7 @@ export component AppWindow inherits Window {
                                     label: "Undo";
                                     wide: true;
                                     hint: root.video-undo-hint;
-                                    enabled: root.video-can-undo && !root.modal-open();
+                                    enabled: root.video-can-undo && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.video-undo(); if (!undo-chip.has-focus) { kbd.focus(); } }
                                 }
@@ -1709,7 +1712,7 @@ export component AppWindow inherits Window {
                                     label: "Redo";
                                     wide: true;
                                     hint: root.video-redo-hint;
-                                    enabled: root.video-can-redo && !root.modal-open();
+                                    enabled: root.video-can-redo && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.video-redo(); if (!redo-chip.has-focus) { kbd.focus(); } }
                                 }
