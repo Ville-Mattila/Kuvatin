@@ -1174,6 +1174,30 @@ impl Project {
         }
     }
 
+    /// Remove empty tracks from the bottom until at most `keep` remain (never
+    /// fewer than one, and never a track with a clip on it). Undo calls this
+    /// with the track count its step started from, so undoing a move onto a
+    /// new bottom track takes that track away again.
+    pub fn prune_tracks(&mut self, keep: usize) {
+        if self.rendering.get() {
+            return;
+        }
+        let mut changed = false;
+        while self.layers.len() > keep.max(1) {
+            if !self.layers[self.layers.len() - 1].clips().is_empty() {
+                break;
+            }
+            if let Some(last) = self.layers.pop() {
+                let _ = self.timeline.remove_layer(&last);
+                changed = true;
+            }
+        }
+        if changed {
+            self.timeline.commit();
+            self.dirty.set(true);
+        }
+    }
+
     /// Number of tracks (GES layers, 0 = top) in the timeline.
     pub fn track_count(&self) -> usize {
         self.layers.len()
@@ -3188,5 +3212,37 @@ mod tests {
         assert!(project.remove_clip(&a));
         project.restore_clip(&a, &before).expect("restore");
         assert_same_record(&record_of(&project, &a), &before);
+    }
+
+    /// A drag onto a new bottom track creates that track; undoing the move
+    /// must take it away again.
+    #[test]
+    fn undo_removes_the_track_a_move_created() {
+        let (dir, png, mut project) = undo_fixture("undo-prune");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let tracks = project.track_count();
+        let before = record_of(&project, &a);
+        project
+            .move_clip_to_track(&a, tracks)
+            .expect("move to a new track");
+        assert_eq!(project.track_count(), tracks + 1);
+        assert!(write_back(&mut project, &[(&a, &before)]));
+        project.prune_tracks(tracks);
+        assert_eq!(project.track_count(), tracks);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_pruning_never_removes_a_track_with_clips() {
+        let (dir, png, mut project) = undo_fixture("undo-prune-keep");
+        project
+            .add_clip(&png, 2, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let tracks = project.track_count();
+        project.prune_tracks(0);
+        assert_eq!(project.track_count(), tracks, "the bottom track has a clip");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
