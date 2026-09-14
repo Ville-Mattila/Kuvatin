@@ -139,11 +139,12 @@ the step beneath it.
   parked on the first free parking layer if a clip that landed took its place,
   so a refused write changes nothing else and retrying it adds no tracks.
 - **`restore_clip(id, record)`** re-adds a removed clip as its record describes
-  it, under its old `ClipId`. GES names every new clip afresh, whatever it is
-  asked (see Risks), but the engine never looks clips up by GES name, so it
-  keeps the restored clip under the ID the interface and the history still
-  hold. GES never gives out a name twice in a process, so no later clip can
-  arrive under it.
+  it, under its old `ClipId`. GES replaces a name in its own `uriclipN` pattern
+  with its next one (see Risks), so a removed clip's name cannot be asked
+  back; but the engine never looks clips up by GES name, so it keeps the
+  restored clip under the ID the interface and the history still hold. GES
+  never gives out a name twice in a process, so no later clip can arrive
+  under it.
 - **`source_available(uri)`** answers whether a source is still there. A file is
   looked for on disk, because GES answers from a cache that outlives it, and
   undo only restores sources the session has used; anything else, an image
