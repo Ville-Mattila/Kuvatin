@@ -216,6 +216,7 @@ pub(super) fn wire(
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
         let sel_idx = sel_idx.clone();
+        let history = st.history.clone();
         ui.on_set_canvas_size(move |w, h| {
             let w = w.clamp(16, 7680);
             let h = h.clamp(16, 4320);
@@ -223,7 +224,16 @@ pub(super) fn wire(
                 *project_slot.borrow_mut() = make_project(&ui_weak);
             }
             if let Some(p) = project_slot.borrow_mut().as_mut() {
+                let was = p.canvas_size();
                 p.set_canvas_size(w, h);
+                if p.canvas_size() != was {
+                    // GES rescales every clip's position with the canvas, so no
+                    // older step's records match the timeline any more.
+                    history.borrow_mut().clear();
+                    if let Some(ui) = ui_weak.upgrade() {
+                        undo::refresh(&ui, &history.borrow());
+                    }
+                }
                 let i = sel_idx.get();
                 if i >= 0 {
                     if let Some(row) = tl_clips.row_data(i as usize) {

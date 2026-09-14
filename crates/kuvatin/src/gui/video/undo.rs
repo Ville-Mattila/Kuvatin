@@ -779,4 +779,19 @@ mod tests {
         r.record_captures(StepKind::Move, Some("a"), same.clone(), same);
         assert!(!r.history.borrow().can_undo());
     }
+
+    /// An add is recorded after its row is pushed, so the step keeps the row a
+    /// redo brings back.
+    #[test]
+    fn the_recorder_keeps_the_row_of_an_added_clip() {
+        let r = recorder(Vec::new(), 2);
+        let before = cap(&[], 2);
+        r.tl_clips.push(row("a", &rec(0, 0.0, 2.0)));
+        let after = cap(&[("a", rec(0, 0.0, 2.0))], 2);
+        r.record_captures(StepKind::Add, Some("a"), before, after);
+        let history = r.history.borrow();
+        let s = history.peek_undo().expect("a step");
+        assert_eq!(s.describe(), "adding intro.mp4");
+        assert!(s.kept_rows.contains_key("a"), "the row a redo brings back");
+    }
 }
