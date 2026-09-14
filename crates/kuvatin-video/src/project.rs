@@ -1129,10 +1129,10 @@ impl Project {
 
     /// Put back a clip that was removed, as `record` describes it, under the
     /// ID it had, which the interface and the undo history still hold. GES
-    /// names the new clip afresh whatever it is asked (a name in its own
-    /// `uriclipN` pattern is replaced by the next one), so the engine keeps
-    /// the old ID as its handle for the clip. GES never gives out a name twice
-    /// in a process, so no later clip can arrive under that ID. Returns `id`;
+    /// replaces a name in its own `uriclipN` pattern with its next one, so a
+    /// removed clip's name cannot be asked back; the engine keeps the old ID
+    /// as its handle for the clip instead. GES never gives out a name twice in
+    /// a process, so no later clip can arrive under that ID. Returns `id`;
     /// fails if a clip already has it.
     pub fn restore_clip(
         &mut self,
