@@ -93,10 +93,12 @@ export component Card inherits Rectangle {
 }
 
 // Secondary (card-colored) button used for Add/Clear. Keyboard-reachable
-// (Tab focus, Enter/Space) and announced as a button to assistive tech.
+// (Tab focus, Enter/Space) and announced as a button to assistive tech. An
+// optional `hint` shows on hover and is read as its description.
 export component SecondaryButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
+    in property <string> hint: "";
     callback clicked();
     height: 34px;
     min-width: 96px;
@@ -109,7 +111,13 @@ export component SecondaryButton inherits Rectangle {
     animate background, border-color { duration: 130ms; }
     accessible-role: button;
     accessible-label: root.text;
+    accessible-description: root.hint;
     accessible-enabled: root.enabled;
+    changed hint => {
+        if (ta.has-hover && root.hint != "") {
+            Tooltip.text = root.hint;
+        }
+    }
     Text {
         text: root.text;
         color: root.enabled ? Theme.ink : Theme.disabled-ink;
@@ -125,10 +133,26 @@ export component SecondaryButton inherits Rectangle {
             return reject;
         }
     }
+    // Enabled even when the button is not, so a greyed button's hint still
+    // shows; the click itself is refused.
     ta := TouchArea {
-        enabled: root.enabled;
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
-        clicked => { fs.focus(); root.clicked(); }
+        clicked => {
+            if (root.enabled) {
+                fs.focus();
+                root.clicked();
+            }
+        }
+        changed has-hover => {
+            if (self.has-hover && root.hint != "") {
+                Tooltip.text = root.hint;
+                Tooltip.left = root.absolute-position.x;
+                Tooltip.top = root.absolute-position.y + root.height + 4px;
+                Tooltip.shown = true;
+            } else if (!self.has-hover && Tooltip.text == root.hint) {
+                Tooltip.shown = false;
+            }
+        }
     }
 }
 
@@ -598,43 +622,113 @@ export component InspSlider inherits Rectangle {
                 }
                 moved => { kta.emit(kta.mouse-x); }
                 clicked => { ifs.focus(); kta.emit(kta.mouse-x); }
+                pointer-event(ev) => {
+                    Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                }
             }
         }
     }
 }
 
-// A small control in the timeline toolbar (the zoom buttons). Keyboard
-// reachable and announced by its `hint`, since its label is a bare glyph.
+// A small control in the timeline toolbar (zoom, undo). Keyboard reachable and
+// announced by its `hint`, which also shows on hover, since a label can be a
+// bare glyph.
 export component TimelineChip inherits Rectangle {
     in property <string> label;
     in property <string> hint;
     in property <bool> wide: false;
+    in property <bool> enabled: true;
     callback clicked();
     width: root.wide ? 34px : 22px;
     height: 22px;
     border-radius: 5px;
-    background: ta.has-hover ? Theme.hover : #1b1f27;
+    background: root.enabled && ta.has-hover ? Theme.hover : #1b1f27;
     border-width: fs.has-focus ? 1px : 0px;
     border-color: Theme.accent;
     animate background { duration: 120ms; }
     accessible-role: button;
     accessible-label: root.hint;
+    accessible-enabled: root.enabled;
+    // The hint changes under the pointer after a click (the next step to undo).
+    changed hint => {
+        if (ta.has-hover) {
+            Tooltip.text = root.hint;
+        }
+    }
     Text {
         text: root.label;
-        color: Theme.ink2;
+        color: root.enabled ? Theme.ink2 : Theme.disabled-ink;
         font-size: 10px;
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     fs := FocusScope {
+        enabled: root.enabled;
         key-pressed(e) => {
-            if (e.text == Key.Return || e.text == " ") { root.clicked(); return accept; }
+            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
             return reject;
         }
     }
+    // Enabled even when the chip is not, so a greyed chip still says why on
+    // hover ("Nothing to undo").
     ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { fs.focus(); root.clicked(); }
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            if (root.enabled) {
+                fs.focus();
+                root.clicked();
+            }
+        }
+        changed has-hover => {
+            if (self.has-hover) {
+                Tooltip.text = root.hint;
+                Tooltip.left = root.absolute-position.x;
+                Tooltip.top = root.absolute-position.y + root.height + 4px;
+                Tooltip.shown = true;
+            } else if (Tooltip.text == root.hint) {
+                Tooltip.shown = false;
+            }
+        }
     }
+}
+
+// The one tooltip in the window. Slint has no tooltip element: a control with
+// a hint writes its text and position here while it is hovered, and
+// `TooltipLayer`, the last thing the window draws, shows it above everything.
+export global Tooltip {
+    in-out property <string> text;
+    in-out property <length> left;
+    in-out property <length> top;
+    in-out property <bool> shown;
+}
+
+// Fills the window and draws nothing but the current tooltip, kept inside the
+// window's edges. Rectangles take no input, so clicks pass straight through.
+export component TooltipLayer inherits Rectangle {
+    if Tooltip.shown && Tooltip.text != "": Rectangle {
+        x: Math.max(4px, Math.min(Tooltip.left, root.width - self.width - 4px));
+        y: Math.min(Tooltip.top, root.height - self.height - 4px);
+        width: tip.preferred-width + 16px;
+        height: tip.preferred-height + 10px;
+        background: Theme.dialog;
+        border-width: 1px;
+        border-color: Theme.line2;
+        border-radius: 5px;
+        tip := Text {
+            x: 8px;
+            y: 5px;
+            text: Tooltip.text;
+            color: Theme.ink2;
+            font-size: 11px;
+        }
+    }
+}
+
+// True while the pointer is held on something that edits the timeline or the
+// selected clip: a clip, a trim grip, a track header, the preview's transform
+// box or an inspector slider. Each sets it from its `pointer-event`; undo
+// waits for it.
+export global Gesture {
+    in-out property <bool> held;
 }
