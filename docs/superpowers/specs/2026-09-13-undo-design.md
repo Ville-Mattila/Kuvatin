@@ -315,6 +315,12 @@ built.
 - **Reusing a clip's GES name.** Restoring under the old `ClipId` depends on
   GES accepting the name of a removed clip. The first engine test settles it;
   the fallback is an old-to-new ID map inside the timeline history.
+  **Settled (Task 4): GES does not reuse the name.** `restore_clip` sets the
+  old name before the clip joins a layer, but GES hands back its own next
+  auto-generated name (`uriclipN`) regardless. `restore_clip` already returns
+  the ID under the name GES actually gave the clip; Task 7 must carry that
+  ID forward through the old-to-new map instead of assuming it equals the ID
+  that was removed.
 - **Exact writes without clamping** are correct only because steps are undone
   strictly in order, which a single linear history guarantees.
 - **GES refuses overlaps without an error.** One clip fully on top of another,

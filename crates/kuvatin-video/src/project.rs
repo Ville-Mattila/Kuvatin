@@ -1125,6 +1125,48 @@ impl Project {
         failed
     }
 
+    /// Put back a clip that was removed, as `record` describes it, asking GES
+    /// for its old name so the ID the interface and the undo history hold stays
+    /// valid. Returns the ID the clip has now. If GES will not reuse the name,
+    /// that is a different ID, and the caller must rewrite the old one.
+    pub fn restore_clip(
+        &mut self,
+        id: &ClipId,
+        record: &crate::document::ClipRecord,
+    ) -> Result<ClipId> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
+        let clip = ges::UriClip::new(&record.uri)?;
+        // A removed clip's name is free again. If GES refuses it anyway, the
+        // clip keeps the name GES gives it and the ID below says so.
+        let _ = clip.set_name(Some(id.0.as_str()));
+        clip.set_start(clock_time(record.start));
+        clip.set_inpoint(clock_time(record.inpoint));
+        clip.set_duration(clock_time(record.duration));
+        self.layer(record.track).add_clip(&clip)?;
+        self.timeline.commit();
+        let name = clip
+            .name()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
+        self.clips.insert(name.clone(), clip.clone().upcast());
+        let restored = ClipId(name);
+        self.set_clip_layout(&restored, record.layout.into());
+        self.dirty.set(true);
+        Ok(restored)
+    }
+
+    /// Whether `uri` can be opened: the check undo makes before bringing a
+    /// deleted clip back, so a file that has since been deleted is named
+    /// instead of failing later as a nameless preview error. Bounded by the
+    /// discovery timeout. A source discovered earlier in the session answers
+    /// from GES's cache, which can outlive the file.
+    pub fn source_available(&self, uri: &str) -> bool {
+        ges::UriClipAsset::request_sync(uri).is_ok()
+    }
+
     /// Number of tracks (GES layers, 0 = top) in the timeline.
     pub fn track_count(&self) -> usize {
         self.layers.len()
@@ -3004,5 +3046,68 @@ mod tests {
         assert_eq!(record_of(&project, &a), full);
         assert!(write_back(&mut project, &[(&a, &trimmed)]), "redo it");
         assert_eq!(record_of(&project, &a), trimmed);
+    }
+
+    /// The interface and the undo history both hold clip IDs. A deleted clip
+    /// that came back under a new name would orphan every one of them.
+    #[test]
+    fn undo_restores_a_deleted_clip_under_its_old_id() {
+        let (dir, png, mut project) = undo_fixture("undo-restore");
+        let a = project
+            .add_clip(&png, 0, secs(1.5), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 12,
+                posy: 34,
+                scale: 0.6,
+                alpha: 0.5,
+                volume: 1.0,
+            },
+        );
+        let before = record_of(&project, &a);
+        assert!(project.remove_clip(&a));
+        let restored = project.restore_clip(&a, &before).expect("restore");
+        assert!(
+            project.clip_track(&restored).is_some(),
+            "restored, under GES's name"
+        );
+        assert_same_record(&record_of(&project, &restored), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deleting the only clip on the bottom track prunes that track; bringing
+    /// the clip back brings the track back.
+    #[test]
+    fn undo_restores_a_clip_onto_a_track_that_was_pruned() {
+        let (dir, png, mut project) = undo_fixture("undo-restore-track");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let tracks = project.track_count();
+        let b = project
+            .add_clip(&png, tracks, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let with_b = project.track_count();
+        let before = record_of(&project, &b);
+        assert!(project.remove_clip(&b));
+        assert!(
+            project.track_count() < with_b,
+            "the empty bottom track went"
+        );
+        let restored = project.restore_clip(&b, &before).expect("restore");
+        assert_eq!(project.clip_track(&restored), Some(tracks));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_knows_a_source_that_is_not_there() {
+        let (dir, png, project) = undo_fixture("undo-source");
+        let here = gst::glib::filename_to_uri(&png, None).expect("uri");
+        let gone = gst::glib::filename_to_uri(dir.join("never-there.png"), None).expect("uri");
+        assert!(project.source_available(&here));
+        assert!(!project.source_available(&gone));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
