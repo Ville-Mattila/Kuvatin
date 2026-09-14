@@ -139,7 +139,8 @@ never merge, and nothing in Images mode merges.
 A `TimelineStep` holds:
 
 - its kind (Move, Trim, Transform, Duration, Add, Delete, Reorder tracks, Add
-  track), its label, and the clip it is about, if it is about one clip;
+  track), the clip it is about if it is about one clip, and that clip's display
+  name, which its description uses ("trim of intro.mp4");
 - for each affected clip, its record **before** and **after**, where "none"
   means the clip did not exist on that side;
 - the thumbnail of every clip that exists on only one side, so a restored row
@@ -221,9 +222,10 @@ skipped, and the user is told how many files could not come back.
 
 ## Interface
 
-- **Tooltip.** Slint has no tooltip element. A `Tooltip` global holds a text and
-  a position; a hovered control that has a `hint` writes it there with its
-  `absolute-position`, and a `TooltipLayer`, the window's last child, draws it
+- **Tooltip.** Slint has no tooltip element. A `Tooltip` global holds the text
+  and position of the one tooltip in the window. A control with a `hint` writes
+  its hint text and its own `absolute-position` into that global while it is
+  hovered, and a `TooltipLayer`, the window's last child, draws the tooltip
   above everything. The existing zoom chips get visible hints from this too.
 - **Videos mode.** Two `TimelineChip`s, "Undo" and "Redo", in the timeline
   toolbar, left of the zoom chips. Their hint ("Undo trim of intro.mp4", or
@@ -258,8 +260,9 @@ built.
 
 - **History core (pure).** Undo and redo; a new step clearing redo; the merge
   rule's three conditions against a fake clock, including a change at exactly
-  one second, which does not merge; the 200-step cap dropping the oldest; empty steps ignored; the
-  two-phase undo leaving a failed step in place; hint labels.
+  one second, which does not merge; the 200-step cap dropping the oldest; empty
+  steps ignored; the two-phase undo leaving a failed step in place; the hint
+  text.
 - **Comparing records (pure).** Changed, added and removed clips; identical
   records produce no step.
 - **Engine (real GStreamer, generated stills, like
