@@ -33,8 +33,9 @@ pub(super) struct History<S> {
     /// Oldest first, each step with the time it last changed.
     undo: VecDeque<(S, Instant)>,
     redo: Vec<S>,
-    /// Set by an undo or redo, cleared by the next non-empty record: a change
-    /// made right after an undo is a new step, never part of the one before it.
+    /// Set by an undo, a redo, [`Self::seal`], or a merge that emptied the top
+    /// step; cleared by the next non-empty record. A change made right after
+    /// an undo is a new step, never part of the one before it.
     sealed: bool,
 }
 
