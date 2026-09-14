@@ -138,12 +138,17 @@ the step beneath it.
   land are returned. A clip that did not land goes back as it was, or stays
   parked on the first free parking layer if a clip that landed took its place,
   so a refused write changes nothing else and retrying it adds no tracks.
-- **`restore_clip(id, record)`** re-adds a clip under its old `ClipId` by
-  setting the GES clip name before the clip joins a layer. If GES refuses a
-  reused name, it returns the new ID instead and the timeline history keeps an
-  old-to-new ID map (see Risks).
-- **`source_available(uri)`** answers whether a source can be opened, using
-  `UriClipAsset::request_sync`, bounded by the existing discovery timeout.
+- **`restore_clip(id, record)`** re-adds a removed clip as its record describes
+  it, under its old `ClipId`. GES names every new clip afresh, whatever it is
+  asked (see Risks), but the engine never looks clips up by GES name, so it
+  keeps the restored clip under the ID the interface and the history still
+  hold. GES never gives out a name twice in a process, so no later clip can
+  arrive under it.
+- **`source_available(uri)`** answers whether a source is still there. A file is
+  looked for on disk, because GES answers from a cache that outlives it, and
+  undo only restores sources the session has used; anything else, an image
+  sequence, is dropped from the cache and discovered again, bounded by the
+  discovery timeout.
 - **Pruning to a track count.** After an undo or redo, empty trailing layers
   beyond the step's recorded track count are removed, so undoing a move onto a
   new bottom track also removes that track.
@@ -290,8 +295,10 @@ built.
   `a_timeline_survives_being_saved_and_reopened`).**
   - Exact write-back after a slide that was clamped against a neighbour, and
     after a trim clamped at the minimum.
-  - Delete, then restore: the clip keeps its `ClipId` (this settles the ID risk
-    first) and its transform.
+  - Delete, then restore: the clip comes back exactly, transform and (for real
+    media) in-point included, under its old `ClipId`, and not twice.
+  - A source deleted after its clip was used is noticed, for a still and for an
+    image sequence.
   - A move onto a new bottom track, then undo: the track is gone again.
   - A track reorder and its undo.
   - Two clips trading places on a track, in one batch; a write the engine
@@ -312,15 +319,15 @@ built.
 
 ## Risks / open questions
 
-- **Reusing a clip's GES name.** Restoring under the old `ClipId` depends on
-  GES accepting the name of a removed clip. The first engine test settles it;
-  the fallback is an old-to-new ID map inside the timeline history.
-  **Settled (Task 4): GES does not reuse the name.** `restore_clip` sets the
-  old name before the clip joins a layer, but GES hands back its own next
-  auto-generated name (`uriclipN`) regardless. `restore_clip` already returns
-  the ID under the name GES actually gave the clip; Task 7 must carry that
-  ID forward through the old-to-new map instead of assuming it equals the ID
-  that was removed.
+- **GES names every new clip afresh.** Measured: `set_name` with a removed
+  clip's name (GES's own `uriclipN` pattern) succeeds and the clip still gets
+  the next name, before or after it joins a layer. The engine keeps a restored
+  clip under its old ID itself; the history's rename path stays as a safety
+  net and does not run.
+- **GES caches discovered sources.** A deleted file still discovers from the
+  cache, and a clip restored from it fails at preview with an error that names
+  nothing, so `source_available` looks for files on disk and rediscovers the
+  rest.
 - **Exact writes without clamping** are correct only because steps are undone
   strictly in order, which a single linear history guarantees.
 - **GES refuses overlaps without an error.** One clip fully on top of another,
