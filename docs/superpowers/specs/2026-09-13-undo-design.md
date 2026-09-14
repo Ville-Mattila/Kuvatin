@@ -237,9 +237,11 @@ skipped, and the user is told how many files could not come back.
 
 ### Lifetime and refusals
 
-- The timeline history is cleared when a project is opened. The engine is
-  created once per session, before anything can be recorded, so a new engine
-  always starts with an empty history. The Images history lasts the session.
+- The timeline history is cleared when a project is opened, and when the canvas
+  size changes: GES rescales every clip's position with the canvas, so no older
+  step's records would match the timeline. The engine is created once per
+  session, before anything can be recorded, so a new engine always starts with
+  an empty history. The Images history lasts the session.
 - Undo and redo are refused, and both buttons are disabled:
   - during an export, including while it is starting;
   - while an Images batch is running;
