@@ -89,12 +89,13 @@ used by both modes:
 
 - Two stacks, undo and redo, capped at **200 steps** per history; the oldest
   step is dropped when the cap is reached.
-- **Recording** a step: an empty step (nothing changed) is ignored. Otherwise it
-  either merges into the step on top of the undo stack (see Merging) or is
-  pushed. Recording always clears the redo stack.
+- **Recording** a step: an empty step (nothing changed) is ignored and leaves
+  the redo stack alone. Otherwise it either merges into the step on top of the
+  undo stack (see Merging) or is pushed, and the redo stack is cleared.
 - **Undo and redo are two-phase.** The caller looks at the top step, applies it,
   and only then tells the history it succeeded, which moves the step to the
-  other stack. A failed apply leaves the step where it was.
+  other stack. A failed apply leaves the step where it was, and seals the
+  history (see Merging).
 - Each step **describes** itself as a noun phrase ("trim of intro.mp4"), which
   the button hints complete: "Undo trim of intro.mp4", "Redo trim of
   intro.mp4", "Nothing to undo".
@@ -109,12 +110,19 @@ these hold:
 - both are the same kind, and that kind is **Move**, **Trim**, **Transform** or
   **Duration**;
 - both are about the same clip;
-- less than **one second** has passed since the top step last changed.
+- less than **one second** has passed since the top step last changed;
+- the history is not **sealed**. An undo, a redo or a failed apply seals it, and
+  the next change that is not empty unseals it, so a change made right after an
+  undo always starts a step of its own.
 
 The merged step keeps the older "before" and takes the newer "after", and its
 time becomes the newer one. One slider drag, one mouse drag, or a held
 Ctrl+arrow therefore becomes one step. Add, Delete, Reorder tracks and Add track
 never merge, and nothing in Images mode merges.
+
+A merged step that ends up changing nothing (a drag back to where it began) is
+removed, and that seals the history too, so the next change cannot merge into
+the step beneath it.
 
 ### Engine additions (`kuvatin-video`, `Project`)
 
@@ -258,11 +266,12 @@ built.
 
 ## Testing
 
-- **History core (pure).** Undo and redo; a new step clearing redo; the merge
-  rule's three conditions against a fake clock, including a change at exactly
-  one second, which does not merge; the 200-step cap dropping the oldest; empty
-  steps ignored; the two-phase undo leaving a failed step in place; the hint
-  text.
+- **History core (pure).** Undo and redo; a new step clearing redo, and an
+  empty one ignored without touching it; the merge rule's conditions against a
+  fake clock, including a change at exactly one second, which does not merge;
+  the seal after an undo, after an explicit seal and after a gesture that
+  merged back to nothing; the 200-step cap dropping the oldest; the two-phase
+  undo leaving a failed step in place; the hint text.
 - **Comparing records (pure).** Changed, added and removed clips; identical
   records produce no step.
 - **Engine (real GStreamer, generated stills, like
