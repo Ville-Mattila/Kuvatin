@@ -156,8 +156,9 @@ A `TimelineStep` holds:
   name, which its description uses ("trim of intro.mp4");
 - for each affected clip, its record **before** and **after**, where "none"
   means the clip did not exist on that side;
-- the thumbnail of every clip that exists on only one side, so a restored row
-  gets its picture back without decoding;
+- the timeline row of every clip that exists on only one side, so a clip that
+  comes back gets its row as it was, without decoding: its name (the engine's
+  record spells one from the URI), kind and thumbnail;
 - the timeline's track-row count before and after.
 
 **Comparing.** A pure function takes the records before and after an edit,
