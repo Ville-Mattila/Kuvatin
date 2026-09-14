@@ -126,11 +126,16 @@ the step beneath it.
 
 ### Engine additions (`kuvatin-video`, `Project`)
 
-- **`set_clip_record(id, record)`** writes a clip's start, in-point, duration,
-  track and transform exactly as given, with no clamping, because it restores a
-  state the engine already accepted. When shrinking, in-point and duration are
-  written in the order `trim_clip` uses, so in-point plus duration never
-  transiently exceeds `max-duration`.
+- **`set_clip_records(writes)`** writes clips' start, in-point, duration, track
+  and transform exactly as given, with no clamping, because it restores a state
+  the engine already accepted. GES refuses any moment where one clip sits fully
+  on top of another (see Risks), so clips that trade tracks or places would
+  collide halfway: every clip whose place or times change is first parked alone
+  on a new layer below the timeline, then set and moved to its track, and the
+  parking layers are removed. When shrinking, in-point and duration are written
+  in the order `trim_clip` uses, so in-point plus duration never transiently
+  exceeds `max-duration`. Every clip is read back, and the ones that did not
+  land are returned.
 - **`restore_clip(id, record)`** re-adds a clip under its old `ClipId` by
   setting the GES clip name before the clip joins a layer. If GES refuses a
   reused name, it returns the new ID instead and the timeline history keeps an
@@ -184,8 +189,11 @@ their own.
 1. Check `source_available` for every clip the undo brings back. If any is
    missing, change nothing, show an error naming the file, and keep the step.
 2. For each affected clip: remove it if it did not exist before; restore it if
-   it existed before but not after; otherwise write its "before" record with
-   `set_clip_record`. Removals are applied first, then restores, then writes.
+   it existed before but not after; otherwise write its "before" record.
+   Removals are applied first, then all writes at once with
+   `set_clip_records`, then restores. After the removals and writes every clip
+   is where the "before" side has it, so a restored clip never lands on one
+   that has yet to move away.
 3. Prune layers to the step's "before" track count, and set the timeline's
    track rows to that count.
 4. Update only the affected timeline rows. This is a pure function from the
@@ -282,6 +290,8 @@ built.
     first) and its transform.
   - A move onto a new bottom track, then undo: the track is gone again.
   - A track reorder and its undo.
+  - Two clips trading places on a track, in one batch; a write the engine
+    refuses is reported, not shown as done.
   - A missing source: named, and nothing changed.
 
   These join the video tests CI gates on in `.github/workflows/release.yml`.
@@ -300,6 +310,11 @@ built.
   the fallback is an old-to-new ID map inside the timeline history.
 - **Exact writes without clamping** are correct only because steps are undone
   strictly in order, which a single linear history guarantees.
+- **GES refuses overlaps without an error.** One clip fully on top of another,
+  or three clips overlapping, is refused even for a moment: measured,
+  `move_to_layer` returns an error, `set_start` returns false and leaves the
+  clip where it was, and `add_clip` fails. Writes therefore run as one parked
+  batch and are read back, and restores come after them.
 - **Merging depends on timing.** A slow drag that pauses for more than a second
   becomes more than one step. This is accepted.
 - **Memory.** A Clear step for a 1,000-file list keeps about 16 MB of
