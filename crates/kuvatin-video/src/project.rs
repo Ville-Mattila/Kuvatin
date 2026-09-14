@@ -688,7 +688,9 @@ pub struct Project {
     timeline: ges::Timeline,
     layers: Vec<ges::Layer>,
     pipeline: ges::Pipeline,
-    /// Clips by GES name, so the GUI can edit them by id (slide/trim/transform).
+    /// Clips by ID, so the GUI can edit them (slide/trim/transform). An ID is
+    /// the GES name a clip was placed under, or, for a restored clip, the ID it
+    /// had before: GES names every new clip afresh.
     clips: HashMap<String, ges::Clip>,
     /// Set by edits, cleared by `refresh_preview` — coalesces repaints.
     dirty: std::cell::Cell<bool>,
@@ -1125,10 +1127,13 @@ impl Project {
         failed
     }
 
-    /// Put back a clip that was removed, as `record` describes it, asking GES
-    /// for its old name so the ID the interface and the undo history hold stays
-    /// valid. Returns the ID the clip has now. If GES will not reuse the name,
-    /// that is a different ID, and the caller must rewrite the old one.
+    /// Put back a clip that was removed, as `record` describes it, under the
+    /// ID it had, which the interface and the undo history still hold. GES
+    /// names the new clip afresh whatever it is asked (a name in its own
+    /// `uriclipN` pattern is replaced by the next one), so the engine keeps
+    /// the old ID as its handle for the clip. GES never gives out a name twice
+    /// in a process, so no later clip can arrive under that ID. Returns `id`;
+    /// fails if a clip already has it.
     pub fn restore_clip(
         &mut self,
         id: &ClipId,
@@ -1137,34 +1142,36 @@ impl Project {
         if self.rendering.get() {
             anyhow::bail!("a render is in progress");
         }
+        if self.clips.contains_key(&id.0) {
+            anyhow::bail!("clip {} is already on the timeline", id.0);
+        }
         let clip = ges::UriClip::new(&record.uri)?;
-        // A removed clip's name is free again. If GES refuses it anyway, the
-        // clip keeps the name GES gives it and the ID below says so.
-        let _ = clip.set_name(Some(id.0.as_str()));
         clip.set_start(clock_time(record.start));
         clip.set_inpoint(clock_time(record.inpoint));
         clip.set_duration(clock_time(record.duration));
         self.layer(record.track).add_clip(&clip)?;
         self.timeline.commit();
-        let name = clip
-            .name()
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
-        self.clips.insert(name.clone(), clip.clone().upcast());
-        let restored = ClipId(name);
-        self.set_clip_layout(&restored, record.layout.into());
+        self.clips.insert(id.0.clone(), clip.upcast());
+        self.set_clip_layout(id, record.layout.into());
         self.dirty.set(true);
-        Ok(restored)
+        Ok(id.clone())
     }
 
-    /// Whether `uri` can be opened: the check undo makes before bringing a
-    /// deleted clip back, so a file that has since been deleted is named
-    /// instead of failing later as a nameless preview error. Bounded by the
-    /// discovery timeout. A source discovered earlier in the session answers
-    /// from GES's cache, which can outlive the file.
+    /// Whether the source at `uri` is there to bring back: the check undo
+    /// makes before restoring a deleted clip, so a source deleted since is
+    /// named instead of failing at preview with an error that names nothing.
+    /// Undo only restores sources this session has discovered, and GES
+    /// answers for those from its cache, which outlives the files. So a file
+    /// is looked for on disk, and anything else (an image sequence) is
+    /// discovered again, bounded by the discovery timeout.
     pub fn source_available(&self, uri: &str) -> bool {
-        ges::UriClipAsset::request_sync(uri).is_ok()
+        match crate::document::path_from_uri(uri) {
+            Some(path) => path.is_file(),
+            None => {
+                let _ = ges::Asset::needs_reload(ges::UriClip::static_type(), Some(uri));
+                ges::UriClipAsset::request_sync(uri).is_ok()
+            }
+        }
     }
 
     /// Number of tracks (GES layers, 0 = top) in the timeline.
@@ -3069,11 +3076,13 @@ mod tests {
         let before = record_of(&project, &a);
         assert!(project.remove_clip(&a));
         let restored = project.restore_clip(&a, &before).expect("restore");
-        assert!(
-            project.clip_track(&restored).is_some(),
-            "restored, under GES's name"
-        );
-        assert_same_record(&record_of(&project, &restored), &before);
+        assert_eq!(restored, a, "same ID");
+        assert_same_record(&record_of(&project, &a), &before);
+        // Somewhere free, so it is the ID that refuses it and not an overlap.
+        let mut elsewhere = before.clone();
+        elsewhere.start += 5.0;
+        assert!(project.restore_clip(&a, &elsewhere).is_err(), "not twice");
+        assert_eq!(project.clip_records().len(), 1, "one clip, under one ID");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3109,5 +3118,75 @@ mod tests {
         assert!(project.source_available(&here));
         assert!(!project.source_available(&gone));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undo only brings back a source this session has discovered, and GES
+    /// answers for that from its cache even after the file is deleted.
+    #[test]
+    fn undo_knows_a_source_deleted_since_it_was_used() {
+        let (dir, png, mut project) = undo_fixture("undo-source-deleted");
+        let uri = gst::glib::filename_to_uri(&png, None).expect("uri");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        assert!(project.remove_clip(&a));
+        std::fs::remove_file(&png).expect("delete the still");
+        assert!(!project.source_available(&uri));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same for an image sequence, which is not one file to look for; and
+    /// once its frames are back, it is available and can be added again.
+    #[test]
+    fn undo_knows_a_sequence_deleted_since_it_was_used() {
+        let dir = scratch("undo-sequence-deleted");
+        let frames: Vec<_> = (1..=3u32)
+            .map(|i| dir.join(format!("frame_{i:04}.png")))
+            .collect();
+        let write = || {
+            for f in &frames {
+                image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+                    .save(f)
+                    .expect("write a frame");
+            }
+        };
+        write();
+        let uri = crate::sequence::detect_sequence(&frames[0])
+            .expect("detect")
+            .uri()
+            .expect("uri");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        assert!(project.remove_clip(&a));
+        for f in &frames {
+            std::fs::remove_file(f).expect("delete a frame");
+        }
+        assert!(!project.source_available(&uri), "frames gone");
+        write();
+        assert!(project.source_available(&uri), "frames back");
+        project
+            .append_clip_uri(&uri, 0, None)
+            .expect("the sequence can be added again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stills have no in-point; real media does, and a restore must put it back.
+    #[test]
+    fn undo_restores_a_trimmed_clip_of_real_media() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping undo_restores_a_trimmed_clip_of_real_media: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        project.trim_clip(&a, -1, 0.5).expect("trim");
+        let before = record_of(&project, &a);
+        assert!(before.inpoint > 0.0, "the trim moved the in-point");
+        assert!(project.remove_clip(&a));
+        project.restore_clip(&a, &before).expect("restore");
+        assert_same_record(&record_of(&project, &a), &before);
     }
 }
