@@ -6,7 +6,7 @@
 
 use super::{CropMap, ThumbData};
 use crate::gui::history::Step;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A crop in absolute pixels: x, y, width, height.
@@ -106,8 +106,9 @@ impl ImageStep {
         let mut out = Outcome::default();
         match self {
             ImageStep::AddFiles { paths } => {
+                let added: HashSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+                lists.files.retain(|f| !added.contains(f.as_path()));
                 for path in paths {
-                    lists.files.retain(|f| f != path);
                     lists.crops.remove(path);
                 }
             }
@@ -135,22 +136,24 @@ impl ImageStep {
                     }
                 }
                 for (path, c) in crops {
-                    if lists.files.contains(path) {
+                    if lists.files.binary_search(path).is_ok() {
                         lists.crops.insert(path.clone(), *c);
                     }
                 }
                 for (path, t) in thumbs {
-                    if lists.files.contains(path) {
+                    if lists.files.binary_search(path).is_ok() {
                         lists.thumbs.insert(path.clone(), t.clone());
                     }
                 }
             }
             ImageStep::ApplyCrop { path, before, .. } => {
-                match before {
-                    Some(c) => lists.crops.insert(path.clone(), *c),
-                    None => lists.crops.remove(path),
-                };
-                if lists.files.contains(path) {
+                // A crop belongs to a file in the list: one that did not come
+                // back must not leave a crop behind for a later add to pick up.
+                if lists.files.binary_search(path).is_ok() {
+                    match before {
+                        Some(c) => lists.crops.insert(path.clone(), *c),
+                        None => lists.crops.remove(path),
+                    };
                     out.select = Some(path.clone());
                 }
             }
@@ -181,8 +184,8 @@ impl ImageStep {
                 lists.thumbs.clear();
             }
             ImageStep::ApplyCrop { path, after, .. } => {
-                lists.crops.insert(path.clone(), *after);
-                if lists.files.contains(path) {
+                if lists.files.binary_search(path).is_ok() {
+                    lists.crops.insert(path.clone(), *after);
                     out.select = Some(path.clone());
                 }
             }
@@ -288,16 +291,16 @@ mod tests {
     fn undoing_an_add_removes_only_the_new_files() {
         let mut s = State::new(&["a.jpg", "b.jpg", "c.jpg"]);
         let step = ImageStep::AddFiles {
-            paths: vec![p("b.jpg"), p("c.jpg")],
+            paths: vec![p("a.jpg"), p("c.jpg")],
         };
         let out = step.undo(s.lists(), &everything_exists);
-        assert_eq!(s.files, vec![p("a.jpg")]);
+        assert_eq!(s.files, vec![p("b.jpg")]);
         assert_eq!(out, Outcome::default());
         step.redo(s.lists(), &everything_exists);
         assert_eq!(
             s.files,
             vec![p("a.jpg"), p("b.jpg"), p("c.jpg")],
-            "sorted back in"
+            "sorted back in on both sides"
         );
     }
 
@@ -352,8 +355,13 @@ mod tests {
         let out = second.undo(s.lists(), &everything_exists);
         assert_eq!(s.crops.get(&p("a.jpg")), Some(&(1, 1, 1, 1)));
         assert_eq!(out.select, Some(p("a.jpg")), "the crop outline follows");
-        second.redo(s.lists(), &everything_exists);
+        let out = second.redo(s.lists(), &everything_exists);
         assert_eq!(s.crops.get(&p("a.jpg")), Some(&(2, 2, 2, 2)));
+        assert_eq!(
+            out.select,
+            Some(p("a.jpg")),
+            "a redone crop selects its file too"
+        );
     }
 
     #[test]
@@ -371,5 +379,82 @@ mod tests {
             "no crop for a file that is not in the list"
         );
         assert_eq!(out.skipped, 1);
+    }
+
+    #[test]
+    fn a_step_that_changes_something_is_not_empty() {
+        assert!(!ImageStep::AddFiles {
+            paths: vec![p("a.jpg")]
+        }
+        .is_empty());
+        assert!(!ImageStep::RemoveFile {
+            path: p("a.jpg"),
+            crop: None
+        }
+        .is_empty());
+        let clear = ImageStep::ClearList {
+            paths: vec![p("a.jpg")],
+            crops: vec![],
+            thumbs: vec![],
+        };
+        assert!(!clear.is_empty());
+        let nothing = ImageStep::ClearList {
+            paths: vec![],
+            crops: vec![],
+            thumbs: vec![],
+        };
+        assert!(nothing.is_empty(), "clearing an empty list");
+        let recrop = ImageStep::ApplyCrop {
+            path: p("a.jpg"),
+            before: Some((0, 0, 5, 5)),
+            after: (1, 1, 5, 5),
+        };
+        assert!(!recrop.is_empty(), "a crop over a different crop");
+    }
+
+    #[test]
+    fn adding_back_and_removing_back_skip_and_count_a_file_gone_from_disk() {
+        let exists = |path: &Path| !path.ends_with("gone.jpg");
+        let mut s = State::new(&["a.jpg"]);
+        let add = ImageStep::AddFiles {
+            paths: vec![p("b.jpg"), p("gone.jpg")],
+        };
+        let out = add.redo(s.lists(), &exists);
+        assert_eq!(s.files, vec![p("a.jpg"), p("b.jpg")]);
+        assert_eq!(out.skipped, 1);
+        let mut s = State::new(&["a.jpg"]);
+        let remove = ImageStep::RemoveFile {
+            path: p("gone.jpg"),
+            crop: Some((1, 1, 1, 1)),
+        };
+        let out = remove.undo(s.lists(), &exists);
+        assert_eq!(s.files, vec![p("a.jpg")]);
+        assert!(
+            s.crops.is_empty(),
+            "no crop for a file that did not come back"
+        );
+        assert_eq!(
+            out,
+            Outcome {
+                skipped: 1,
+                select: None
+            }
+        );
+    }
+
+    /// A crop belongs to a file in the list: undoing or redoing one for a file
+    /// that is not there leaves no crop behind for a later add to pick up.
+    #[test]
+    fn a_crop_for_a_file_not_in_the_list_is_not_written() {
+        let mut s = State::new(&[]);
+        let crop = ImageStep::ApplyCrop {
+            path: p("a.jpg"),
+            before: Some((1, 1, 1, 1)),
+            after: (2, 2, 2, 2),
+        };
+        let out = crop.undo(s.lists(), &everything_exists);
+        assert!(s.crops.is_empty() && out.select.is_none(), "undo");
+        let out = crop.redo(s.lists(), &everything_exists);
+        assert!(s.crops.is_empty() && out.select.is_none(), "redo");
     }
 }
