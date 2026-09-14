@@ -300,7 +300,9 @@ built.
     media) in-point included, under its old `ClipId`, and not twice.
   - A source deleted after its clip was used is noticed, for a still and for an
     image sequence.
-  - A move onto a new bottom track, then undo: the track is gone again.
+  - A move onto a new bottom track, then undo: the track is gone again; several
+    empty bottom tracks go down to a count, never past a clip or below one
+    track, and GES drops the same layers the engine does.
   - A track reorder and its undo.
   - Two clips trading places on a track, in one batch; a write the engine
     refuses is reported and put back, however often it is retried; a clip that
