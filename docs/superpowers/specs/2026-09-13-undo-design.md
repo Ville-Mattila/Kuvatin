@@ -135,7 +135,9 @@ the step beneath it.
   parking layers are removed. When shrinking, in-point and duration are written
   in the order `trim_clip` uses, so in-point plus duration never transiently
   exceeds `max-duration`. Every clip is read back, and the ones that did not
-  land are returned.
+  land are returned. A clip that did not land goes back as it was, or stays
+  parked on the first free parking layer if a clip that landed took its place,
+  so a refused write changes nothing else and retrying it adds no tracks.
 - **`restore_clip(id, record)`** re-adds a clip under its old `ClipId` by
   setting the GES clip name before the clip joins a layer. If GES refuses a
   reused name, it returns the new ID instead and the timeline history keeps an
@@ -293,7 +295,10 @@ built.
   - A move onto a new bottom track, then undo: the track is gone again.
   - A track reorder and its undo.
   - Two clips trading places on a track, in one batch; a write the engine
-    refuses is reported, not shown as done.
+    refuses is reported and put back, however often it is retried; a clip that
+    can go neither way stays parked on one track.
+  - A left trim of real media undone and redone, which pins the order of
+    in-point and duration (advisory, like the other live-media tests).
   - A missing source: named, and nothing changed.
 
   These join the video tests CI gates on in `.github/workflows/release.yml`.
