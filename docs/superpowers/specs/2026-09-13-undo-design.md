@@ -209,7 +209,8 @@ their own.
 
 If the engine refuses a write partway through, show the error, rebuild the
 affected rows from `clip_records()` so the screen matches the engine, and keep
-the step.
+the step. Retrying it skips the clips its earlier try already brought back, so
+none comes back twice.
 
 ### Images steps (app crate)
 
