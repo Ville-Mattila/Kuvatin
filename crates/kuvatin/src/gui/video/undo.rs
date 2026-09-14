@@ -203,8 +203,12 @@ pub(super) enum Write {
 }
 
 /// The engine operations that take the timeline to one side of `step`, in the
-/// order they must run: removals, then restores, then writes. Removing first
-/// frees the places and names the restored clips come back into.
+/// order they must run: removals, then writes, then restores. Removing first
+/// frees the places and names the restored clips come back into; writing next
+/// moves every remaining clip to where that side has it, so a restored clip
+/// never lands on one that has yet to move away. The writes run as one batch
+/// (`Project::set_clip_records`), because GES refuses a clip on top of another
+/// even for a moment.
 pub(super) fn plan(step: &TimelineStep, dir: Direction) -> Vec<Write> {
     let (mut removes, mut restores, mut sets) = (Vec::new(), Vec::new(), Vec::new());
     for change in &step.changes {
@@ -221,7 +225,7 @@ pub(super) fn plan(step: &TimelineStep, dir: Direction) -> Vec<Write> {
             (None, None) => {}
         }
     }
-    removes.into_iter().chain(restores).chain(sets).collect()
+    removes.into_iter().chain(sets).chain(restores).collect()
 }
 
 /// How many track rows the timeline shows on the `dir` side of `step`.
@@ -470,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_removes_then_restores_then_writes() {
+    fn undo_removes_then_writes_then_restores() {
         let before = cap(&[("a", rec(0, 0.0, 2.0)), ("b", rec(1, 0.0, 2.0))], 2);
         let after = cap(&[("a", rec(0, 1.0, 2.0)), ("c", rec(1, 4.0, 1.0))], 2);
         let s = step(StepKind::Move, "a", &before, &after);
@@ -478,8 +482,8 @@ mod tests {
             plan(&s, Direction::Undo),
             vec![
                 Write::Remove("c".into()),
-                Write::Restore("b".into(), rec(1, 0.0, 2.0)),
                 Write::Set("a".into(), rec(0, 0.0, 2.0)),
+                Write::Restore("b".into(), rec(1, 0.0, 2.0)),
             ]
         );
         assert_eq!(target_tracks(&s, Direction::Undo), 2);
