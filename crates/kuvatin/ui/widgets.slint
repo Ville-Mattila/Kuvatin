@@ -130,7 +130,7 @@ export component SecondaryButton inherits Rectangle {
     fs := FocusScope {
         enabled: root.enabled;
         key-pressed(e) => {
-            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
+            if (e.text == Key.Return || e.text == " ") { if (root.enabled) { root.clicked(); } return accept; }
             return reject;
         }
     }
@@ -671,7 +671,7 @@ export component TimelineChip inherits Rectangle {
     fs := FocusScope {
         enabled: root.enabled;
         key-pressed(e) => {
-            if (root.enabled && (e.text == Key.Return || e.text == " ")) { root.clicked(); return accept; }
+            if (e.text == Key.Return || e.text == " ") { if (root.enabled) { root.clicked(); } return accept; }
             return reject;
         }
     }

@@ -754,6 +754,20 @@ export component AppWindow inherits Window {
                                 clicked => { root.clear-files(); }
                             }
                             Rectangle { horizontal-stretch: 1; }
+                            SecondaryButton {
+                                text: "Undo";
+                                min-width: 72px;
+                                hint: root.image-undo-hint;
+                                enabled: root.image-can-undo && !root.running && !root.modal-open();
+                                clicked => { root.image-undo(); }
+                            }
+                            SecondaryButton {
+                                text: "Redo";
+                                min-width: 72px;
+                                hint: root.image-redo-hint;
+                                enabled: root.image-can-redo && !root.running && !root.modal-open();
+                                clicked => { root.image-redo(); }
+                            }
                         }
                     }
                 }

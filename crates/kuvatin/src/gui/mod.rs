@@ -132,6 +132,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     ui.on_reveal_path(|p| reveal_in_explorer(Path::new(p.as_str())));
     updates::wire(&ui);
     image_mode::wire(&ui, &image, &store);
+    image_mode::wire_history(&ui, &image);
 
     // Videos mode: the GES project + timeline models, the media import queue
     // (worker thread + drain timer) and the export state. Created before the
@@ -141,21 +142,14 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let export = ExportState::default();
 
     #[cfg(windows)]
-    let (files, rows, crops, thumbs) = (&image.files, &image.rows, &image.crops, &image.thumbs);
-    #[cfg(windows)]
     let import_q = &import.q;
-    #[cfg(windows)]
-    let add_paths = image_mode::add_paths;
     // Windows Explorer drag-and-drop: enable WM_DROPFILES on the native window
     // and drain dropped paths into the right pipeline (images → file list,
     // videos → timeline). The native HWND is only available after the window is
     // shown, so we wire it up from a single-shot timer once the loop is running.
     #[cfg(windows)]
     {
-        let files = files.clone();
-        let rows = rows.clone();
-        let crops = crops.clone();
-        let thumbs = thumbs.clone();
+        let mut add_dropped = image.adder(&ui);
         let ui_weak = ui.as_weak();
         let setup_weak = ui.as_weak();
         let setup_timer = slint::Timer::default();
@@ -195,7 +189,7 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
                     // Ignore image drops while a batch is running — adding rows
                     // would desync the progress callback's snapshot indices.
                     if !ui.get_running() {
-                        add_paths(dropped, &files, &rows, &crops, &thumbs, &ui_weak);
+                        add_dropped(dropped);
                     }
                 }
             },

@@ -20,6 +20,15 @@ use std::sync::{Arc, Mutex};
 
 mod history;
 
+use crate::gui::history::History;
+use history::{ImageStep, Lists};
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::time::Instant;
+
+/// Images mode's undo history.
+type ImageHistory = Rc<RefCell<History<ImageStep>>>;
+
 /// How long a selection must stand before its preview is decoded. Long enough
 /// to swallow a key repeat (a held arrow fires every ~30 ms), short enough that
 /// a deliberate click feels immediate — the row highlights at once either way.
@@ -46,6 +55,8 @@ pub(super) struct ImageState {
     /// before every file, so a cancel stops the queue without killing the file
     /// being written at that moment.
     pub(super) cancel: Arc<AtomicBool>,
+    /// Undo and redo for the list and crops. Private: its step type is.
+    history: ImageHistory,
 }
 
 impl ImageState {
@@ -74,7 +85,20 @@ impl ImageState {
             rows,
             edit: Arc::new(Mutex::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
+            history: Rc::new(RefCell::new(History::new())),
         }
+    }
+
+    /// The drag-and-drop route into the list: the same add as the Add files
+    /// button, recorded the same way.
+    pub(super) fn adder(&self, ui: &AppWindow) -> impl FnMut(Vec<PathBuf>) + 'static {
+        let files = self.files.clone();
+        let rows = self.rows.clone();
+        let crops = self.crops.clone();
+        let thumbs = self.thumbs.clone();
+        let history = self.history.clone();
+        let ui_weak = ui.as_weak();
+        move |picked| add_and_record(picked, &files, &rows, &crops, &thumbs, &history, &ui_weak)
     }
 }
 
@@ -87,6 +111,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         rows,
         edit,
         cancel,
+        history,
     } = st;
     {
         let files = files.clone();
@@ -94,6 +119,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         let crops = crops.clone();
         let thumbs = thumbs.clone();
         let ui_weak = ui.as_weak();
+        let history = history.clone();
         ui.on_add_files(move || {
             // Don't let the list change under a running batch: the progress
             // callback addresses model rows by their snapshot index.
@@ -104,7 +130,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
                 .add_filter("Images", kuvatin_core::format::INPUT_EXTENSIONS)
                 .pick_files()
             {
-                add_paths(picked, &files, &rows, &crops, &thumbs, &ui_weak);
+                add_and_record(picked, &files, &rows, &crops, &thumbs, &history, &ui_weak);
             }
         });
     }
@@ -115,6 +141,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         let thumbs = thumbs.clone();
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
+        let history = history.clone();
         ui.on_clear_files(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -125,8 +152,23 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             let mut guard = files.lock().unwrap();
             let old = std::mem::take(&mut *guard);
             let mut crops_guard = crops.lock().unwrap();
-            crops_guard.clear();
-            thumbs.lock().unwrap().clear();
+            // Kept in the step, so an undo brings the list back without decoding.
+            let kept_crops: Vec<(PathBuf, history::Crop)> = crops_guard.drain().collect();
+            let kept_thumbs: Vec<(PathBuf, ThumbData)> = thumbs
+                .lock()
+                .unwrap()
+                .drain()
+                .filter(|(p, _)| old.binary_search(p).is_ok())
+                .collect();
+            record_step(
+                &history,
+                ImageStep::ClearList {
+                    paths: old.clone(),
+                    crops: kept_crops,
+                    thumbs: kept_thumbs,
+                },
+                &ui_weak,
+            );
             sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
             drop(crops_guard);
             ui.set_selected_index(-1);
@@ -145,6 +187,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         let thumbs = thumbs.clone();
         let edit = edit.clone();
         let ui_weak = ui.as_weak();
+        let history = history.clone();
         ui.on_remove_file(move |i| {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -159,7 +202,15 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             let old = guard.clone();
             let removed = guard.remove(i as usize);
             let mut crops_guard = crops.lock().unwrap();
-            crops_guard.remove(&removed);
+            let crop = crops_guard.remove(&removed);
+            record_step(
+                &history,
+                ImageStep::RemoveFile {
+                    path: removed,
+                    crop,
+                },
+                &ui_weak,
+            );
             sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
             drop(crops_guard);
             drop(guard);
@@ -299,6 +350,7 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
         let edit = edit.clone();
         let files = files.clone();
         let ui_weak = ui.as_weak();
+        let history = history.clone();
         ui.on_apply_crop(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -322,7 +374,17 @@ pub(super) fn wire(ui: &AppWindow, st: &ImageState, store: &Arc<Mutex<PresetStor
             w = w.min(ow - x).max(1);
             h = h.min(oh - y).max(1);
 
-            crops.lock().unwrap().insert(path.clone(), (x, y, w, h));
+            // insert hands back the crop it replaced: exactly what undo needs.
+            let before = crops.lock().unwrap().insert(path.clone(), (x, y, w, h));
+            record_step(
+                &history,
+                ImageStep::ApplyCrop {
+                    path: path.clone(),
+                    before,
+                    after: (x, y, w, h),
+                },
+                &ui_weak,
+            );
 
             // Mark the row (path-matched via the files list) as cropped.
             if let Some(i) = files.lock().unwrap().iter().position(|p| *p == path) {
@@ -792,6 +854,156 @@ pub(super) fn add_paths(
     drop(guard);
     if !missing.is_empty() {
         spawn_thumbnails(ui_weak.clone(), files.clone(), thumbs.clone(), missing);
+    }
+}
+
+/// [`add_paths`], recorded as one step for the files that were actually new.
+fn add_and_record(
+    picked: Vec<PathBuf>,
+    files: &Arc<Mutex<Vec<PathBuf>>>,
+    rows: &Rc<VecModel<FileRow>>,
+    crops: &Arc<Mutex<CropMap>>,
+    thumbs: &ThumbCache,
+    history: &ImageHistory,
+    ui_weak: &slint::Weak<AppWindow>,
+) {
+    let before: HashSet<PathBuf> = files.lock().unwrap().iter().cloned().collect();
+    add_paths(picked, files, rows, crops, thumbs, ui_weak);
+    let paths: Vec<PathBuf> = files
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| !before.contains(*p))
+        .cloned()
+        .collect();
+    record_step(history, ImageStep::AddFiles { paths }, ui_weak);
+}
+
+fn record_step(history: &ImageHistory, step: ImageStep, ui_weak: &slint::Weak<AppWindow>) {
+    let mut h = history.borrow_mut();
+    h.record(step, Instant::now());
+    if let Some(ui) = ui_weak.upgrade() {
+        refresh_undo(&ui, &h);
+    }
+}
+
+/// Mirror the history into the Images mode Undo and Redo buttons.
+fn refresh_undo(ui: &AppWindow, history: &History<ImageStep>) {
+    ui.set_image_can_undo(history.can_undo());
+    ui.set_image_can_redo(history.can_redo());
+    ui.set_image_undo_hint(history.undo_hint().into());
+    ui.set_image_redo_hint(history.redo_hint().into());
+}
+
+/// Wire Images mode's Undo and Redo (the buttons and the keys both arrive as
+/// `image-undo` and `image-redo`).
+pub(super) fn wire_history(ui: &AppWindow, st: &ImageState) {
+    for redo in [false, true] {
+        let files = st.files.clone();
+        let rows = st.rows.clone();
+        let crops = st.crops.clone();
+        let thumbs = st.thumbs.clone();
+        let edit = st.edit.clone();
+        let history = st.history.clone();
+        let ui_weak = ui.as_weak();
+        let run = move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            // The rule Clear and remove already follow: the list must not
+            // change under a running batch.
+            if ui.get_running() {
+                return;
+            }
+            let mut guard = files.lock().unwrap();
+            let old = guard.clone();
+            let selected = usize::try_from(ui.get_selected_index())
+                .ok()
+                .and_then(|i| old.get(i).cloned());
+            let outcome = {
+                let h = history.borrow();
+                let step = if redo { h.peek_redo() } else { h.peek_undo() };
+                let Some(step) = step else {
+                    return;
+                };
+                let mut crops_guard = crops.lock().unwrap();
+                let mut thumbs_guard = thumbs.lock().unwrap();
+                let lists = Lists {
+                    files: &mut guard,
+                    crops: &mut crops_guard,
+                    thumbs: &mut thumbs_guard,
+                };
+                let exists = |p: &Path| p.exists();
+                if redo {
+                    step.redo(lists, &exists)
+                } else {
+                    step.undo(lists, &exists)
+                }
+            };
+            {
+                let crops_guard = crops.lock().unwrap();
+                sync_rows(&rows, &old, &guard, &crops_guard, &thumbs);
+            }
+            let now = guard.clone();
+            drop(guard);
+            // Files that came back without a cached thumbnail get one decoded;
+            // files already in the list are decoding or unreadable already.
+            let missing: Vec<PathBuf> = {
+                let cache = thumbs.lock().unwrap();
+                now.iter()
+                    .filter(|p| old.binary_search(*p).is_err() && !cache.contains_key(*p))
+                    .cloned()
+                    .collect()
+            };
+            if !missing.is_empty() {
+                spawn_thumbnails(ui.as_weak(), files.clone(), thumbs.clone(), missing);
+            }
+            {
+                let mut h = history.borrow_mut();
+                if redo {
+                    h.commit_redo(Instant::now());
+                } else {
+                    h.commit_undo();
+                }
+                refresh_undo(&ui, &h);
+            }
+            let index_of = |path: &PathBuf| now.iter().position(|f| f == path).map(|i| i as i32);
+            match (
+                outcome.select.as_ref().and_then(&index_of),
+                selected.as_ref().and_then(&index_of),
+            ) {
+                // The step's own file: selecting it again also redraws its crop.
+                (Some(i), _) => ui.invoke_select_file(i),
+                // The selected file is still there, perhaps on another row.
+                (None, Some(i)) => ui.set_selected_index(i),
+                (None, None) => {
+                    ui.set_selected_index(-1);
+                    ui.set_viewer_image(Image::default());
+                    ui.set_cropping(false);
+                    *edit.lock().unwrap() = None;
+                }
+            }
+            if outcome.skipped > 0 {
+                show_info(
+                    &ui,
+                    "Some files did not come back",
+                    format!(
+                        "{} could not be restored because {} no longer on disk.",
+                        history::files_phrase(outcome.skipped),
+                        if outcome.skipped == 1 {
+                            "it is"
+                        } else {
+                            "they are"
+                        }
+                    ),
+                );
+            }
+        };
+        if redo {
+            ui.on_image_redo(run);
+        } else {
+            ui.on_image_undo(run);
+        }
     }
 }
 
