@@ -6,6 +6,7 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod undo;
 
 use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
 use export::ExportState;

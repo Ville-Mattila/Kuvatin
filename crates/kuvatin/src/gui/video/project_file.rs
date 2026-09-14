@@ -324,7 +324,7 @@ fn spawn_thumbnails(
 }
 
 /// What a saved URI is, for the clip's colour on the timeline.
-fn kind_of(uri: &str) -> ClipKind {
+pub(super) fn kind_of(uri: &str) -> ClipKind {
     if uri.starts_with("imagesequence://") {
         return ClipKind::Sequence;
     }
