@@ -15,6 +15,26 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **Undo and redo.** Ctrl+Z takes back the last change and Ctrl+Y or
+  Ctrl+Shift+Z puts it back, and both modes have Undo and Redo buttons that
+  name the step on hover. On the video timeline that is every edit: moving,
+  trimming and transforming a clip, setting a still's duration, adding and
+  deleting clips, and reordering or adding tracks. A slider drag or a held
+  arrow key is one step, and a deleted clip comes back where it was, with its
+  transform and thumbnail. In Images mode it is adding and removing files,
+  clearing the list and applying a crop. A file deleted from disk in the
+  meantime is not brought back, and undo says so. Opening a project clears the
+  timeline's history, and so does changing the canvas size, since every
+  clip's position changes with it.
+- The timeline's zoom controls say what they do on hover.
+
+### Fixed
+- Opening the crop editor and leaving it without moving the rectangle no
+  longer marks the file as cropped.
+- A crop can no longer land on a file that was removed from the list while
+  its preview was still loading.
+
 ## [2.11.0] - 2026-09-13
 A smaller release, mostly about images. WebP can now be lossless, for the
 screenshots and logos where the lossy encoder smears hard edges and saves

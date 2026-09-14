@@ -325,6 +325,40 @@ fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     }
 }
 
+/// Seconds as a record stores them, back to the nanoseconds they came from.
+/// Exact for any timeline shorter than about 26 days.
+fn clock_time(secs: f64) -> gst::ClockTime {
+    gst::ClockTime::from_nseconds((secs.max(0.0) * 1e9).round() as u64)
+}
+
+/// Whether a clip already sits where `record` puts it: its times to the
+/// nanosecond, and its track.
+fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> bool {
+    clip.start() == clock_time(record.start)
+        && clip.inpoint() == clock_time(record.inpoint)
+        && clip.duration() == clock_time(record.duration)
+        && clip.layer().map(|l| l.priority() as usize) == Some(record.track)
+}
+
+/// Set a clip's times, the shrinking one of in-point and duration first (the
+/// order `trim_clip` uses), so in-point plus duration never passes the
+/// source's max-duration on the way, which GES refuses.
+fn set_clip_times(
+    clip: &ges::Clip,
+    start: gst::ClockTime,
+    inpoint: gst::ClockTime,
+    duration: gst::ClockTime,
+) {
+    if duration <= clip.duration() {
+        clip.set_duration(duration);
+        clip.set_inpoint(inpoint);
+    } else {
+        clip.set_inpoint(inpoint);
+        clip.set_duration(duration);
+    }
+    clip.set_start(start);
+}
+
 /// Where a two-step pipeline operation has got to. `Pending` means the state
 /// change is still running; the caller should look again on its next tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,7 +688,9 @@ pub struct Project {
     timeline: ges::Timeline,
     layers: Vec<ges::Layer>,
     pipeline: ges::Pipeline,
-    /// Clips by GES name, so the GUI can edit them by id (slide/trim/transform).
+    /// Clips by ID, so the GUI can edit them (slide/trim/transform). An ID is
+    /// the GES name a clip was placed under, or, for a restored clip, the ID it
+    /// had before: GES names every new clip afresh.
     clips: HashMap<String, ges::Clip>,
     /// Set by edits, cleared by `refresh_preview` — coalesces repaints.
     dirty: std::cell::Cell<bool>,
@@ -953,7 +989,7 @@ impl Project {
             let new_inp = gst::ClockTime::from_nseconds(ni as u64);
             let new_dur = gst::ClockTime::from_nseconds(nd as u64);
             // Apply the shrinking property first so inpoint + duration never
-            // transiently exceeds max-duration (which GES would clamp).
+            // transiently exceeds max-duration (which GES refuses).
             if nd <= dur {
                 clip.set_duration(new_dur);
                 clip.set_inpoint(new_inp);
@@ -981,6 +1017,187 @@ impl Project {
         }
         let current = self.clips.get(&id.0)?.duration().nseconds() as f64 / 1e9;
         self.trim_clip(id, 1, secs - current)
+    }
+
+    /// Write clips' start, in-point, duration, track and transform exactly as
+    /// their records give them. Nothing is clamped: this puts back a state the
+    /// engine already accepted, which is what undo needs — a slide or trim
+    /// replayed in reverse would be clamped again and land somewhere else.
+    ///
+    /// GES refuses, without an error, any moment where one clip sits fully on
+    /// top of another, even when the end state is fine, so clips that trade
+    /// tracks or places would collide halfway. Every clip whose place or times
+    /// change is therefore parked alone on a new layer below the timeline
+    /// first, then set and moved to its track, and the parking layers are
+    /// removed. Every clip is read back. One that did not land goes back as it
+    /// was or, if a clip that landed has taken its place, stays parked on the
+    /// first free parking layer: a refused write changes nothing else, and
+    /// trying it again adds no tracks.
+    ///
+    /// Returns the IDs of the clips that did not land where their record says
+    /// (unknown clips included): empty when every write landed. Each ID may
+    /// appear at most once. While rendering, nothing is written and every ID is
+    /// returned.
+    pub fn set_clip_records(
+        &mut self,
+        writes: &[(ClipId, crate::document::ClipRecord)],
+    ) -> Vec<ClipId> {
+        if self.rendering.get() {
+            return writes.iter().map(|(id, _)| id.clone()).collect();
+        }
+        let mut failed = Vec::new();
+        let mut found = Vec::with_capacity(writes.len());
+        for (id, record) in writes {
+            match self.clips.get(&id.0) {
+                Some(clip) => found.push((id, record, clip.clone())),
+                None => failed.push(id.clone()),
+            }
+        }
+        // Parking layers go below every track a record names, so none of them
+        // is also a destination.
+        let parking = found
+            .iter()
+            .map(|(_, record, _)| record.track + 1)
+            .fold(self.layers.len(), usize::max);
+        let moving: Vec<_> = found
+            .iter()
+            .filter(|(_, record, clip)| !clip_placed_as(clip, record))
+            .collect();
+        // Where each moving clip was, so one that cannot land can go back.
+        let origins: Vec<_> = moving
+            .iter()
+            .map(|(_, _, clip)| (clip.layer(), clip.start(), clip.inpoint(), clip.duration()))
+            .collect();
+        for (k, (_, _, clip)) in moving.iter().enumerate() {
+            let layer = self.layer(parking + k);
+            // If parking fails, the writes below are still tried and the
+            // read-back reports the clip.
+            let _ = clip.move_to_layer(&layer);
+        }
+        for (_, record, clip) in &moving {
+            set_clip_times(
+                clip,
+                clock_time(record.start),
+                clock_time(record.inpoint),
+                clock_time(record.duration),
+            );
+            let target = self.layer(record.track);
+            let _ = clip.move_to_layer(&target);
+        }
+        for (id, record, clip) in &found {
+            if !clip_placed_as(clip, record) {
+                failed.push((*id).clone());
+            }
+        }
+        // A clip that did not land goes back as it was. If a clip that did
+        // land has taken its old place, it stays parked, packed onto the first
+        // parking layers so no empty track is left above it.
+        let mut stuck = 0;
+        for (k, ((_, record, clip), (layer, start, inpoint, duration))) in
+            moving.iter().zip(origins).enumerate()
+        {
+            if clip_placed_as(clip, record) {
+                continue;
+            }
+            let _ = clip.move_to_layer(&self.layers[parking + k]);
+            set_clip_times(clip, start, inpoint, duration);
+            if layer.is_some_and(|l| clip.move_to_layer(&l).is_ok()) {
+                continue;
+            }
+            let _ = clip.move_to_layer(&self.layers[parking + stuck]);
+            stuck += 1;
+        }
+        // Empty again, unless a clip could not go back to its place.
+        while self.layers.len() > parking {
+            if self.layers.last().is_some_and(|l| !l.clips().is_empty()) {
+                break;
+            }
+            if let Some(last) = self.layers.pop() {
+                let _ = self.timeline.remove_layer(&last);
+            }
+        }
+        // A refused clip is back as it was, transform included.
+        for (id, record, _) in found.iter().filter(|(id, _, _)| !failed.contains(*id)) {
+            self.set_clip_layout(id, record.layout.into());
+        }
+        if !found.is_empty() {
+            self.timeline.commit();
+            self.dirty.set(true);
+        }
+        failed
+    }
+
+    /// Put back a clip that was removed, as `record` describes it, under the
+    /// ID it had, which the interface and the undo history still hold. GES
+    /// replaces a name in its own `uriclipN` pattern with its next one, so a
+    /// removed clip's name cannot be asked back; the engine keeps the old ID
+    /// as its handle for the clip instead. GES never gives out a name twice in
+    /// a process, so no later clip can arrive under that ID. Returns `id`;
+    /// fails if a clip already has it.
+    pub fn restore_clip(
+        &mut self,
+        id: &ClipId,
+        record: &crate::document::ClipRecord,
+    ) -> Result<ClipId> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
+        if self.clips.contains_key(&id.0) {
+            anyhow::bail!("clip {} is already on the timeline", id.0);
+        }
+        let clip = ges::UriClip::new(&record.uri)?;
+        clip.set_start(clock_time(record.start));
+        clip.set_inpoint(clock_time(record.inpoint));
+        clip.set_duration(clock_time(record.duration));
+        self.layer(record.track).add_clip(&clip)?;
+        self.timeline.commit();
+        self.clips.insert(id.0.clone(), clip.upcast());
+        self.set_clip_layout(id, record.layout.into());
+        self.dirty.set(true);
+        Ok(id.clone())
+    }
+
+    /// Whether the source at `uri` is there to bring back: the check undo
+    /// makes before restoring a deleted clip, so a source deleted since is
+    /// named instead of failing at preview with an error that names nothing.
+    /// Undo only restores sources this session has discovered, and GES
+    /// answers for those from its cache, which outlives the files. So a file
+    /// is looked for on disk, and anything else (an image sequence) is
+    /// discovered again, bounded by the discovery timeout.
+    pub fn source_available(&self, uri: &str) -> bool {
+        match crate::document::path_from_uri(uri) {
+            Some(path) => path.is_file(),
+            None => {
+                let _ = ges::Asset::needs_reload(ges::UriClip::static_type(), Some(uri));
+                ges::UriClipAsset::request_sync(uri).is_ok()
+            }
+        }
+    }
+
+    /// Remove empty tracks from the bottom while more than `keep` remain,
+    /// stopping at the first track with a clip on it (an empty track above a
+    /// clip stays, so no clip changes track) and never going below one. Does
+    /// nothing while rendering. Undo and redo call this with the track count
+    /// of the side they go to, so undoing a move onto a new bottom track takes
+    /// that track away again.
+    pub fn prune_tracks(&mut self, keep: usize) {
+        if self.rendering.get() {
+            return;
+        }
+        let mut changed = false;
+        while self.layers.len() > keep.max(1) {
+            if !self.layers[self.layers.len() - 1].clips().is_empty() {
+                break;
+            }
+            if let Some(last) = self.layers.pop() {
+                let _ = self.timeline.remove_layer(&last);
+                changed = true;
+            }
+        }
+        if changed {
+            self.timeline.commit();
+            self.dirty.set(true);
+        }
     }
 
     /// Number of tracks (GES layers, 0 = top) in the timeline.
@@ -2631,5 +2848,453 @@ mod tests {
             );
             project.refresh_preview();
         }
+    }
+
+    /// A still image for the undo tests, and a project to put it in.
+    fn undo_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, Project) {
+        let dir = scratch(tag);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(120, 90, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("write still");
+        (dir, png, Project::new(|_f| {}).expect("project"))
+    }
+
+    fn record_of(project: &Project, id: &ClipId) -> crate::document::ClipRecord {
+        project
+            .clip_records()
+            .into_iter()
+            .find(|(i, _)| i == id)
+            .map(|(_, r)| r)
+            .expect("the clip is on the timeline")
+    }
+
+    /// Exactly: undo compares records with `==`, so a clip written back must
+    /// read back identical, transform included.
+    fn assert_same_record(a: &crate::document::ClipRecord, b: &crate::document::ClipRecord) {
+        assert_eq!(a, b);
+    }
+
+    fn secs(n: f64) -> Duration {
+        Duration::from_secs_f64(n)
+    }
+
+    /// Write records back through the batch, as undo does; true if all landed.
+    fn write_back(
+        project: &mut Project,
+        writes: &[(&ClipId, &crate::document::ClipRecord)],
+    ) -> bool {
+        let owned: Vec<(ClipId, crate::document::ClipRecord)> = writes
+            .iter()
+            .map(|(id, record)| ((*id).clone(), (*record).clone()))
+            .collect();
+        project.set_clip_records(&owned).is_empty()
+    }
+
+    /// The slide was clamped against a neighbour; reversing the amount would
+    /// not put the clip back, writing the old record does.
+    #[test]
+    fn undo_writes_a_clamped_slide_back_exactly() {
+        let (dir, png, mut project) = undo_fixture("undo-slide");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 0, secs(3.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let before = record_of(&project, &b);
+        let geom = project.slide_clip(&b, -10.0).expect("slide");
+        assert_eq!(geom.start, secs(2.0), "stopped against a");
+        assert!(write_back(&mut project, &[(&b, &before)]));
+        assert_same_record(&record_of(&project, &b), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_writes_a_clamped_trim_back_exactly() {
+        let (dir, png, mut project) = undo_fixture("undo-trim");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let before = record_of(&project, &a);
+        let geom = project.trim_clip(&a, 1, -10.0).expect("trim");
+        assert!(geom.duration < secs(1.0), "clamped at the minimum");
+        assert!(write_back(&mut project, &[(&a, &before)]));
+        assert_same_record(&record_of(&project, &a), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_writes_a_track_and_a_transform_back() {
+        let (dir, png, mut project) = undo_fixture("undo-move");
+        let a = project
+            .add_clip(&png, 0, secs(1.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 40,
+                posy: -20,
+                scale: 0.5,
+                alpha: 0.75,
+                volume: 1.0,
+            },
+        );
+        let before = record_of(&project, &a);
+        project.move_clip_to_track(&a, 1).expect("move");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 0,
+                posy: 0,
+                scale: 1.0,
+                alpha: 1.0,
+                volume: 1.0,
+            },
+        );
+        assert!(write_back(&mut project, &[(&a, &before)]));
+        assert_same_record(&record_of(&project, &a), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reorder moves layers, not clips; writing each clip's record puts
+    /// every clip back on its old track. The two clips trade layers at the
+    /// same time, which GES refuses one write at a time.
+    #[test]
+    fn undo_puts_clips_back_after_a_track_reorder() {
+        let (dir, png, mut project) = undo_fixture("undo-reorder");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let (ra, rb) = (record_of(&project, &a), record_of(&project, &b));
+        project.move_track(0, 1);
+        assert_eq!(project.clip_track(&a), Some(1), "the reorder moved a");
+        assert!(write_back(&mut project, &[(&a, &ra), (&b, &rb)]));
+        assert_same_record(&record_of(&project, &a), &ra);
+        assert_same_record(&record_of(&project, &b), &rb);
+        assert_eq!(project.track_count(), 2, "no parking layer is left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_lets_two_clips_trade_places_on_a_track() {
+        let (dir, png, mut project) = undo_fixture("undo-trade");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let mut to_a = record_of(&project, &a);
+        let mut to_b = record_of(&project, &b);
+        to_a.start = 2.0;
+        to_b.start = 0.0;
+        assert!(write_back(&mut project, &[(&a, &to_a), (&b, &to_b)]));
+        assert_same_record(&record_of(&project, &a), &to_a);
+        assert_same_record(&record_of(&project, &b), &to_b);
+        assert_eq!(project.track_count(), 1, "no parking layer is left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GES refuses a clip on top of another without an error; the batch must
+    /// say so, put the clip back as it was, and leave no track behind however
+    /// often the write is tried.
+    #[test]
+    fn undo_reports_a_write_the_engine_refused() {
+        let (dir, png, mut project) = undo_fixture("undo-refused");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let _b = project
+            .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let before = record_of(&project, &a);
+        let mut onto_b = before.clone();
+        onto_b.start = 2.0;
+        for _try in 0..2 {
+            assert_eq!(
+                project.set_clip_records(&[(a.clone(), onto_b.clone())]),
+                vec![a.clone()]
+            );
+            assert_eq!(record_of(&project, &a), before, "a is back as it was");
+            assert_eq!(project.track_count(), 1, "no parking layer is left behind");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// b cannot land (c is there) and cannot go back (a took its place): it
+    /// stays parked, on the first track below the timeline, with its old times.
+    #[test]
+    fn undo_parks_a_clip_that_can_go_neither_way_on_one_track() {
+        let (dir, png, mut project) = undo_fixture("undo-neither");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 0, secs(2.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        project
+            .add_clip(&png, 0, secs(4.0), Duration::ZERO, secs(2.0))
+            .expect("c");
+        let (mut to_a, rb) = (record_of(&project, &a), record_of(&project, &b));
+        let mut onto_c = rb.clone();
+        to_a.start = 2.0;
+        onto_c.start = 4.0;
+        assert_eq!(
+            project.set_clip_records(&[(a.clone(), to_a.clone()), (b.clone(), onto_c)]),
+            vec![b.clone()]
+        );
+        assert_eq!(record_of(&project, &a), to_a, "a landed");
+        let now_b = record_of(&project, &b);
+        assert_eq!(
+            (now_b.track, now_b.start),
+            (1, rb.start),
+            "b parked with its old start"
+        );
+        assert_eq!(project.track_count(), 2, "one parking track, none empty");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undoing a left trim grows the duration back while the in-point shrinks;
+    /// in the wrong order in-point plus duration passes the source's length and
+    /// GES refuses. Stills have no length, so this needs real media.
+    #[test]
+    fn undo_writes_a_left_trim_of_real_media_back() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping undo_writes_a_left_trim_of_real_media_back: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(std::path::Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        let full = record_of(&project, &a);
+        project.trim_clip(&a, -1, 0.5).expect("trim");
+        let trimmed = record_of(&project, &a);
+        assert!(write_back(&mut project, &[(&a, &full)]), "undo the trim");
+        assert_eq!(record_of(&project, &a), full);
+        assert!(write_back(&mut project, &[(&a, &trimmed)]), "redo it");
+        assert_eq!(record_of(&project, &a), trimmed);
+    }
+
+    /// The interface and the undo history both hold clip IDs. A deleted clip
+    /// that came back under a new name would orphan every one of them.
+    #[test]
+    fn undo_restores_a_deleted_clip_under_its_old_id() {
+        let (dir, png, mut project) = undo_fixture("undo-restore");
+        let a = project
+            .add_clip(&png, 0, secs(1.5), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 12,
+                posy: 34,
+                scale: 0.6,
+                alpha: 0.5,
+                volume: 1.0,
+            },
+        );
+        let before = record_of(&project, &a);
+        assert!(project.remove_clip(&a));
+        let restored = project.restore_clip(&a, &before).expect("restore");
+        assert_eq!(restored, a, "same ID");
+        assert_same_record(&record_of(&project, &a), &before);
+        // Somewhere free, so it is the ID that refuses it and not an overlap.
+        let mut elsewhere = before.clone();
+        elsewhere.start += 5.0;
+        assert!(project.restore_clip(&a, &elsewhere).is_err(), "not twice");
+        assert_eq!(project.clip_records().len(), 1, "one clip, under one ID");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deleting the only clip on the bottom track prunes that track; bringing
+    /// the clip back brings the track back.
+    #[test]
+    fn undo_restores_a_clip_onto_a_track_that_was_pruned() {
+        let (dir, png, mut project) = undo_fixture("undo-restore-track");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let tracks = project.track_count();
+        let b = project
+            .add_clip(&png, tracks, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let with_b = project.track_count();
+        let before = record_of(&project, &b);
+        assert!(project.remove_clip(&b));
+        assert!(
+            project.track_count() < with_b,
+            "the empty bottom track went"
+        );
+        let restored = project.restore_clip(&b, &before).expect("restore");
+        assert_eq!(project.clip_track(&restored), Some(tracks));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_knows_a_source_that_is_not_there() {
+        let (dir, png, project) = undo_fixture("undo-source");
+        let here = gst::glib::filename_to_uri(&png, None).expect("uri");
+        let gone = gst::glib::filename_to_uri(dir.join("never-there.png"), None).expect("uri");
+        assert!(project.source_available(&here));
+        assert!(!project.source_available(&gone));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undo only brings back a source this session has discovered, and GES
+    /// answers for that from its cache even after the file is deleted.
+    #[test]
+    fn undo_knows_a_source_deleted_since_it_was_used() {
+        let (dir, png, mut project) = undo_fixture("undo-source-deleted");
+        let uri = gst::glib::filename_to_uri(&png, None).expect("uri");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        assert!(project.remove_clip(&a));
+        std::fs::remove_file(&png).expect("delete the still");
+        assert!(!project.source_available(&uri));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same for an image sequence, which is not one file to look for; and
+    /// once its frames are back, it is available and can be added again.
+    #[test]
+    fn undo_knows_a_sequence_deleted_since_it_was_used() {
+        let dir = scratch("undo-sequence-deleted");
+        let frames: Vec<_> = (1..=3u32)
+            .map(|i| dir.join(format!("frame_{i:04}.png")))
+            .collect();
+        let write = || {
+            for f in &frames {
+                image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+                    .save(f)
+                    .expect("write a frame");
+            }
+        };
+        write();
+        let uri = crate::sequence::detect_sequence(&frames[0])
+            .expect("detect")
+            .uri()
+            .expect("uri");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        assert!(project.remove_clip(&a));
+        for f in &frames {
+            std::fs::remove_file(f).expect("delete a frame");
+        }
+        assert!(!project.source_available(&uri), "frames gone");
+        write();
+        assert!(project.source_available(&uri), "frames back");
+        project
+            .append_clip_uri(&uri, 0, None)
+            .expect("the sequence can be added again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stills have no in-point; real media does, and a restore must put it back.
+    #[test]
+    fn undo_restores_a_trimmed_clip_of_real_media() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping undo_restores_a_trimmed_clip_of_real_media: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        project.trim_clip(&a, -1, 0.5).expect("trim");
+        let before = record_of(&project, &a);
+        assert!(before.inpoint > 0.0, "the trim moved the in-point");
+        assert!(project.remove_clip(&a));
+        project.restore_clip(&a, &before).expect("restore");
+        assert_same_record(&record_of(&project, &a), &before);
+    }
+
+    /// A drag onto a new bottom track creates that track; undoing the move
+    /// must take it away again.
+    #[test]
+    fn undo_removes_the_track_a_move_created() {
+        let (dir, png, mut project) = undo_fixture("undo-prune");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let tracks = project.track_count();
+        let before = record_of(&project, &a);
+        project
+            .move_clip_to_track(&a, tracks)
+            .expect("move to a new track");
+        assert_eq!(project.track_count(), tracks + 1);
+        assert!(write_back(&mut project, &[(&a, &before)]));
+        project.prune_tracks(tracks);
+        assert_eq!(project.track_count(), tracks);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_pruning_never_removes_a_track_with_clips() {
+        let (dir, png, mut project) = undo_fixture("undo-prune-keep");
+        project
+            .add_clip(&png, 2, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let tracks = project.track_count();
+        project.prune_tracks(0);
+        assert_eq!(project.track_count(), tracks, "the bottom track has a clip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several empty tracks at the bottom all go, down to the count and no
+    /// further; an empty track above a clip stays, so no clip changes track;
+    /// and GES drops the same layers the engine does, so a track made later
+    /// lands at its index.
+    #[test]
+    fn undo_pruning_takes_every_empty_bottom_track_down_to_the_count() {
+        let (dir, png, mut project) = undo_fixture("undo-prune-many");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 2, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        project.layer(5); // empty tracks 3 to 5, as a merged drag leaves them
+        project.prune_tracks(4);
+        assert_eq!(project.track_count(), 4, "down to the count, no further");
+        project.prune_tracks(1);
+        assert_eq!(
+            project.track_count(),
+            3,
+            "stops at b; the empty track 1 stays"
+        );
+        assert_eq!(
+            (project.clip_track(&a), project.clip_track(&b)),
+            (Some(0), Some(2))
+        );
+        assert_eq!(project.timeline.layers().len(), project.track_count());
+        project
+            .move_clip_to_track(&a, 3)
+            .expect("a new bottom track");
+        assert_eq!(
+            project.clip_track(&a),
+            Some(3),
+            "the new track is at its index"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing on the timeline and a count of zero still leaves one track:
+    /// the engine is never without a layer.
+    #[test]
+    fn undo_pruning_leaves_one_track_on_an_empty_timeline() {
+        let (dir, _png, mut project) = undo_fixture("undo-prune-empty");
+        project.layer(2);
+        project.prune_tracks(0);
+        assert_eq!(project.track_count(), 1);
+        assert_eq!(project.timeline.layers().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

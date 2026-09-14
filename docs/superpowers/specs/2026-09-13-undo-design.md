@@ -46,8 +46,9 @@ transform and thumbnail).
   Inspector sliders fire `changed` continuously, and the 100 ms timer applies
   only the latest transform; there is no release event.
 - **Toolbars.** The timeline toolbar uses `TimelineChip { label, hint }` for the
-  zoom controls. The Images toolbar is a `SecondaryButton` row ("Add files…",
-  "Clear", then a stretch spacer).
+  zoom controls; `hint` is only the chip's accessible label, and the app has no
+  visible tooltip anywhere. The Images toolbar is a `SecondaryButton` row ("Add
+  files…", "Clear", then a stretch spacer).
 
 ## Measurements
 
@@ -88,14 +89,17 @@ used by both modes:
 
 - Two stacks, undo and redo, capped at **200 steps** per history; the oldest
   step is dropped when the cap is reached.
-- **Recording** a step: an empty step (nothing changed) is ignored. Otherwise it
-  either merges into the step on top of the undo stack (see Merging) or is
-  pushed. Recording always clears the redo stack.
+- **Recording** a step: an empty step (nothing changed) is ignored and leaves
+  the redo stack alone. Otherwise it either merges into the step on top of the
+  undo stack (see Merging) or is pushed, and the redo stack is cleared.
 - **Undo and redo are two-phase.** The caller looks at the top step, applies it,
   and only then tells the history it succeeded, which moves the step to the
-  other stack. A failed apply leaves the step where it was.
-- Each step has a **label** ("Trim intro.mp4") used for the button hints:
-  "Undo trim of intro.mp4", "Redo trim of intro.mp4", "Nothing to undo".
+  other stack. A failed apply leaves the step where it was, and seals the
+  history (see Merging); a refusal that changed nothing, such as a missing
+  source, leaves it unsealed.
+- Each step **describes** itself as a noun phrase ("trim of intro.mp4"), which
+  the button hints complete: "Undo trim of intro.mp4", "Redo trim of
+  intro.mp4", "Nothing to undo".
 - The current time is passed in rather than read, so tests use a fake clock.
 - `clear()` empties both stacks.
 
@@ -107,26 +111,46 @@ these hold:
 - both are the same kind, and that kind is **Move**, **Trim**, **Transform** or
   **Duration**;
 - both are about the same clip;
-- less than **one second** has passed since the top step last changed.
+- less than **one second** has passed since the top step last changed;
+- the history is not **sealed**. An undo, a redo or a failed apply seals it, and
+  the next change that is not empty unseals it, so a change made right after an
+  undo always starts a step of its own.
 
 The merged step keeps the older "before" and takes the newer "after", and its
 time becomes the newer one. One slider drag, one mouse drag, or a held
 Ctrl+arrow therefore becomes one step. Add, Delete, Reorder tracks and Add track
 never merge, and nothing in Images mode merges.
 
+A merged step that ends up changing nothing (a drag back to where it began) is
+removed, and that seals the history too, so the next change cannot merge into
+the step beneath it.
+
 ### Engine additions (`kuvatin-video`, `Project`)
 
-- **`set_clip_record(id, record)`** writes a clip's start, in-point, duration,
-  track and transform exactly as given, with no clamping, because it restores a
-  state the engine already accepted. When shrinking, in-point and duration are
-  written in the order `trim_clip` uses, so in-point plus duration never
-  transiently exceeds `max-duration`.
-- **`restore_clip(id, record)`** re-adds a clip under its old `ClipId` by
-  setting the GES clip name before the clip joins a layer. If GES refuses a
-  reused name, it returns the new ID instead and the timeline history keeps an
-  old-to-new ID map (see Risks).
-- **`source_available(uri)`** answers whether a source can be opened, using
-  `UriClipAsset::request_sync`, bounded by the existing discovery timeout.
+- **`set_clip_records(writes)`** writes clips' start, in-point, duration, track
+  and transform exactly as given, with no clamping, because it restores a state
+  the engine already accepted. GES refuses any moment where one clip sits fully
+  on top of another (see Risks), so clips that trade tracks or places would
+  collide halfway: every clip whose place or times change is first parked alone
+  on a new layer below the timeline, then set and moved to its track, and the
+  parking layers are removed. When shrinking, in-point and duration are written
+  in the order `trim_clip` uses, so in-point plus duration never transiently
+  exceeds `max-duration`. Every clip is read back, and the ones that did not
+  land are returned. A clip that did not land goes back as it was, or stays
+  parked on the first free parking layer if a clip that landed took its place,
+  so a refused write changes nothing else and retrying it adds no tracks.
+- **`restore_clip(id, record)`** re-adds a removed clip as its record describes
+  it, under its old `ClipId`. GES replaces a name in its own `uriclipN` pattern
+  with its next one (see Risks), so a removed clip's name cannot be asked
+  back; but the engine never looks clips up by GES name, so it keeps the
+  restored clip under the ID the interface and the history still hold. GES
+  never gives out a name twice in a process, so no later clip can arrive
+  under it.
+- **`source_available(uri)`** answers whether a source is still there. A file is
+  looked for on disk, because GES answers from a cache that outlives it, and
+  undo only restores sources the session has used; anything else, an image
+  sequence, is dropped from the cache and discovered again, bounded by the
+  discovery timeout.
 - **Pruning to a track count.** After an undo or redo, empty trailing layers
   beyond the step's recorded track count are removed, so undoing a move onto a
   new bottom track also removes that track.
@@ -137,11 +161,13 @@ never merge, and nothing in Images mode merges.
 A `TimelineStep` holds:
 
 - its kind (Move, Trim, Transform, Duration, Add, Delete, Reorder tracks, Add
-  track), its label, and the clip it is about, if it is about one clip;
+  track), the clip it is about if it is about one clip, and that clip's display
+  name, which its description uses ("trim of intro.mp4");
 - for each affected clip, its record **before** and **after**, where "none"
   means the clip did not exist on that side;
-- the thumbnail of every clip that exists on only one side, so a restored row
-  gets its picture back without decoding;
+- the timeline row of every clip that exists on only one side, so a clip that
+  comes back gets its row as it was, without decoding: its name (the engine's
+  record spells one from the URI), kind and thumbnail;
 - the timeline's track-row count before and after.
 
 **Comparing.** A pure function takes the records before and after an edit,
@@ -173,8 +199,11 @@ their own.
 1. Check `source_available` for every clip the undo brings back. If any is
    missing, change nothing, show an error naming the file, and keep the step.
 2. For each affected clip: remove it if it did not exist before; restore it if
-   it existed before but not after; otherwise write its "before" record with
-   `set_clip_record`. Removals are applied first, then restores, then writes.
+   it existed before but not after; otherwise write its "before" record.
+   Removals are applied first, then all writes at once with
+   `set_clip_records`, then restores. After the removals and writes every clip
+   is where the "before" side has it, so a restored clip never lands on one
+   that has yet to move away.
 3. Prune layers to the step's "before" track count, and set the timeline's
    track rows to that count.
 4. Update only the affected timeline rows. This is a pure function from the
@@ -189,7 +218,8 @@ their own.
 
 If the engine refuses a write partway through, show the error, rebuild the
 affected rows from `clip_records()` so the screen matches the engine, and keep
-the step.
+the step. Retrying it skips the clips its earlier try already brought back, so
+none comes back twice.
 
 ### Images steps (app crate)
 
@@ -198,18 +228,23 @@ the step.
 | Add files | the paths that were actually new | removes those paths; redo adds them back, with thumbnails from the cache or decoded again |
 | Remove a file | its path and crop (or none); its thumbnail stays in the cache | adds both back; selects the file |
 | Clear the list | every path, crop and thumbnail | restores the whole list |
-| Apply a crop | the file, its previous crop (or none), the new crop | writes the previous crop, updates the row's cropped mark and, if the file is selected, the crop outline |
+| Apply a crop | the file, its previous crop (or none), the new crop | writes the previous crop, updates the row's cropped mark, and selects the file, which redraws its crop outline |
 
-Undo and redo go through the functions the buttons already use (`add_paths`,
-`sync_rows`, the crop map), so rows, sorting, selection and thumbnails behave
-exactly as they do today. The sorted list puts a restored file back in its old
-place without any stored position. A path that no longer exists on disk is
+Undo and redo change the file list, the crop map and the thumbnail cache
+directly, then rebuild the rows with `sync_rows` and decode missing thumbnails
+as the buttons do, so rows, sorting and thumbnails behave exactly as they do
+today. The sorted list puts a restored file back in its old place without any
+stored position. A path that no longer exists on disk is
 skipped, and the user is told how many files could not come back.
 
 ### Lifetime and refusals
 
-- The timeline history is cleared when a project is opened and when a fresh
-  engine is created. The Images history lasts the session.
+- The timeline history is cleared when a project is opened, and when the canvas
+  size changes: GES rescales every clip's position with the canvas, so no older
+  step's records would match the timeline. The engine is created when it is
+  first needed (the first clip added, a canvas size set or a project opened);
+  a track added before then is recorded, and undone and redone without an
+  engine. The Images history lasts the session.
 - Undo and redo are refused, and both buttons are disabled:
   - during an export, including while it is starting;
   - while an Images batch is running;
@@ -218,24 +253,36 @@ skipped, and the user is told how many files could not come back.
 
 ## Interface
 
+- **Tooltip.** Slint has no tooltip element. A `Tooltip` global holds the text
+  and position of the one tooltip in the window. A control with a `hint` writes
+  its hint text and its own `absolute-position` into that global while it is
+  hovered, and a `TooltipLayer`, the window's last child, draws the tooltip
+  above everything. The existing zoom chips get visible hints from this too.
 - **Videos mode.** Two `TimelineChip`s, "Undo" and "Redo", in the timeline
-  toolbar, left of the zoom chips. Their hint is the step label ("Undo trim of
-  intro.mp4") or "Nothing to undo" / "Nothing to redo". They are greyed out
-  when unavailable.
-- **Images mode.** Two `SecondaryButton`s, "Undo" and "Redo", at the right end
-  of the "Add files… / Clear" row. `SecondaryButton` gains an optional hover
-  hint that behaves like `TimelineChip`'s.
-- **Shortcuts.** Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo. They are handled
-  in `video-keys` and `image-keys` and act on the current mode's history. A
-  focused text field keeps Ctrl+Z for its own text. `modal-keys` runs first,
-  and undo keys do nothing while a dialog is open.
-- **Accessibility.** Each button's hint is also its accessible description.
-- **Labels.**
-  - Videos: "Move intro.mp4", "Trim intro.mp4", "Transform intro.mp4",
-    "Set duration of still.png", "Delete intro.mp4", "Add intro.mp4",
-    "Reorder tracks", "Add track".
-  - Images: "Add 12 files", "Remove photo.jpg", "Clear the list (40 files)",
-    "Crop photo.jpg".
+  toolbar, left of the zoom chips. Their hint ("Undo trim of intro.mp4", or
+  "Nothing to undo" / "Nothing to redo") shows on hover. `TimelineChip` gains
+  an `enabled` property and they are greyed out when unavailable; the hint
+  still shows on a greyed chip.
+- **Images mode.** Two `SecondaryButton`s, "Undo" and "Redo", on a row of their
+  own under the "Add files… / Clear" row, which is too narrow for all four at
+  the default window size. `SecondaryButton` gains an optional `hint`, shown on
+  hover and used as its accessible description.
+- **Shortcuts.** Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo, in the current
+  mode's history. The window's key handler runs `modal-keys`, then
+  `undo-keys`, then `video-keys` or `image-keys`. Undo keys do nothing while a
+  dialog is open, or while a drag is in progress (`Gesture.held`), so nothing
+  is undone under the pointer. A focused text field keeps all three for its
+  own text: it takes Ctrl+Z and Ctrl+Y itself, and `undo-keys` refuses
+  Ctrl+Shift+Z, which Slint on Windows does not treat as a text redo, while
+  one has focus.
+- **Accessibility.** A button's hint is also its accessible description; a
+  `TimelineChip` uses it as its accessible label.
+- **How steps describe themselves** (the hint prefixes "Undo " or "Redo "):
+  - Videos: "move of intro.mp4", "trim of intro.mp4", "transform of
+    intro.mp4", "duration of still.png", "deleting intro.mp4", "adding
+    intro.mp4", "track reorder", "new track".
+  - Images: "adding 12 files", "removing photo.jpg", "clearing the list (40
+    files)", "crop of photo.jpg".
 
 ## Contract for later edits
 
@@ -248,23 +295,37 @@ built.
 
 ## Testing
 
-- **History core (pure).** Undo and redo; a new step clearing redo; the merge
-  rule's three conditions against a fake clock, including a change at exactly
-  one second, which does not merge; the 200-step cap dropping the oldest; empty steps ignored; the
-  two-phase undo leaving a failed step in place; hint labels.
+- **History core (pure).** Undo and redo; a new step clearing redo, and an
+  empty one ignored without touching it; the merge rule's conditions against a
+  fake clock, including a change at exactly one second, which does not merge;
+  the seal after an undo, after an explicit seal and after a gesture that
+  merged back to nothing; the 200-step cap dropping the oldest; the two-phase
+  undo leaving a failed step in place; the hint text.
 - **Comparing records (pure).** Changed, added and removed clips; identical
   records produce no step.
 - **Engine (real GStreamer, generated stills, like
   `a_timeline_survives_being_saved_and_reopened`).**
   - Exact write-back after a slide that was clamped against a neighbour, and
     after a trim clamped at the minimum.
-  - Delete, then restore: the clip keeps its `ClipId` (this settles the ID risk
-    first) and its transform.
-  - A move onto a new bottom track, then undo: the track is gone again.
+  - Delete, then restore: the clip comes back exactly, transform and (for real
+    media) in-point included, under its old `ClipId`, and not twice.
+  - A source deleted after its clip was used is noticed, for a still and for an
+    image sequence.
+  - A move onto a new bottom track, then undo: the track is gone again; several
+    empty bottom tracks go down to a count, never past a clip or below one
+    track, and GES drops the same layers the engine does.
   - A track reorder and its undo.
+  - Two clips trading places on a track, in one batch; a write the engine
+    refuses is reported and put back, however often it is retried; a clip that
+    can go neither way stays parked on one track.
+  - A left trim of real media undone and redone, which pins the order of
+    in-point and duration.
   - A missing source: named, and nothing changed.
 
   These join the video tests CI gates on in `.github/workflows/release.yml`.
+  The two that need real media, the left trim and a trimmed clip restored,
+  gate in the live-media step, which has one retry, because the self-contained
+  step runs before the media fixtures exist.
 - **Images history (pure, over paths, crops and thumbnails).** Add, remove,
   clear and crop round-trips; adding an already present file records nothing; a
   file missing on restore is skipped and counted.
@@ -275,11 +336,22 @@ built.
 
 ## Risks / open questions
 
-- **Reusing a clip's GES name.** Restoring under the old `ClipId` depends on
-  GES accepting the name of a removed clip. The first engine test settles it;
-  the fallback is an old-to-new ID map inside the timeline history.
+- **GES names every new clip afresh.** Measured: `set_name` with a removed
+  clip's name (GES's own `uriclipN` pattern) succeeds and the clip still gets
+  the next name, before or after it joins a layer. The engine keeps a restored
+  clip under its old ID itself; the history's rename path stays as a safety
+  net and does not run.
+- **GES caches discovered sources.** A deleted file still discovers from the
+  cache, and a clip restored from it fails at preview with an error that names
+  nothing, so `source_available` looks for files on disk and rediscovers the
+  rest.
 - **Exact writes without clamping** are correct only because steps are undone
   strictly in order, which a single linear history guarantees.
+- **GES refuses overlaps without an error.** One clip fully on top of another,
+  or three clips overlapping, is refused even for a moment: measured,
+  `move_to_layer` returns an error, `set_start` returns false and leaves the
+  clip where it was, and `add_clip` fails. Writes therefore run as one parked
+  batch and are read back, and restores come after them.
 - **Merging depends on timing.** A slow drag that pauses for more than a second
   becomes more than one step. This is accepted.
 - **Memory.** A Clear step for a 1,000-file list keeps about 16 MB of

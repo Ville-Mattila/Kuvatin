@@ -6,6 +6,7 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod undo;
 
 use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
 use export::ExportState;
@@ -38,6 +39,9 @@ pub(super) struct VideoState {
     /// one seek per tick instead of one per pointer event, and an ACCURATE
     /// landing on release so the picture matches the playhead.
     pub(super) pending_seek: Rc<Cell<Option<(f32, bool)>>>,
+    /// Undo and redo for the timeline. Private to the Videos modules: its step
+    /// type is.
+    history: undo::TimelineHistory,
 }
 
 impl VideoState {
@@ -60,6 +64,17 @@ impl VideoState {
             sel_idx: Rc::new(Cell::new(-1)),
             pending_xform: Rc::new(RefCell::new(None)),
             pending_seek: Rc::new(Cell::new(None)),
+            history: Rc::new(RefCell::new(crate::gui::history::History::new())),
+        }
+    }
+
+    /// The handles an editing handler records its steps through.
+    fn recorder(&self, ui: &AppWindow) -> undo::Recorder {
+        undo::Recorder {
+            history: self.history.clone(),
+            tl_clips: self.tl_clips.clone(),
+            tracks: self.tracks.clone(),
+            ui: ui.as_weak(),
         }
     }
 }
@@ -76,6 +91,7 @@ pub(super) fn wire(
     timeline::wire(ui, st);
     export::wire(ui, st, ex, timers);
     project_file::wire(ui, st, im);
+    undo::wire(ui, st, ex);
 
     let ui_weak = ui.as_weak();
     let project_slot = &st.project;
@@ -201,6 +217,7 @@ pub(super) fn wire(
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
         let sel_idx = sel_idx.clone();
+        let history = st.history.clone();
         ui.on_set_canvas_size(move |w, h| {
             let w = w.clamp(16, 7680);
             let h = h.clamp(16, 4320);
@@ -208,7 +225,16 @@ pub(super) fn wire(
                 *project_slot.borrow_mut() = make_project(&ui_weak);
             }
             if let Some(p) = project_slot.borrow_mut().as_mut() {
+                let was = p.canvas_size();
                 p.set_canvas_size(w, h);
+                if p.canvas_size() != was {
+                    // GES rescales every clip's position with the canvas, so no
+                    // older step's records match the timeline any more.
+                    history.borrow_mut().clear();
+                    if let Some(ui) = ui_weak.upgrade() {
+                        undo::refresh(&ui, &history.borrow());
+                    }
+                }
                 let i = sel_idx.get();
                 if i >= 0 {
                     if let Some(row) = tl_clips.row_data(i as usize) {
@@ -253,6 +279,7 @@ pub(super) fn wire(
         let pending_seek = pending_seek.clone();
         let export_active = export_active.clone();
         let export_pending = export_pending.clone();
+        let rec = st.recorder(ui);
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -277,7 +304,14 @@ pub(super) fn wire(
                 // Apply the latest inspector transform (if any) then repaint,
                 // both coalesced to one commit + one seek per tick.
                 if let Some((id, l)) = pending_xform.borrow_mut().take() {
-                    project.set_clip_layout(&kuvatin_video::ClipId(id), l);
+                    let before = rec.before(Some(&*project));
+                    project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
+                    rec.record(
+                        Some(&*project),
+                        undo::StepKind::Transform,
+                        Some(id.as_str()),
+                        before,
+                    );
                 }
                 // Scrub target: one (keyframe) seek per tick during a drag,
                 // a frame-accurate one on release.
@@ -429,6 +463,7 @@ fn add_to_timeline(
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
+    rec: &undo::Recorder,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -437,6 +472,7 @@ fn add_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    let before = rec.before(Some(&*project));
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -468,6 +504,12 @@ fn add_to_timeline(
                 selected: false,
                 thumb,
             });
+            rec.record(
+                Some(&*project),
+                undo::StepKind::Add,
+                Some(info.id.0.as_str()),
+                before,
+            );
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_video_playing(true);
@@ -494,6 +536,7 @@ fn add_sequence_to_timeline(
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
+    rec: &undo::Recorder,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -502,6 +545,7 @@ fn add_sequence_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    let before = rec.before(Some(&*project));
     let added = spec
         .uri()
         // Sequences are footage, not overlays: the base video track (GES
@@ -520,6 +564,12 @@ fn add_sequence_to_timeline(
                 selected: false,
                 thumb,
             });
+            rec.record(
+                Some(&*project),
+                undo::StepKind::Add,
+                Some(info.id.0.as_str()),
+                before,
+            );
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_video_playing(true);

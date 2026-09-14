@@ -153,6 +153,9 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState, im: &super::import::ImportSt
                 }
             };
             restore_models(&ui, &st, &seq_by_path, &doc);
+            // The history described the timeline this project replaced.
+            st.history.borrow_mut().clear();
+            super::undo::refresh(&ui, &st.history.borrow());
             import_q.reseed(&st.bin_paths.borrow());
             *current.borrow_mut() = Some(path.clone());
             ui.set_project_name(file_label(&path));
@@ -278,7 +281,7 @@ fn restore_models(
 
 /// Decode one thumbnail per clip on a worker and drop each into its row (and
 /// the matching media-bin row) as it arrives.
-fn spawn_thumbnails(
+pub(super) fn spawn_thumbnails(
     ui_weak: slint::Weak<AppWindow>,
     records: Vec<(kuvatin_video::ClipId, kuvatin_video::ClipRecord)>,
 ) {
@@ -324,7 +327,7 @@ fn spawn_thumbnails(
 }
 
 /// What a saved URI is, for the clip's colour on the timeline.
-fn kind_of(uri: &str) -> ClipKind {
+pub(super) fn kind_of(uri: &str) -> ClipKind {
     if uri.starts_with("imagesequence://") {
         return ClipKind::Sequence;
     }
@@ -349,6 +352,7 @@ pub(super) struct VideoHandles {
     pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
     pub(super) tracks: Rc<VecModel<SharedString>>,
     pub(super) sel_idx: Rc<std::cell::Cell<i32>>,
+    pub(super) history: super::undo::TimelineHistory,
 }
 
 impl VideoState {
@@ -360,6 +364,7 @@ impl VideoState {
             tl_clips: self.tl_clips.clone(),
             tracks: self.tracks.clone(),
             sel_idx: self.sel_idx.clone(),
+            history: self.history.clone(),
         }
     }
 }
