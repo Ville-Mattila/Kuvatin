@@ -39,6 +39,9 @@ pub(super) struct VideoState {
     /// one seek per tick instead of one per pointer event, and an ACCURATE
     /// landing on release so the picture matches the playhead.
     pub(super) pending_seek: Rc<Cell<Option<(f32, bool)>>>,
+    /// Undo and redo for the timeline. Private to the Videos modules: its step
+    /// type is.
+    history: undo::TimelineHistory,
 }
 
 impl VideoState {
@@ -61,6 +64,17 @@ impl VideoState {
             sel_idx: Rc::new(Cell::new(-1)),
             pending_xform: Rc::new(RefCell::new(None)),
             pending_seek: Rc::new(Cell::new(None)),
+            history: Rc::new(RefCell::new(crate::gui::history::History::new())),
+        }
+    }
+
+    /// The handles an editing handler records its steps through.
+    fn recorder(&self, ui: &AppWindow) -> undo::Recorder {
+        undo::Recorder {
+            history: self.history.clone(),
+            tl_clips: self.tl_clips.clone(),
+            tracks: self.tracks.clone(),
+            ui: ui.as_weak(),
         }
     }
 }
@@ -254,6 +268,7 @@ pub(super) fn wire(
         let pending_seek = pending_seek.clone();
         let export_active = export_active.clone();
         let export_pending = export_pending.clone();
+        let rec = st.recorder(ui);
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -278,7 +293,14 @@ pub(super) fn wire(
                 // Apply the latest inspector transform (if any) then repaint,
                 // both coalesced to one commit + one seek per tick.
                 if let Some((id, l)) = pending_xform.borrow_mut().take() {
-                    project.set_clip_layout(&kuvatin_video::ClipId(id), l);
+                    let before = rec.before(Some(&*project));
+                    project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
+                    rec.record(
+                        Some(&*project),
+                        undo::StepKind::Transform,
+                        Some(id.as_str()),
+                        before,
+                    );
                 }
                 // Scrub target: one (keyframe) seek per tick during a drag,
                 // a frame-accurate one on release.
@@ -430,6 +452,7 @@ fn add_to_timeline(
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
+    rec: &undo::Recorder,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -438,6 +461,7 @@ fn add_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    let before = rec.before(Some(&*project));
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -469,6 +493,12 @@ fn add_to_timeline(
                 selected: false,
                 thumb,
             });
+            rec.record(
+                Some(&*project),
+                undo::StepKind::Add,
+                Some(info.id.0.as_str()),
+                before,
+            );
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_video_playing(true);
@@ -495,6 +525,7 @@ fn add_sequence_to_timeline(
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
+    rec: &undo::Recorder,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -503,6 +534,7 @@ fn add_sequence_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    let before = rec.before(Some(&*project));
     let added = spec
         .uri()
         // Sequences are footage, not overlays: the base video track (GES
@@ -521,6 +553,12 @@ fn add_sequence_to_timeline(
                 selected: false,
                 thumb,
             });
+            rec.record(
+                Some(&*project),
+                undo::StepKind::Add,
+                Some(info.id.0.as_str()),
+                before,
+            );
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_video_playing(true);

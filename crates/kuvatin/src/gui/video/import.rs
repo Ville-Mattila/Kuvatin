@@ -124,6 +124,7 @@ pub(super) fn wire(
     let seq_progress = &im.seq_progress;
     let seq_active = &im.seq_active;
     let seq_cancel = &im.seq_cancel;
+    let rec = st.recorder(ui);
     // Open media via the file dialog → the same import queue as drag-and-drop.
     {
         let import_q = import_q.clone();
@@ -362,6 +363,7 @@ pub(super) fn wire(
         let assets = assets.clone();
         let bin_paths = bin_paths.clone();
         let tl_clips = tl_clips.clone();
+        let rec = rec.clone();
         let ready = import_ready.clone();
         let import_q = import_q.clone();
         let seq_ready = seq_ready.clone();
@@ -410,7 +412,7 @@ pub(super) fn wire(
                     // Only the first file (when the timeline is empty) goes on
                     // the timeline; the rest wait in the bin for the user.
                     if tl_clips.row_count() == 0 {
-                        add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
+                        add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb, &rec);
                     }
                 }
                 // Finished sequence imports (at most one in flight): land the
@@ -448,6 +450,7 @@ pub(super) fn wire(
                                 &project_slot,
                                 &tl_clips,
                                 thumb,
+                                &rec,
                             );
                         }
                         (_, err, false) => {
@@ -507,6 +510,7 @@ pub(super) fn wire(
         let assets = assets.clone();
         let bin_paths = bin_paths.clone();
         let seq_by_path = seq_by_path.clone();
+        let rec = rec.clone();
         ui.on_video_add(move |i| {
             let Some(path) = bin_paths.borrow().get(i as usize).cloned() else {
                 return;
@@ -519,10 +523,18 @@ pub(super) fn wire(
             // sequence, not the single first-frame file.
             if let Some(spec) = seq_by_path.borrow().get(&path).cloned() {
                 let name = spec.pattern_name();
-                add_sequence_to_timeline(&spec, &name, &ui_weak, &project_slot, &tl_clips, thumb);
+                add_sequence_to_timeline(
+                    &spec,
+                    &name,
+                    &ui_weak,
+                    &project_slot,
+                    &tl_clips,
+                    thumb,
+                    &rec,
+                );
                 return;
             }
-            add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb);
+            add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb, &rec);
         });
     }
     // Remove a media-bin entry (× on hover). Keeps bin_paths in lockstep and

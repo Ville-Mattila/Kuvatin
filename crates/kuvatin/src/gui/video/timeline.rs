@@ -1,6 +1,7 @@
 //! Timeline editing: selection + inspector, slide / trim / move-to-track,
 //! magnetic snapping, track rows and clip removal.
 
+use super::undo::{Recorder, StepKind};
 use super::VideoState;
 use crate::gui::{AppWindow, ClipKind, TimelineClip};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
@@ -16,6 +17,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
     let video_tracks = &st.tracks;
     let sel_idx = &st.sel_idx;
     let pending_xform = &st.pending_xform;
+    let rec = st.recorder(ui);
     // Timeline clip click: select it (highlight) + populate the inspector.
     {
         let ui_weak = ui_weak.clone();
@@ -113,6 +115,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
         let tracks = video_tracks.clone();
+        let rec = rec.clone();
         ui.on_timeline_clip_dropped(move |i, delta_secs, delta_rows| {
             let Some(mut row) = tl_clips.row_data(i as usize) else {
                 return;
@@ -122,6 +125,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(p) = slot.as_mut() else {
                 return;
             };
+            let before = rec.before(Some(&*p));
             // Horizontal: slide along the track.
             if let Some(geom) = p.slide_clip(&cid, delta_secs as f64) {
                 row.start = geom.start.as_secs_f32();
@@ -144,6 +148,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     tracks.push(SharedString::from(format!("Track {n}")));
                 }
             }
+            rec.record(Some(&*p), StepKind::Move, Some(row.id.as_str()), before);
             let dur = p.duration();
             drop(slot);
             tl_clips.set_row_data(i as usize, row);
@@ -184,12 +189,16 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
     // band can't grow to eat the whole viewer.
     {
         let tracks = video_tracks.clone();
+        let rec = rec.clone();
         ui.on_add_track(move || {
             if tracks.row_count() >= 8 {
                 return;
             }
+            // No clip changes, so no project is needed to record it.
+            let before = rec.before(None);
             let n = tracks.row_count() + 1;
             tracks.push(SharedString::from(format!("Track {n}")));
+            rec.record(None, StepKind::AddTrack, None, before);
         });
     }
 
@@ -198,6 +207,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
     {
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
+        let rec = rec.clone();
         ui.on_track_reordered(move |from, to| {
             if from == to {
                 return;
@@ -206,6 +216,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(p) = slot.as_mut() else {
                 return;
             };
+            let before = rec.before(Some(&*p));
             p.move_track(from as usize, to as usize);
             for idx in 0..tl_clips.row_count() {
                 if let Some(mut row) = tl_clips.row_data(idx) {
@@ -217,6 +228,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     }
                 }
             }
+            rec.record(Some(&*p), StepKind::ReorderTracks, None, before);
         });
     }
 
@@ -225,16 +237,20 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let ui_weak = ui_weak.clone();
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
+        let rec = rec.clone();
         ui.on_timeline_clip_trimmed(move |i, edge, delta| {
             let Some(mut row) = tl_clips.row_data(i as usize) else {
                 return;
             };
             let geom = project_slot.borrow_mut().as_mut().and_then(|p| {
-                p.trim_clip(
+                let before = rec.before(Some(&*p));
+                let geom = p.trim_clip(
                     &kuvatin_video::ClipId(row.id.to_string()),
                     edge,
                     delta as f64,
-                )
+                );
+                rec.record(Some(&*p), StepKind::Trim, Some(row.id.as_str()), before);
+                geom
             });
             let Some(geom) = geom else {
                 return;
@@ -260,6 +276,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
         let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
         ui.on_inspector_duration_changed(move |secs| {
             let i = sel_idx.get();
             if i < 0 {
@@ -269,7 +286,11 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 return;
             };
             let geom = project_slot.borrow_mut().as_mut().and_then(|p| {
-                p.set_clip_duration(&kuvatin_video::ClipId(row.id.to_string()), secs as f64)
+                let before = rec.before(Some(&*p));
+                let geom =
+                    p.set_clip_duration(&kuvatin_video::ClipId(row.id.to_string()), secs as f64);
+                rec.record(Some(&*p), StepKind::Duration, Some(row.id.as_str()), before);
+                geom
             });
             let Some(geom) = geom else {
                 return;
@@ -291,8 +312,9 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let project_slot = project_slot.clone();
         let tl_clips = video_tl.clone();
         let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
         ui.on_timeline_clip_removed(move |i| {
-            remove_timeline_clip(i, &ui_weak, &project_slot, &tl_clips, &sel_idx);
+            remove_timeline_clip(i, &ui_weak, &project_slot, &tl_clips, &sel_idx, &rec);
         });
     }
     // Delete key → remove whatever clip is selected.
@@ -301,8 +323,16 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let project_slot = project_slot.clone();
         let tl_clips = video_tl.clone();
         let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
         ui.on_delete_selected_clip(move || {
-            remove_timeline_clip(sel_idx.get(), &ui_weak, &project_slot, &tl_clips, &sel_idx);
+            remove_timeline_clip(
+                sel_idx.get(),
+                &ui_weak,
+                &project_slot,
+                &tl_clips,
+                &sel_idx,
+                &rec,
+            );
         });
     }
 }
@@ -316,6 +346,7 @@ fn remove_timeline_clip(
     project_slot: &Rc<RefCell<Option<kuvatin_video::Project>>>,
     tl_clips: &Rc<VecModel<TimelineClip>>,
     sel_idx: &std::rc::Rc<std::cell::Cell<i32>>,
+    rec: &Recorder,
 ) {
     if i < 0 || (i as usize) >= tl_clips.row_count() {
         return;
@@ -323,7 +354,10 @@ fn remove_timeline_clip(
     let mut duration = None;
     if let Some(row) = tl_clips.row_data(i as usize) {
         if let Some(p) = project_slot.borrow_mut().as_mut() {
+            let before = rec.before(Some(&*p));
             p.remove_clip(&kuvatin_video::ClipId(row.id.to_string()));
+            // Recorded before the row goes, so the step keeps the row.
+            rec.record(Some(&*p), StepKind::Delete, Some(row.id.as_str()), before);
             duration = Some(p.duration());
         }
     }

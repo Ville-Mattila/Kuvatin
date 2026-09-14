@@ -186,6 +186,20 @@ export component AppWindow inherits Window {
     callback export-cancel();                  // abort a running render
     callback import-cancel();                  // abort an in-flight media import
     callback add-track();                      // click "+ New track" → new empty row
+    // Undo and redo, one history per mode (gui/history.rs). The hints name the
+    // step ("Undo trim of intro.mp4") and show on hover over the buttons.
+    in property <bool> video-can-undo: false;
+    in property <bool> video-can-redo: false;
+    in property <string> video-undo-hint: "Nothing to undo";
+    in property <string> video-redo-hint: "Nothing to redo";
+    callback video-undo();
+    callback video-redo();
+    in property <bool> image-can-undo: false;
+    in property <bool> image-can-redo: false;
+    in property <string> image-undo-hint: "Nothing to undo";
+    in property <string> image-redo-hint: "Nothing to redo";
+    callback image-undo();
+    callback image-redo();
     // App-wide error surface (a modal that stays until dismissed). Set from Rust
     // via the error-* properties; the OK button clears `error-visible`.
     in-out property <bool> error-visible: false;

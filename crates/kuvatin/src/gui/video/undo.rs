@@ -6,10 +6,17 @@
 //! comes back gets the row it had, name and thumbnail included.
 
 use super::project_file::kind_of;
-use crate::gui::history::Step;
-use crate::gui::TimelineClip;
+use crate::gui::history::{History, Step};
+use crate::gui::{AppWindow, TimelineClip};
 use kuvatin_video::ClipRecord;
+use slint::{Model, SharedString, VecModel};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
+use std::time::Instant;
+
+/// The timeline's undo history, shared by every handler that edits.
+pub(super) type TimelineHistory = Rc<RefCell<History<TimelineStep>>>;
 
 /// What kind of edit a step is. The kind decides whether consecutive steps
 /// merge and how the step describes itself.
@@ -302,6 +309,70 @@ pub(super) fn selection_after(
         .or_else(|| find(selected))
         .map(|i| i as i32)
         .unwrap_or(-1)
+}
+
+/// What recording a step needs: the history, the timeline rows (for a clip's
+/// name, and the rows a step keeps) and the track rows. Cheap to clone into
+/// each handler.
+#[derive(Clone)]
+pub(super) struct Recorder {
+    pub(super) history: TimelineHistory,
+    pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
+    pub(super) tracks: Rc<VecModel<SharedString>>,
+    pub(super) ui: slint::Weak<AppWindow>,
+}
+
+impl Recorder {
+    /// Read the timeline just before an edit.
+    pub(super) fn before(&self, project: Option<&kuvatin_video::Project>) -> Capture {
+        Capture::of(project, self.tracks.row_count())
+    }
+
+    /// Record what an edit changed. Call it after the engine edit and after an
+    /// added clip's row is pushed, but before a deleted clip's row is removed:
+    /// the step's name and the rows it keeps come from the rows.
+    pub(super) fn record(
+        &self,
+        project: Option<&kuvatin_video::Project>,
+        kind: StepKind,
+        subject: Option<&str>,
+        before: Capture,
+    ) {
+        let after = Capture::of(project, self.tracks.row_count());
+        self.record_captures(kind, subject, before, after);
+    }
+
+    pub(super) fn record_captures(
+        &self,
+        kind: StepKind,
+        subject: Option<&str>,
+        before: Capture,
+        after: Capture,
+    ) {
+        let rows: Vec<TimelineClip> = self.tl_clips.iter().collect();
+        let from_rows = subject
+            .and_then(|id| rows.iter().find(|r| r.id.as_str() == id))
+            .map(|r| r.name.to_string());
+        let from_records = subject
+            .and_then(|id| before.records.get(id).or_else(|| after.records.get(id)))
+            .map(|r| r.name.clone());
+        let name = from_rows.or(from_records).unwrap_or_default();
+        let kept = rows.into_iter().map(|r| (r.id.to_string(), r)).collect();
+        let step = TimelineStep::new(kind, subject, &name, &before, &after, kept);
+        let mut history = self.history.borrow_mut();
+        history.record(step, Instant::now());
+        if let Some(ui) = self.ui.upgrade() {
+            refresh(&ui, &history);
+        }
+    }
+}
+
+/// Mirror the history into the Undo and Redo chips.
+pub(super) fn refresh(ui: &AppWindow, history: &History<TimelineStep>) {
+    ui.set_video_can_undo(history.can_undo());
+    ui.set_video_can_redo(history.can_redo());
+    ui.set_video_undo_hint(history.undo_hint().into());
+    ui.set_video_redo_hint(history.redo_hint().into());
 }
 
 #[cfg(test)]
@@ -659,5 +730,53 @@ mod tests {
         assert_eq!(d(StepKind::Delete), "deleting intro.mp4");
         assert_eq!(d(StepKind::ReorderTracks), "track reorder");
         assert_eq!(d(StepKind::AddTrack), "new track");
+    }
+
+    fn recorder(rows: Vec<TimelineClip>, tracks: usize) -> Recorder {
+        Recorder {
+            history: Rc::new(RefCell::new(History::new())),
+            tl_clips: Rc::new(VecModel::from(rows)),
+            tracks: Rc::new(VecModel::from(
+                (0..tracks)
+                    .map(|i| SharedString::from(format!("Track {}", i + 1)))
+                    .collect::<Vec<_>>(),
+            )),
+            ui: slint::Weak::default(),
+        }
+    }
+
+    /// A delete is recorded while the row is still there, so the step knows
+    /// the clip's name and keeps its row for the undo.
+    #[test]
+    fn the_recorder_names_the_clip_and_keeps_its_row() {
+        let mut shown = row("a", &rec(0, 0.0, 2.0));
+        shown.name = "intro (bin name).mp4".into();
+        let r = recorder(vec![shown], 2);
+        let before = cap(&[("a", rec(0, 0.0, 2.0))], 2);
+        let after = cap(&[], 2);
+        r.record_captures(StepKind::Delete, Some("a"), before, after);
+        let history = r.history.borrow();
+        let s = history.peek_undo().expect("a step");
+        assert_eq!(s.describe(), "deleting intro (bin name).mp4");
+        assert_eq!(s.kept_rows["a"].name.as_str(), "intro (bin name).mp4");
+    }
+
+    #[test]
+    fn a_new_track_is_recorded_without_a_project() {
+        let r = recorder(Vec::new(), 2);
+        let before = r.before(None);
+        r.tracks.push("Track 3".into());
+        r.record(None, StepKind::AddTrack, None, before);
+        let history = r.history.borrow();
+        let s = history.peek_undo().expect("a step");
+        assert_eq!((s.tracks_before, s.tracks_after), (2, 3));
+    }
+
+    #[test]
+    fn an_edit_that_changed_nothing_records_nothing() {
+        let r = recorder(vec![row("a", &rec(0, 0.0, 2.0))], 2);
+        let same = cap(&[("a", rec(0, 0.0, 2.0))], 2);
+        r.record_captures(StepKind::Move, Some("a"), same.clone(), same);
+        assert!(!r.history.borrow().can_undo());
     }
 }
