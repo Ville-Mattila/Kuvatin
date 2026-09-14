@@ -15,6 +15,19 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **Undo and redo.** Ctrl+Z takes back the last change and Ctrl+Y or
+  Ctrl+Shift+Z puts it back, and both modes have Undo and Redo buttons that
+  name the step on hover. On the video timeline that is every edit: moving,
+  trimming and transforming a clip, setting a still's duration, adding and
+  deleting clips, and reordering or adding tracks. A slider drag or a held
+  arrow key is one step, and a deleted clip comes back where it was, with its
+  transform and thumbnail. In Images mode it is adding and removing files,
+  clearing the list and applying a crop. Changing the canvas size clears the
+  timeline's history, since every clip's position changes with it.
+- Buttons with a hint now show it on hover, the timeline's zoom controls
+  included.
+
 ## [2.11.0] - 2026-09-13
 A smaller release, mostly about images. WebP can now be lossless, for the
 screenshots and logos where the lossy encoder smears hard edges and saves
