@@ -18,6 +18,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod history;
+
 /// How long a selection must stand before its preview is decoded. Long enough
 /// to swallow a key repeat (a held arrow fires every ~30 ms), short enough that
 /// a deliberate click feels immediate — the row highlights at once either way.
