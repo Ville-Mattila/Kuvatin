@@ -346,7 +346,9 @@ export component AppWindow inherits Window {
     // Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo, in whichever mode is showing.
     // A focused text field takes Ctrl+Z and Ctrl+Y first, but on Windows Slint
     // does not treat Ctrl+Shift+Z as a text redo, so that combination reaches
-    // here and redoes in the current mode even while typing.
+    // here and redoes in the current mode even while typing. Pressing it in a
+    // text field also moves focus to the window, so the next Space plays or
+    // pauses.
     // A drag in progress holds it back (Gesture.held, Step 5b).
     function undo-keys(event: KeyEvent) -> EventResult {
         if (!event.modifiers.control || root.modal-open() || Gesture.held) { return EventResult.reject; }
@@ -1490,8 +1492,8 @@ export component AppWindow inherits Window {
                                     mouse-cursor: eta.mode == EditMode.resize ? MouseCursor.nwse-resize : MouseCursor.move;
                                     pointer-event(ev) => {
                                         Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
-                                        if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                         if (ev.kind == PointerEventKind.down) {
+                                            kbd.focus();
                                             eta.b-posx = root.insp-posx;
                                             eta.b-posy = root.insp-posy;
                                             eta.cen-x = root.insp-posx + edit-layer.rw / 2;
@@ -1681,19 +1683,21 @@ export component AppWindow inherits Window {
                                 Text { text: "TIMELINE"; color: Theme.muted2; font-size: 9.5px; font-weight: 700; letter-spacing: 1px; vertical-alignment: center; }
                                 Rectangle { horizontal-stretch: 1; }
                                 Text { text: "drag clips to arrange"; color: #5e6675; font-size: 9px; vertical-alignment: center; }
-                                TimelineChip {
+                                undo-chip := TimelineChip {
                                     label: "Undo";
                                     wide: true;
                                     hint: root.video-undo-hint;
                                     enabled: root.video-can-undo && !root.modal-open();
-                                    clicked => { root.video-undo(); kbd.focus(); }
+                                    focus-on-click: false;
+                                    clicked => { root.video-undo(); if (!undo-chip.has-focus) { kbd.focus(); } }
                                 }
-                                TimelineChip {
+                                redo-chip := TimelineChip {
                                     label: "Redo";
                                     wide: true;
                                     hint: root.video-redo-hint;
                                     enabled: root.video-can-redo && !root.modal-open();
-                                    clicked => { root.video-redo(); kbd.focus(); }
+                                    focus-on-click: false;
+                                    clicked => { root.video-redo(); if (!redo-chip.has-focus) { kbd.focus(); } }
                                 }
                                 // Zoom: discoverable buttons for the wheel gesture, and the
                                 // only way to reach it without a wheel.

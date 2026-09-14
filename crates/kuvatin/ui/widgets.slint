@@ -625,6 +625,7 @@ export component InspSlider inherits Rectangle {
                 clicked => { ifs.focus(); kta.emit(kta.mouse-x); }
                 pointer-event(ev) => {
                     Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                    if (ev.kind == PointerEventKind.down) { ifs.focus(); }
                 }
             }
         }
@@ -639,6 +640,8 @@ export component TimelineChip inherits Rectangle {
     in property <string> hint;
     in property <bool> wide: false;
     in property <bool> enabled: true;
+    in property <bool> focus-on-click: true;
+    out property <bool> has-focus: fs.has-focus;
     callback clicked();
     width: root.wide ? 34px : 22px;
     height: 22px;
@@ -678,7 +681,9 @@ export component TimelineChip inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
         clicked => {
             if (root.enabled) {
-                fs.focus();
+                if (root.focus-on-click) {
+                    fs.focus();
+                }
                 root.clicked();
             }
         }
