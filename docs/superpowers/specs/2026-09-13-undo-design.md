@@ -95,7 +95,8 @@ used by both modes:
 - **Undo and redo are two-phase.** The caller looks at the top step, applies it,
   and only then tells the history it succeeded, which moves the step to the
   other stack. A failed apply leaves the step where it was, and seals the
-  history (see Merging).
+  history (see Merging); a refusal that changed nothing, such as a missing
+  source, leaves it unsealed.
 - Each step **describes** itself as a noun phrase ("trim of intro.mp4"), which
   the button hints complete: "Undo trim of intro.mp4", "Redo trim of
   intro.mp4", "Nothing to undo".
@@ -227,21 +228,23 @@ none comes back twice.
 | Add files | the paths that were actually new | removes those paths; redo adds them back, with thumbnails from the cache or decoded again |
 | Remove a file | its path and crop (or none); its thumbnail stays in the cache | adds both back; selects the file |
 | Clear the list | every path, crop and thumbnail | restores the whole list |
-| Apply a crop | the file, its previous crop (or none), the new crop | writes the previous crop, updates the row's cropped mark and, if the file is selected, the crop outline |
+| Apply a crop | the file, its previous crop (or none), the new crop | writes the previous crop, updates the row's cropped mark, and selects the file, which redraws its crop outline |
 
-Undo and redo go through the functions the buttons already use (`add_paths`,
-`sync_rows`, the crop map), so rows, sorting, selection and thumbnails behave
-exactly as they do today. The sorted list puts a restored file back in its old
-place without any stored position. A path that no longer exists on disk is
+Undo and redo change the file list, the crop map and the thumbnail cache
+directly, then rebuild the rows with `sync_rows` and decode missing thumbnails
+as the buttons do, so rows, sorting and thumbnails behave exactly as they do
+today. The sorted list puts a restored file back in its old place without any
+stored position. A path that no longer exists on disk is
 skipped, and the user is told how many files could not come back.
 
 ### Lifetime and refusals
 
 - The timeline history is cleared when a project is opened, and when the canvas
   size changes: GES rescales every clip's position with the canvas, so no older
-  step's records would match the timeline. The engine is created once per
-  session, before anything can be recorded, so a new engine always starts with
-  an empty history. The Images history lasts the session.
+  step's records would match the timeline. The engine is created when it is
+  first needed (the first clip added, a canvas size set or a project opened);
+  a track added before then is recorded, and undone and redone without an
+  engine. The Images history lasts the session.
 - Undo and redo are refused, and both buttons are disabled:
   - during an export, including while it is starting;
   - while an Images batch is running;
@@ -260,14 +263,20 @@ skipped, and the user is told how many files could not come back.
   "Nothing to undo" / "Nothing to redo") shows on hover. `TimelineChip` gains
   an `enabled` property and they are greyed out when unavailable; the hint
   still shows on a greyed chip.
-- **Images mode.** Two `SecondaryButton`s, "Undo" and "Redo", at the right end
-  of the "Add files… / Clear" row. `SecondaryButton` gains an optional `hint`,
-  shown on hover and used as its accessible description.
-- **Shortcuts.** Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo. They are handled
-  in `video-keys` and `image-keys` and act on the current mode's history. A
-  focused text field keeps Ctrl+Z for its own text. `modal-keys` runs first,
-  and undo keys do nothing while a dialog is open.
-- **Accessibility.** Each button's hint is also its accessible description.
+- **Images mode.** Two `SecondaryButton`s, "Undo" and "Redo", on a row of their
+  own under the "Add files… / Clear" row, which is too narrow for all four at
+  the default window size. `SecondaryButton` gains an optional `hint`, shown on
+  hover and used as its accessible description.
+- **Shortcuts.** Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo, in the current
+  mode's history. The window's key handler runs `modal-keys`, then
+  `undo-keys`, then `video-keys` or `image-keys`. Undo keys do nothing while a
+  dialog is open, or while a drag is in progress (`Gesture.held`), so nothing
+  is undone under the pointer. A focused text field keeps all three for its
+  own text: it takes Ctrl+Z and Ctrl+Y itself, and `undo-keys` refuses
+  Ctrl+Shift+Z, which Slint on Windows does not treat as a text redo, while
+  one has focus.
+- **Accessibility.** A button's hint is also its accessible description; a
+  `TimelineChip` uses it as its accessible label.
 - **How steps describe themselves** (the hint prefixes "Undo " or "Redo "):
   - Videos: "move of intro.mp4", "trim of intro.mp4", "transform of
     intro.mp4", "duration of still.png", "deleting intro.mp4", "adding
@@ -310,10 +319,13 @@ built.
     refuses is reported and put back, however often it is retried; a clip that
     can go neither way stays parked on one track.
   - A left trim of real media undone and redone, which pins the order of
-    in-point and duration (advisory, like the other live-media tests).
+    in-point and duration.
   - A missing source: named, and nothing changed.
 
   These join the video tests CI gates on in `.github/workflows/release.yml`.
+  The two that need real media, the left trim and a trimmed clip restored,
+  gate in the live-media step, which has one retry, because the self-contained
+  step runs before the media fixtures exist.
 - **Images history (pure, over paths, crops and thumbnails).** Add, remove,
   clear and crop round-trips; adding an already present file records nothing; a
   file missing on restore is skipped and counted.
