@@ -1174,10 +1174,12 @@ impl Project {
         }
     }
 
-    /// Remove empty tracks from the bottom until at most `keep` remain (never
-    /// fewer than one, and never a track with a clip on it). Undo calls this
-    /// with the track count its step started from, so undoing a move onto a
-    /// new bottom track takes that track away again.
+    /// Remove empty tracks from the bottom while more than `keep` remain,
+    /// stopping at the first track with a clip on it (an empty track above a
+    /// clip stays, so no clip changes track) and never going below one. Does
+    /// nothing while rendering. Undo and redo call this with the track count
+    /// of the side they go to, so undoing a move onto a new bottom track takes
+    /// that track away again.
     pub fn prune_tracks(&mut self, keep: usize) {
         if self.rendering.get() {
             return;
@@ -3243,6 +3245,56 @@ mod tests {
         let tracks = project.track_count();
         project.prune_tracks(0);
         assert_eq!(project.track_count(), tracks, "the bottom track has a clip");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Several empty tracks at the bottom all go, down to the count and no
+    /// further; an empty track above a clip stays, so no clip changes track;
+    /// and GES drops the same layers the engine does, so a track made later
+    /// lands at its index.
+    #[test]
+    fn undo_pruning_takes_every_empty_bottom_track_down_to_the_count() {
+        let (dir, png, mut project) = undo_fixture("undo-prune-many");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 2, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        project.layer(5); // empty tracks 3 to 5, as a merged drag leaves them
+        project.prune_tracks(4);
+        assert_eq!(project.track_count(), 4, "down to the count, no further");
+        project.prune_tracks(1);
+        assert_eq!(
+            project.track_count(),
+            3,
+            "stops at b; the empty track 1 stays"
+        );
+        assert_eq!(
+            (project.clip_track(&a), project.clip_track(&b)),
+            (Some(0), Some(2))
+        );
+        assert_eq!(project.timeline.layers().len(), project.track_count());
+        project
+            .move_clip_to_track(&a, 3)
+            .expect("a new bottom track");
+        assert_eq!(
+            project.clip_track(&a),
+            Some(3),
+            "the new track is at its index"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing on the timeline and a count of zero still leaves one track:
+    /// the engine is never without a layer.
+    #[test]
+    fn undo_pruning_leaves_one_track_on_an_empty_timeline() {
+        let (dir, _png, mut project) = undo_fixture("undo-prune-empty");
+        project.layer(2);
+        project.prune_tracks(0);
+        assert_eq!(project.track_count(), 1);
+        assert_eq!(project.timeline.layers().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
