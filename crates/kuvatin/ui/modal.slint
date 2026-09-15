@@ -1,9 +1,9 @@
 import { Theme } from "theme.slint";
 
-// A modal: dimmed, click-swallowing backdrop over the whole window and a
-// centred card that fades in and rises into place. The card's contents are
-// the children; `card-width` / `card-height` size it (height may be an
-// expression over the contents, see the error dialog).
+// A modal: dimmed backdrop, swallowing clicks and the wheel, over the whole
+// window and a centred card that fades in and rises into place. The card's
+// contents are the children; `card-width` / `card-height` size it (height may
+// be an expression over the contents, see the error dialog).
 export component Modal inherits Rectangle {
     in property <length> card-width: 440px;
     in property <length> card-height: 200px;

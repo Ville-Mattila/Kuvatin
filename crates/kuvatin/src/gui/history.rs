@@ -191,7 +191,7 @@ mod tests {
 
     impl Step for Set {
         fn describe(&self) -> String {
-            format!("change of {}", self.what)
+            format!("changing {}", self.what)
         }
         fn merges_with(&self, newer: &Self) -> bool {
             self.merges && newer.merges && self.what == newer.what
@@ -349,9 +349,9 @@ mod tests {
         assert_eq!(h.undo_hint(), "Nothing to undo");
         assert_eq!(h.redo_hint(), "Nothing to redo");
         h.record(set("volume", 0, 1), Instant::now());
-        assert_eq!(h.undo_hint(), "Undo change of volume");
+        assert_eq!(h.undo_hint(), "Undo changing volume");
         h.commit_undo();
-        assert_eq!(h.redo_hint(), "Redo change of volume");
+        assert_eq!(h.redo_hint(), "Redo changing volume");
     }
 
     #[test]
