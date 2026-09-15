@@ -3,6 +3,8 @@ mod hive;
 #[cfg(windows)]
 mod package;
 #[cfg(windows)]
+mod paths;
+#[cfg(windows)]
 mod profiles;
 #[cfg(windows)]
 mod regutil;
