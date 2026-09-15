@@ -45,6 +45,9 @@ windows = { version = "0.58", features = [
     "Foundation_Collections",
     "ApplicationModel",
     "Management_Deployment",
+    # NtDeleteKey: removes the key a vetted handle names, with no second name
+    # lookup for a planted symbolic link to hijack (see shell::regutil).
+    "Wdk_System_Registry",
 ] }
 
 [build-dependencies]
