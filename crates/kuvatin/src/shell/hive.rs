@@ -10,12 +10,32 @@
 //! needs `SeBackupPrivilege` and `SeRestorePrivilege`, which the SYSTEM
 //! installer's token holds but leaves disabled.
 //!
-//! Everything here works *relative to an open root handle* and never walks a
-//! path down to a key: `super::regutil` refuses to step through a symbolic
-//! link, and the hive belongs to a user who may have planted one. The root is
-//! held with `TRAVERSE_ACCESS` — `KEY_QUERY_VALUE` alone — because `KEY_READ`
-//! would also ask for `READ_CONTROL` and `KEY_NOTIFY`, and those are the hive
-//! owner's to deny.
+//! **The file path is not trusted.** `ProfileImagePath` comes from an
+//! admin-only key, but everything below the profile root belongs to the
+//! account, and a directory junction needs no privilege at all — so its owner
+//! can aim `AppData\Local\Microsoft\Windows` at another account's folder or at
+//! a system one and wait for SYSTEM to come along. Worse, `RegLoadKeyW`
+//! *creates* the hive file when it is missing, so a wrong path is not merely
+//! read but written. `checked_usrclass_path` is what stands in the way: every
+//! component from `AppData` down is refused if it is a reparse point, the file
+//! is confirmed to resolve back inside the profile, and `clean_offline` looks
+//! once more, as late as it can, that the file is still a file.
+//!
+//! That leaves a window neither can close: between the last check and
+//! `RegLoadKeyW` the owner can still swap the path. It cannot be closed from
+//! here — holding the file open ourselves is exactly what makes `RegLoadKeyW`
+//! fail — so what is left is to make the window as small as possible and say
+//! plainly that it exists. Anything outside the profile that a junction could
+//! aim at is refused before we get there, so what remains is a race, measured
+//! in the microseconds between two adjacent statements, against a machine that
+//! is already running an uninstall as SYSTEM.
+//!
+//! Everything in the registry works *relative to an open root handle* and never
+//! walks a path down to a key: `super::regutil` refuses to step through a
+//! symbolic link, and the hive belongs to a user who may have planted one. The
+//! root is held with `TRAVERSE_ACCESS` — `KEY_QUERY_VALUE` alone — because
+//! `KEY_READ` would also ask for `READ_CONTROL` and `KEY_NOTIFY`, and those are
+//! the hive owner's to deny.
 //!
 //! This module **reports**; it never prints and never logs. It runs as SYSTEM,
 //! where `crate::applog` would resolve `%LOCALAPPDATA%` to the system profile
@@ -28,6 +48,7 @@
 //! all-users-uninstall plan.
 #![allow(dead_code)]
 
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -44,8 +65,8 @@ use windows::Win32::Security::{
 use windows::Win32::System::Registry::{RegLoadKeyW, RegUnLoadKeyW, HKEY_USERS};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use super::profiles::Profile;
-use super::regutil::{close, open_path_no_links, wide, TRAVERSE_ACCESS};
+use super::profiles::{is_cleanup_sid, Profile, FILE_ATTRIBUTE_REPARSE_POINT};
+use super::regutil::{open_owned_no_links, wide, TRAVERSE_ACCESS};
 use super::verbs::{remove_verbs_under, VerbSweep};
 
 /// How many times to ask the registry to unmount a hive before giving up. A
@@ -54,9 +75,80 @@ use super::verbs::{remove_verbs_under, VerbSweep};
 /// patience, which is plenty and is not a hang.
 const UNMOUNT_ATTEMPTS: u32 = 10;
 
-/// A profile's classes hive as a file, for when the account is signed out.
+/// The steps from a profile's directory down to its classes hive file. Each
+/// one is checked on the way; see `checked_usrclass_path`.
+const USRCLASS_UNDER_PROFILE: [&str; 5] =
+    ["AppData", "Local", "Microsoft", "Windows", "UsrClass.dat"];
+
+/// Where a profile's classes hive file lives, named but not vouched for.
+/// Anything that means to *load* it wants `checked_usrclass_path`.
 pub(super) fn usrclass_path(profile_dir: &Path) -> PathBuf {
-    profile_dir.join(r"AppData\Local\Microsoft\Windows\UsrClass.dat")
+    let mut path = profile_dir.to_path_buf();
+    for step in USRCLASS_UNDER_PROFILE {
+        path.push(step);
+    }
+    path
+}
+
+/// The profile's classes hive file, but only when every step down to it is an
+/// ordinary directory inside that profile.
+///
+/// Two checks, because either alone has a hole. Walking the components with
+/// `symlink_metadata` names the offending directory, which is what an operator
+/// needs, and catches a junction whose target we could never open. Resolving
+/// the file catches everything the walk could have missed, including a junction
+/// planted between two of its steps, because it asks Windows where the file
+/// really is rather than where its name says it is.
+pub(super) fn checked_usrclass_path(profile_dir: &Path) -> Result<PathBuf, String> {
+    let mut here = profile_dir.to_path_buf();
+    for step in USRCLASS_UNDER_PROFILE {
+        here.push(step);
+        // symlink_metadata, so a reparse point is reported as itself rather
+        // than as whatever it points at.
+        let meta = std::fs::symlink_metadata(&here)
+            .map_err(|e| format!("{} would not open ({e})", here.display()))?;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "{} is a reparse point; refusing to mount a hive through it, \
+                 because its owner can aim it anywhere and this runs as SYSTEM",
+                here.display()
+            ));
+        }
+    }
+    if !here.is_file() {
+        return Err(format!("{} is not a file", here.display()));
+    }
+    // `canonicalize` opens the file and asks Windows for its final path, so
+    // this is the same answer `GetFinalPathNameByHandleW` gives — with no need
+    // for a `windows` crate feature this build does not otherwise want.
+    let resolved = std::fs::canonicalize(&here)
+        .map_err(|e| format!("{} would not resolve ({e})", here.display()))?;
+    let root = std::fs::canonicalize(profile_dir)
+        .map_err(|e| format!("{} would not resolve ({e})", profile_dir.display()))?;
+    if !under(&resolved, &root) {
+        return Err(format!(
+            "{} really is {}, which is outside {}; refusing to mount it",
+            here.display(),
+            resolved.display(),
+            root.display()
+        ));
+    }
+    Ok(here)
+}
+
+/// Whether `child` is `parent` or lies below it, compared component by
+/// component and case-insensitively, the way Windows compares names. A string
+/// prefix would not do: `C:\Users\al` is a prefix of `C:\Users\alice` and names
+/// a different account.
+fn under(child: &Path, parent: &Path) -> bool {
+    let mut walk = child.components();
+    parent.components().all(|want| {
+        walk.next().is_some_and(|here| {
+            here.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&want.as_os_str().to_string_lossy())
+        })
+    })
 }
 
 /// How an account's classes hive was reached.
@@ -71,6 +163,18 @@ pub(super) enum HiveAccess {
     None,
 }
 
+impl HiveAccess {
+    /// How the uninstall should say this, so whoever prints does not have to
+    /// work it out again.
+    pub(super) fn wording(&self) -> &'static str {
+        match self {
+            HiveAccess::Loaded => "signed in; its hive was already mounted",
+            HiveAccess::Mounted => "signed out; its UsrClass.dat was mounted and unmounted",
+            HiveAccess::None => "not reached; nothing was removed",
+        }
+    }
+}
+
 /// What visiting one account's classes hive came to, ready for the uninstall to
 /// print. Nothing here has been printed or logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,8 +186,8 @@ pub(super) struct HiveOutcome {
     /// What the verb sweep came to — all zeroes when the hive was never opened.
     pub sweep: VerbSweep,
     /// What went wrong around the sweep: a hive that would not open, a
-    /// `UsrClass.dat` that is not there, a hive we could not unmount again.
-    /// Empty on the ordinary path.
+    /// `UsrClass.dat` that is not there or not to be trusted, a hive we could
+    /// not unmount again. Empty on the ordinary path.
     pub trouble: Vec<String>,
 }
 
@@ -96,9 +200,10 @@ type Cleaned = (VerbSweep, Vec<String>);
 /// Why an offline clean did not happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OfflineFailure {
-    /// The hive is in use: the account signed in between our look at
-    /// `HKEY_USERS` and the mount, so it has a mounted hive after all and the
-    /// loaded path is the one to take.
+    /// The mount was refused the way a hive already in use is refused. This is
+    /// wording, not a decision: `clean_profile` goes back to the loaded path
+    /// after *any* mount failure, because MSDN documents no error code here and
+    /// `ERROR_SHARING_VIOLATION` is only what we observe.
     InUse(String),
     /// Anything else, in words fit to print.
     Failed(String),
@@ -119,13 +224,15 @@ impl OfflineFailure {
 /// account is simply the ordinary case, and the caller's cue to take the
 /// offline path.
 pub(super) fn clean_loaded(sid: &str) -> Result<Cleaned, String> {
+    debug_assert!(
+        is_cleanup_sid(sid),
+        "{sid} is not a cleanable end-user SID; this must never open a service account's hive"
+    );
     // A real key, unlike `HKCU\Software\Classes`, so this resolves nothing and
     // redirects nowhere; every delete then happens below the handle.
-    let root = open_path_no_links(HKEY_USERS, &format!("{sid}_Classes"), TRAVERSE_ACCESS)
+    let root = open_owned_no_links(HKEY_USERS, &format!("{sid}_Classes"), TRAVERSE_ACCESS)
         .map_err(|why| format!(r"HKEY_USERS\{why}"))?;
-    let sweep = remove_verbs_under(root);
-    close(root);
-    Ok((sweep, Vec::new()))
+    Ok((remove_verbs_under(root.get()), Vec::new()))
 }
 
 /// Clean the classes hive of an account that is signed out, by mounting its
@@ -136,20 +243,33 @@ pub(super) fn clean_loaded(sid: &str) -> Result<Cleaned, String> {
 /// stand, and what is left to say is that the hive is still under our name.
 pub(super) fn clean_offline(usrclass: &Path, mount_name: &str) -> Result<Cleaned, OfflineFailure> {
     enable_backup_restore().map_err(OfflineFailure::Failed)?;
+    // `RegLoadKeyW` CREATES the hive file when it is not there, so a path that
+    // has gone missing is not merely unreadable — it is one SYSTEM would write
+    // a fresh hive to. Look as late as we can and refuse rather than create.
+    // The caller has looked too; this is the last word before the load, and the
+    // module doc says plainly what the remaining window is.
+    if !usrclass.is_file() {
+        return Err(OfflineFailure::Failed(format!(
+            "{} is not a file; refusing to have RegLoadKeyW create one there",
+            usrclass.display()
+        )));
+    }
     let mounted = mount(usrclass, mount_name)?;
-    let root = match open_path_no_links(HKEY_USERS, mount_name, TRAVERSE_ACCESS) {
-        Ok(root) => root,
-        Err(why) => {
-            // `mounted` unmounts itself on the way out.
-            return Err(OfflineFailure::Failed(format!(r"HKEY_USERS\{why}")));
-        }
+    let swept = match open_owned_no_links(HKEY_USERS, mount_name, TRAVERSE_ACCESS) {
+        // The root closes at the end of this arm, before the unmount below.
+        Ok(root) => Ok(remove_verbs_under(root.get())),
+        Err(why) => Err(format!(r"HKEY_USERS\{why}")),
     };
-    let sweep = remove_verbs_under(root);
-    close(root);
-    // Unmount here rather than leaving it to the guard, so a refusal has
-    // somewhere to be reported.
-    let trouble = mounted.release().err().into_iter().collect();
-    Ok((sweep, trouble))
+    // Unmounted here, on every path out, so the only thing left for `Drop` is a
+    // panic — and so a refusal has somewhere to be reported.
+    let unmounted = mounted.release();
+    match swept {
+        Ok(sweep) => Ok((sweep, unmounted.err().into_iter().collect())),
+        Err(why) => Err(OfflineFailure::Failed(match unmounted {
+            Ok(()) => why,
+            Err(also) => format!("{why}; {also}"),
+        })),
+    }
 }
 
 /// Clean one profile's classes hive by whichever way is open: the mounted hive
@@ -157,9 +277,12 @@ pub(super) fn clean_offline(usrclass: &Path, mount_name: &str) -> Result<Cleaned
 ///
 /// The mounted hive is tried first and wins, because for a signed-in account it
 /// is the copy Explorer reads — and its file cannot be mounted twice anyway.
-/// An account that signs in between those two steps is caught by the mount
-/// refusing with `ERROR_SHARING_VIOLATION`, after which the loaded path is
-/// worth one more try.
+/// If the mount is then refused for *any* reason the loaded path is tried once
+/// more: an account can sign in between the two steps, and the error that
+/// produces is undocumented, so the only safe reading of a refused mount is
+/// "the hive may be mounted now". Every reason gathered on the way is carried
+/// into `trouble`, because a `_Classes` key we were denied and an account that
+/// was signing in look identical from the outside and must not read alike.
 pub(super) fn clean_profile(profile: &Profile) -> HiveOutcome {
     let sid = profile.sid.clone();
     let loaded_why = match clean_loaded(&sid) {
@@ -175,22 +298,14 @@ pub(super) fn clean_profile(profile: &Profile) -> HiveOutcome {
         // worth printing if the offline path cannot be taken either.
         Err(why) => why,
     };
-    let file = usrclass_path(&profile.dir);
-    if !file.is_file() {
-        // Nothing to mount and nothing mounted: a container-style profile
-        // container that is not attached, or a profile directory that has
-        // already been cleared out. Say so rather than count the account clean.
-        return unreachable_hive(
-            sid,
-            vec![
-                loaded_why,
-                format!(
-                    "{} is not there either, so this account's classes hive could not be reached",
-                    file.display()
-                ),
-            ],
-        );
-    }
+    let file = match checked_usrclass_path(&profile.dir) {
+        Ok(file) => file,
+        // Nothing mounted and nothing we are willing to mount: a container-style
+        // profile that is not attached, a profile directory already cleared out,
+        // or a path someone has aimed elsewhere. Say so rather than count the
+        // account clean.
+        Err(why) => return unreachable_hive(sid, vec![loaded_why, why]),
+    };
     match clean_offline(&file, &mount_name_for(&sid)) {
         Ok((sweep, trouble)) => HiveOutcome {
             sid,
@@ -198,16 +313,20 @@ pub(super) fn clean_profile(profile: &Profile) -> HiveOutcome {
             sweep,
             trouble,
         },
-        Err(OfflineFailure::InUse(why)) => match clean_loaded(&sid) {
-            Ok((sweep, trouble)) => HiveOutcome {
-                sid,
-                access: HiveAccess::Loaded,
-                sweep,
-                trouble,
-            },
-            Err(second) => unreachable_hive(sid, vec![why, second]),
-        },
-        Err(failed) => unreachable_hive(sid, vec![loaded_why, failed.why().to_string()]),
+        Err(failure) => {
+            let so_far = vec![loaded_why, failure.why().to_string()];
+            match clean_loaded(&sid) {
+                Ok((sweep, trouble)) => HiveOutcome {
+                    sid,
+                    access: HiveAccess::Loaded,
+                    sweep,
+                    // Why we went the long way round is worth saying even
+                    // though it ended well.
+                    trouble: [so_far, trouble].concat(),
+                },
+                Err(second) => unreachable_hive(sid, [so_far, vec![second]].concat()),
+            }
+        }
     }
 }
 
@@ -241,6 +360,13 @@ struct Mounted {
 }
 
 impl Mounted {
+    /// Unmount, and hand back what happened.
+    ///
+    /// Marked released before the attempt, deliberately: whatever `unmount`
+    /// comes back with, it has already tried `UNMOUNT_ATTEMPTS` times across a
+    /// second, and one more try from `Drop` a microsecond later would not
+    /// succeed where those failed — it would only hide the error this is about
+    /// to hand the caller.
     fn release(mut self) -> Result<(), String> {
         self.released = true;
         unmount(&self.name)
@@ -249,9 +375,13 @@ impl Mounted {
 
 impl Drop for Mounted {
     fn drop(&mut self) {
-        if !self.released {
-            let _ = unmount(&self.name);
+        if self.released {
+            return;
         }
+        // Only a panic unwinding past `release` gets here, and there is nobody
+        // left to tell: this module must not print, and the caller is already
+        // on its way out. A hive left mounted is worse than a silent retry.
+        let _ = unmount(&self.name);
     }
 }
 
@@ -307,9 +437,16 @@ pub(super) fn unmount(mount_name: &str) -> Result<(), String> {
 /// `RegLoadKeyW` and `RegUnLoadKeyW` need both, and the SYSTEM installer's
 /// token holds them but leaves them disabled.
 ///
-/// Done once and remembered: adjusting a token twice is harmless, but a run
-/// that visits twenty profiles should not say the same failure twenty
-/// different ways.
+/// Done once and remembered: a run that visits twenty profiles should not say
+/// the same failure twenty different ways.
+///
+/// They then stay enabled for the rest of the process's life, and that is
+/// deliberate. Turning them off again would protect nothing — the token *holds*
+/// both privileges, so enabling is flipping a bit any code in this process
+/// could flip straight back, and the process this runs in is
+/// `--unregister-all-users`, which does this and exits. What switching them off
+/// per hive would cost is this memo, and with it the one clear failure message
+/// a run gets instead of one per account.
 pub(super) fn enable_backup_restore() -> Result<(), String> {
     static DONE: OnceLock<Result<(), String>> = OnceLock::new();
     DONE.get_or_init(adjust_backup_restore).clone()
@@ -392,24 +529,26 @@ pub(super) fn is_elevated() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
-        RegCreateKeyExW, RegLoadKeyW, RegOpenKeyExW, RegSaveKeyExW, RegSetValueExW, HKEY,
-        HKEY_CURRENT_USER, HKEY_USERS, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_LATEST_FORMAT,
-        REG_LINK, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCreateKeyExW, RegOpenKeyExW, RegSaveKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_LATEST_FORMAT, REG_LINK, REG_OPTION_NON_VOLATILE,
+        REG_SZ,
     };
 
-    use super::super::profiles::Profile;
-    use super::super::regutil::{
-        close, delete_tree_under, open_path_no_links, open_subkey, wide, DeleteOutcome,
-        TRAVERSE_ACCESS,
-    };
-    use super::super::verbs::{classes_subkeys, remove_verbs_under, VerbSweep};
+    use super::super::regutil::{delete_tree_under, open_owned, DeleteOutcome, OwnedKey};
+    use super::super::verbs::{classes_subkeys, remove_verbs_under};
     use super::super::windows::menu_extensions;
+
+    /// How many times to ask for the cleaned hive file back before calling it
+    /// locked. Separate from `UNMOUNT_ATTEMPTS` because it measures something
+    /// else — the file system letting go after a successful unmount, not the
+    /// registry letting go of the hive — even though a second of patience
+    /// happens to suit both.
+    const HIVE_FILE_DELETE_ATTEMPTS: u32 = 10;
 
     /// A name no other run, and no other test in this run, will use.
     fn unique(what: &str) -> String {
@@ -444,16 +583,22 @@ mod tests {
             )
         };
         assert_eq!(status, ERROR_SUCCESS, "create {sub}");
-        close(h);
+        drop(OwnedKey::own(h));
+    }
+
+    /// Open `root\sub` for writing a value, as a handle that closes itself.
+    fn open_to_set(root: HKEY, sub: &str) -> OwnedKey {
+        let w = wide(sub);
+        let mut h = HKEY::default();
+        let status = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, KEY_SET_VALUE, &mut h) };
+        assert_eq!(status, ERROR_SUCCESS, "open {sub} for writing");
+        OwnedKey::own(h)
     }
 
     /// Put a string value on an existing key — a verb key with nothing in it
     /// would prove less than the ones an install actually writes.
     fn set_string(root: HKEY, sub: &str, name: &str, data: &str) {
-        let w = wide(sub);
-        let mut h = HKEY::default();
-        let status = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, KEY_SET_VALUE, &mut h) };
-        assert_eq!(status, ERROR_SUCCESS, "open {sub} to set {name}");
+        let key = open_to_set(root, sub);
         let value = wide(data);
         let bytes = unsafe {
             std::slice::from_raw_parts(
@@ -462,8 +607,8 @@ mod tests {
             )
         };
         let n = wide(name);
-        let status = unsafe { RegSetValueExW(h, PCWSTR(n.as_ptr()), 0, REG_SZ, Some(bytes)) };
-        close(h);
+        let status =
+            unsafe { RegSetValueExW(key.get(), PCWSTR(n.as_ptr()), 0, REG_SZ, Some(bytes)) };
         assert_eq!(status, ERROR_SUCCESS, "set {name} on {sub}");
     }
 
@@ -473,10 +618,7 @@ mod tests {
     /// redirect us by labelling one either. `regutil`'s own link tests use the
     /// same recipe on real links.
     fn set_link_value(root: HKEY, sub: &str, target_nt: &str) {
-        let w = wide(sub);
-        let mut h = HKEY::default();
-        let status = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, KEY_SET_VALUE, &mut h) };
-        assert_eq!(status, ERROR_SUCCESS, "open {sub} to plant a link value");
+        let key = open_to_set(root, sub);
         // SymbolicLinkValue carries the target with no terminating NUL.
         let target: Vec<u16> = target_nt.encode_utf16().collect();
         let bytes = unsafe {
@@ -486,19 +628,13 @@ mod tests {
             )
         };
         let name = wide("SymbolicLinkValue");
-        let status = unsafe { RegSetValueExW(h, PCWSTR(name.as_ptr()), 0, REG_LINK, Some(bytes)) };
-        close(h);
+        let status =
+            unsafe { RegSetValueExW(key.get(), PCWSTR(name.as_ptr()), 0, REG_LINK, Some(bytes)) };
         assert_eq!(status, ERROR_SUCCESS, "plant a link value on {sub}");
     }
 
     fn exists(root: HKEY, sub: &str) -> bool {
-        match open_subkey(root, sub) {
-            Some(h) => {
-                close(h);
-                true
-            }
-            None => false,
-        }
+        open_owned(root, sub).is_some()
     }
 
     /// A scratch key under `HKCU\Software` standing in for a classes root, held
@@ -508,14 +644,14 @@ mod tests {
     /// a test run out of the developer's own Explorer menu.
     struct Scratch {
         path: String,
-        root: HKEY,
+        root: OwnedKey,
     }
 
     impl Scratch {
         fn new() -> Self {
             let path = format!(r"Software\{}", unique("scratch"));
             create_at(HKEY_CURRENT_USER, &path);
-            let root = open_path_no_links(HKEY_CURRENT_USER, &path, TRAVERSE_ACCESS)
+            let root = open_owned_no_links(HKEY_CURRENT_USER, &path, TRAVERSE_ACCESS)
                 .unwrap_or_else(|why| panic!("open {path}: {why}"));
             Scratch { path, root }
         }
@@ -523,7 +659,10 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            close(self.root);
+            // The root handle is still open here, which is fine: a key deleted
+            // through another handle goes from the namespace at once, and this
+            // one closes with the struct a moment later.
+            //
             // Say so loudly rather than leaving a key behind in silence: the
             // next run would not reuse this name, so nobody would notice.
             match delete_tree_under(HKEY_CURRENT_USER, &self.path) {
@@ -558,9 +697,11 @@ mod tests {
             Mount { name }
         }
 
-        /// The mounted hive's root, opened the way the production path opens it.
-        fn root(&self) -> HKEY {
-            open_path_no_links(HKEY_USERS, &self.name, TRAVERSE_ACCESS)
+        /// The mounted hive's root, opened the way the production path opens it
+        /// and closing itself — so an assertion that fails between here and the
+        /// end of the test still leaves the hive free to unmount.
+        fn root(&self) -> OwnedKey {
+            open_owned_no_links(HKEY_USERS, &self.name, TRAVERSE_ACCESS)
                 .unwrap_or_else(|why| panic!("open the mounted hive {}: {why}", self.name))
         }
     }
@@ -574,16 +715,19 @@ mod tests {
     }
 
     /// Write a key out as a hive file, the way a profile's `UsrClass.dat` is
-    /// one. Needs `SeBackupPrivilege`, which the caller has already enabled.
+    /// one. Needs `SeBackupPrivilege`, which the caller has already enabled, and
+    /// its own `KEY_READ` handle — saving a hive is not one of the things the
+    /// production access constants are cut down for.
     fn save_hive(path: &str, file: &Path) {
         let w = wide(path);
         let mut h = HKEY::default();
         let status =
             unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(w.as_ptr()), 0, KEY_READ, &mut h) };
         assert_eq!(status, ERROR_SUCCESS, "open {path} for saving");
+        let key = OwnedKey::own(h);
         let f = wide(&file.to_string_lossy());
-        let status = unsafe { RegSaveKeyExW(h, PCWSTR(f.as_ptr()), None, REG_LATEST_FORMAT) };
-        close(h);
+        let status =
+            unsafe { RegSaveKeyExW(key.get(), PCWSTR(f.as_ptr()), None, REG_LATEST_FORMAT) };
         assert_eq!(status, ERROR_SUCCESS, "RegSaveKeyExW to {}", file.display());
     }
 
@@ -607,19 +751,20 @@ mod tests {
         create_at(root, r"Kuvatin.CommandStore\shell\item");
     }
 
-    /// The three key trees `seed_verbs` plants that the uninstall must remove,
-    /// and the total the sweep should have considered: the static list plus the
-    /// `.qoi` verb, which only enumeration can turn up.
+    /// How many of `seed_verbs`'s key trees the uninstall must remove.
     const SEEDED_KUVATIN_KEYS: usize = 3;
 
     /// The signed-out path, end to end: build a hive FILE the way a profile's
     /// `UsrClass.dat` is one, run the production cleanup against that file, then
     /// re-mount and look. Needs SeBackup/SeRestore, so it runs only elevated —
-    /// CI's runner is elevated and the release workflow fails the build if this
-    /// ever skips there.
+    /// CI's runner is elevated, and a skip there would mean the gate is not
+    /// running the thing it gates, so on CI a skip is a failure.
     #[test]
     fn offline_cleanup_removes_only_kuvatin_verbs() {
         if !is_elevated() {
+            if std::env::var_os("CI").is_some() {
+                panic!("offline hive test must run elevated on CI");
+            }
             println!("skipping: not elevated");
             return;
         }
@@ -630,7 +775,7 @@ mod tests {
         let file = dir.path().join("UsrClass.dat");
         {
             let scratch = Scratch::new();
-            seed_verbs(scratch.root);
+            seed_verbs(scratch.root.get());
             save_hive(&scratch.path, &file);
         }
         assert!(
@@ -645,7 +790,11 @@ mod tests {
             trouble.is_empty(),
             "nothing should have gone wrong: {trouble:?}"
         );
-        assert_eq!(sweep.trouble(), None, "the hive reads in full");
+        assert!(
+            sweep.troubles().is_empty(),
+            "the hive reads in full: {:?}",
+            sweep.lines
+        );
         assert_eq!(
             sweep.removed, SEEDED_KUVATIN_KEYS,
             "three seeded key trees: {:?}",
@@ -662,44 +811,46 @@ mod tests {
             let check = Mount::new(&file);
             let root = check.root();
             assert!(
-                !exists(root, r"SystemFileAssociations\.png\shell\Kuvatin"),
+                !exists(root.get(), r"SystemFileAssociations\.png\shell\Kuvatin"),
                 "known-extension verb left behind"
             );
             assert!(
-                !exists(root, r"SystemFileAssociations\.qoi\shell\Kuvatin"),
+                !exists(root.get(), r"SystemFileAssociations\.qoi\shell\Kuvatin"),
                 "unknown-extension verb left behind (enumeration missed it)"
             );
-            assert!(!exists(root, "Kuvatin.CommandStore"), "store left behind");
+            assert!(
+                !exists(root.get(), "Kuvatin.CommandStore"),
+                "store left behind"
+            );
             assert!(
                 exists(
-                    root,
+                    root.get(),
                     r"SystemFileAssociations\.png\shell\OpenWithOther\command"
                 ),
                 "a bystander key was wrongly deleted"
             );
-            close(root);
         }
 
         // Nothing holds the file open, so the hive really was unmounted. Given
-        // the same moment of patience `unmount` itself gets: the registry can
-        // take a beat to let the file go, and a test that reads that as a hive
+        // a moment's patience of its own: the file system can take a beat to
+        // let go after the registry has, and a test that read that as a hive
         // left mounted would be crying wolf.
-        let mut trouble = None;
-        for attempt in 0..UNMOUNT_ATTEMPTS {
+        let mut locked = None;
+        for attempt in 0..HIVE_FILE_DELETE_ATTEMPTS {
             if attempt > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             match std::fs::remove_file(&file) {
                 Ok(()) => {
-                    trouble = None;
+                    locked = None;
                     break;
                 }
-                Err(e) => trouble = Some(e),
+                Err(e) => locked = Some(e),
             }
         }
         assert!(
-            trouble.is_none(),
-            "the cleaned hive should be unlocked: {trouble:?}"
+            locked.is_none(),
+            "the cleaned hive should be unlocked: {locked:?}"
         );
     }
 
@@ -711,24 +862,24 @@ mod tests {
     #[test]
     fn a_root_held_with_only_query_value_still_cleans() {
         let scratch = Scratch::new();
-        seed_verbs(scratch.root);
+        seed_verbs(scratch.root.get());
 
-        let sweep = remove_verbs_under(scratch.root);
-        assert_eq!(sweep.trouble(), None);
+        let sweep = remove_verbs_under(scratch.root.get());
+        assert!(sweep.troubles().is_empty(), "{:?}", sweep.lines);
         assert_eq!(sweep.removed, SEEDED_KUVATIN_KEYS, "{:?}", sweep.lines);
         assert_eq!(sweep.refused, 0, "{:?}", sweep.lines);
         assert!(!exists(
-            scratch.root,
+            scratch.root.get(),
             r"SystemFileAssociations\.png\shell\Kuvatin"
         ));
         assert!(!exists(
-            scratch.root,
+            scratch.root.get(),
             r"SystemFileAssociations\.qoi\shell\Kuvatin"
         ));
-        assert!(!exists(scratch.root, "Kuvatin.CommandStore"));
+        assert!(!exists(scratch.root.get(), "Kuvatin.CommandStore"));
         assert!(
             exists(
-                scratch.root,
+                scratch.root.get(),
                 r"SystemFileAssociations\.png\shell\OpenWithOther\command"
             ),
             "a bystander key was wrongly deleted"
@@ -742,17 +893,17 @@ mod tests {
     #[test]
     fn one_obstacle_at_system_file_associations_refuses_every_key_under_it() {
         let scratch = Scratch::new();
-        create_at(scratch.root, "SystemFileAssociations");
+        create_at(scratch.root.get(), "SystemFileAssociations");
         set_link_value(
-            scratch.root,
+            scratch.root.get(),
             "SystemFileAssociations",
             r"\Registry\User\.DEFAULT\Software\Nowhere",
         );
         // A store outside the blocked subtree: one refusal must not shelter the
         // keys that could still have gone.
-        create_at(scratch.root, r"Kuvatin.CommandStore\shell\item");
+        create_at(scratch.root.get(), r"Kuvatin.CommandStore\shell\item");
 
-        let sweep = remove_verbs_under(scratch.root);
+        let sweep = remove_verbs_under(scratch.root.get());
         let under_assoc = menu_extensions().len() + 1; // every extension, plus `image`
         assert_eq!(sweep.refused, under_assoc, "{:?}", sweep.lines);
         assert_eq!(
@@ -768,7 +919,12 @@ mod tests {
             why.starts_with("SystemFileAssociations") && why.contains("SymbolicLinkValue"),
             "the one key to deal with should be named: {why}"
         );
-        assert!(!exists(scratch.root, "Kuvatin.CommandStore"));
+        assert!(
+            sweep.other_refusals().is_empty(),
+            "everything refused here is that one obstacle: {:?}",
+            sweep.other_refusals()
+        );
+        assert!(!exists(scratch.root.get(), "Kuvatin.CommandStore"));
     }
 
     /// A hive that is not mounted is reported, not passed off as a clean sweep.
@@ -795,9 +951,117 @@ mod tests {
         assert_eq!(outcome.access, HiveAccess::None);
         assert_eq!(outcome.sweep, VerbSweep::default(), "nothing was deleted");
         assert!(
-            outcome.trouble.iter().any(|t| t.contains("UsrClass.dat")),
-            "the file we could not reach should be named: {:?}",
+            outcome.trouble.iter().any(|t| t.contains("AppData")),
+            "the path we could not reach should be named: {:?}",
             outcome.trouble
         );
+        assert_eq!(outcome.access.wording(), "not reached; nothing was removed");
+    }
+
+    /// A junction anywhere between the profile root and `UsrClass.dat` is the
+    /// attack this guard exists for: the directories below the profile belong
+    /// to the account, `mklink /J` needs no privilege, and `RegLoadKeyW` would
+    /// happily mount — or, on a missing file, CREATE — a hive wherever the
+    /// junction points, as SYSTEM.
+    #[test]
+    fn a_junction_on_the_way_to_the_hive_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let profile = dir.path().join("profile");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(profile.join(r"AppData\Local\Microsoft")).expect("profile tree");
+        std::fs::create_dir_all(&elsewhere).expect("the junction's target");
+        // A file at the far end, so nothing but the junction check can be what
+        // refuses this.
+        std::fs::write(elsewhere.join("UsrClass.dat"), b"not really a hive").expect("bait");
+
+        let link = profile.join(r"AppData\Local\Microsoft\Windows");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&elsewhere)
+            .output();
+        match made {
+            Ok(out) if link.exists() => out,
+            other => {
+                // Junctions need no privilege, but say so rather than pass in
+                // silence if this environment will not make one.
+                eprintln!("skipping: could not create a junction at {link:?}: {other:?}");
+                return;
+            }
+        };
+
+        let why = checked_usrclass_path(&profile).expect_err("a junction must be refused");
+        assert!(
+            why.contains("reparse point"),
+            "the reason should name what was found: {why}"
+        );
+        assert!(
+            why.contains("Windows"),
+            "the reason should name the component: {why}"
+        );
+
+        // …and the whole path refuses it too, rather than only the helper.
+        let outcome = clean_profile(&Profile {
+            sid: "S-1-5-21-0-0-0-4244".to_string(),
+            dir: profile.clone(),
+        });
+        assert_eq!(outcome.access, HiveAccess::None);
+        assert_eq!(outcome.sweep, VerbSweep::default());
+        assert!(
+            outcome.trouble.iter().any(|t| t.contains("reparse point")),
+            "{:?}",
+            outcome.trouble
+        );
+
+        // The bait was never mounted, so it is still exactly what we wrote.
+        assert_eq!(
+            std::fs::read(elsewhere.join("UsrClass.dat")).expect("bait survives"),
+            b"not really a hive",
+        );
+        // Junctions confuse recursive removal, so take this one out first and
+        // leave the temp directory nothing to trip over.
+        std::fs::remove_dir(&link).expect("remove the junction");
+    }
+
+    /// The guard is not so strict that it refuses an ordinary profile: a plain
+    /// tree resolves to itself and comes back as the path to mount.
+    #[test]
+    fn an_ordinary_profile_tree_passes_the_guard() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let profile = dir.path().join("profile");
+        let hive = usrclass_path(&profile);
+        std::fs::create_dir_all(hive.parent().expect("a parent")).expect("profile tree");
+        std::fs::write(&hive, b"not really a hive").expect("the hive file");
+
+        assert_eq!(
+            checked_usrclass_path(&profile).expect("a plain tree passes"),
+            hive
+        );
+
+        // …but a directory where the file should be is not a hive file.
+        let other = dir.path().join("other");
+        let as_dir = usrclass_path(&other);
+        std::fs::create_dir_all(&as_dir).expect("a directory in the file's place");
+        let why = checked_usrclass_path(&other).expect_err("a directory is not a hive file");
+        assert!(why.contains("is not a file"), "{why}");
+    }
+
+    #[test]
+    fn under_compares_whole_components_not_string_prefixes() {
+        assert!(under(
+            Path::new(r"C:\Users\alice\AppData"),
+            Path::new(r"C:\Users\alice")
+        ));
+        assert!(under(
+            Path::new(r"C:\Users\ALICE\AppData"),
+            Path::new(r"c:\users\alice")
+        ));
+        assert!(under(Path::new(r"C:\Users"), Path::new(r"C:\Users")));
+        // The one a string prefix would get wrong.
+        assert!(!under(
+            Path::new(r"C:\Users\alice\AppData"),
+            Path::new(r"C:\Users\al")
+        ));
+        assert!(!under(Path::new(r"C:\Users"), Path::new(r"C:\Users\alice")));
     }
 }

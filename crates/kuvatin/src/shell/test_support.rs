@@ -21,7 +21,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-use super::regutil::{close, open_path_no_links};
+use super::regutil::open_owned_no_links;
 
 /// `WRITE_DAC`, needed to put a DACL on a key we own.
 const WRITE_DAC_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(0x0004_0000);
@@ -79,9 +79,9 @@ fn set_dacl(path: &str, denied: u32) -> Result<(), String> {
                 .map_err(|e| format!("set dacl: {e}"))?;
         }
     }
-    let h = open_path_no_links(HKEY_CURRENT_USER, path, WRITE_DAC_ACCESS)?;
-    let status = unsafe { RegSetKeySecurity(h, DACL_SECURITY_INFORMATION, psd) };
-    close(h);
+    let key = open_owned_no_links(HKEY_CURRENT_USER, path, WRITE_DAC_ACCESS)?;
+    let status = unsafe { RegSetKeySecurity(key.get(), DACL_SECURITY_INFORMATION, psd) };
+    drop(key);
     if status != ERROR_SUCCESS {
         return Err(format!("RegSetKeySecurity: error {}", status.0));
     }

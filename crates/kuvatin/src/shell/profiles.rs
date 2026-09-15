@@ -27,7 +27,7 @@ const MAX_VALUE_CHARS: usize = 64 * 1024;
 
 /// `FILE_ATTRIBUTE_REPARSE_POINT`, spelled out because the `windows` crate
 /// exports it from a file-system namespace this crate does not otherwise need.
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+pub(super) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Profile {

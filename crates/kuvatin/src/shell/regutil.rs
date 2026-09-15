@@ -12,17 +12,18 @@
 //! they find there (two tests at the bottom of this file pin that down), so
 //! neither appears outside those tests.
 //!
-//! The two ways in are `open_path_no_links` (link-safe, for anything that will
-//! write or delete) and `open_subkey` / `enum_subkeys` (which *do* follow
-//! links, and so are for reading only).
+//! The two ways in are `open_owned_no_links` (link-safe, for anything that
+//! will write or delete) and `open_owned` / `open_owned_reporting` /
+//! `enum_subkeys` (which *do* follow links, and so are for reading only).
+//! Every one of them hands back an [`OwnedKey`] that closes itself, so no
+//! caller outside this module holds a raw `HKEY` it has to remember to close.
 //!
 //! The per-user unregister in `windows.rs` deletes through this module, so
 //! most of it is live. What is not called outside `#[cfg(test)]` yet is
-//! `open_path_no_links` (and `OwnedKey::into_raw`, which exists to hand it its
-//! handle) and `is_reg_link`, because the path that needs them is the offline
-//! one: a later task in the all-users-uninstall plan mounts each profile's
-//! hive and has to open keys for writing in a hive whose owner may have
-//! planted links. Until then, allow those.
+//! `is_reg_link`, because the path that needs it is the offline one: a later
+//! task in the all-users-uninstall plan mounts each profile's hive and has to
+//! open keys for writing in a hive whose owner may have planted links. Until
+//! then, allow it.
 #![allow(dead_code)]
 
 use windows::core::{PCWSTR, PWSTR};
@@ -78,6 +79,17 @@ const DELETE_ACCESS: REG_SAM_FLAGS =
 /// at the door.
 pub(super) const TRAVERSE_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(KEY_QUERY_VALUE.0);
 
+/// What the read-only openers ask for: the right to list a key's children and
+/// the right to read a value on it, which between them is everything any
+/// caller here does with such a handle.
+///
+/// `KEY_READ` is what this used to be, and it was the same mistake
+/// `TRAVERSE_ACCESS` exists to avoid: it bundles in `READ_CONTROL` and
+/// `KEY_NOTIFY`, neither of which is ever used, and each of which is one more
+/// ACE a hive's owner can deny to make a key we can read perfectly well come
+/// back as one we may not open at all.
+const READ_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(KEY_QUERY_VALUE.0 | KEY_ENUMERATE_SUB_KEYS.0);
+
 /// A name buffer past this size means something other than a key name; the
 /// registry caps names at 255 characters.
 const MAX_NAME_CHARS: usize = 64 * 1024;
@@ -90,13 +102,11 @@ pub(super) fn wide(s: &str) -> Vec<u16> {
 /// Give an open key handle back to the registry; a failed close leaves a
 /// caller nothing to do about it.
 ///
-/// For a handle held across any stretch of code, prefer `open_owned` and let
-/// [`OwnedKey`] do this on the way out. What is left for this is the handles
-/// that cannot be owned that way: the raw one an `open_path_no_links` walk
-/// hands back (`hive.rs` holds one per hive it sweeps), and the ones a test
-/// makes with `RegCreateKeyExW`. Never call it on a handle an `OwnedKey`
-/// already holds — that closes it twice.
-pub(super) fn close(h: HKEY) {
+/// Private on purpose: every opener in this module hands back an [`OwnedKey`],
+/// so nobody outside it has a raw handle to close and nobody can close one an
+/// `OwnedKey` still holds. A caller who makes a handle of its own — a test
+/// with `RegCreateKeyExW` — hands it to [`OwnedKey::own`] instead.
+fn close(h: HKEY) {
     unsafe {
         let _ = RegCloseKey(h);
     }
@@ -105,6 +115,7 @@ pub(super) fn close(h: HKEY) {
 /// An open key that closes itself, so a walk can give up at any point without
 /// leaking the handles it opened on the way down — and so can a caller holding
 /// a root it works relative to (see `open_owned`).
+#[derive(Debug)]
 pub(super) struct OwnedKey(HKEY);
 
 impl OwnedKey {
@@ -112,9 +123,12 @@ impl OwnedKey {
         self.0
     }
 
-    /// Hand the handle to a caller who will close it.
-    fn into_raw(self) -> HKEY {
-        std::mem::ManuallyDrop::new(self).0
+    /// Take over a handle someone else opened, so it closes with everything
+    /// this module hands out. For a caller that had to call `RegCreateKeyExW`
+    /// or the like itself; never for a handle an `OwnedKey` already holds,
+    /// which would close it twice.
+    pub(super) fn own(h: HKEY) -> Self {
+        OwnedKey(h)
     }
 }
 
@@ -129,11 +143,11 @@ impl Drop for OwnedKey {
 /// there and would not open.
 ///
 /// Reading is all this is for. Anything that will write or delete wants
-/// `open_path_no_links`, which refuses to be redirected.
+/// `open_owned_no_links`, which refuses to be redirected.
 fn open_subkey_reporting(root: HKEY, subpath: &str) -> Result<HKEY, OpenFailure> {
     let w = wide(subpath);
     let mut h = HKEY::default();
-    let status = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, KEY_READ, &mut h) };
+    let status = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, READ_ACCESS, &mut h) };
     if status == ERROR_SUCCESS {
         Ok(h)
     } else if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
@@ -144,16 +158,33 @@ fn open_subkey_reporting(root: HKEY, subpath: &str) -> Result<HKEY, OpenFailure>
 }
 
 /// Open `root\subpath` for read, **following any symbolic link on the way**.
-/// `None` when the key does not exist or cannot be opened — a caller that
-/// needs to tell those apart wants `open_subkey_reporting`.
-pub(super) fn open_subkey(root: HKEY, subpath: &str) -> Option<HKEY> {
-    open_subkey_reporting(root, subpath).ok()
+/// `None` when the key does not exist *or* cannot be opened — a caller that
+/// must tell those apart wants [`open_owned_reporting`], because reading a
+/// refusal as absence is how a key gets left behind in silence.
+pub(super) fn open_owned(root: HKEY, subpath: &str) -> Option<OwnedKey> {
+    open_subkey_reporting(root, subpath).ok().map(OwnedKey)
 }
 
-/// The same, as a handle that closes itself — for a root a caller will work
-/// relative to and would otherwise have to remember to close.
-pub(super) fn open_owned(root: HKEY, subpath: &str) -> Option<OwnedKey> {
-    open_subkey(root, subpath).map(OwnedKey)
+/// What a read-only open found. The third arm is the one worth having: a key
+/// that is there and will not open is not the same as no key, and an uninstall
+/// that treats it as no key moves on and leaves it.
+pub(super) enum Found {
+    Key(OwnedKey),
+    Absent,
+    /// Why it would not open, in words fit to print, naming the key.
+    Refused(String),
+}
+
+/// Open `root\subpath` for read, **following any symbolic link on the way**,
+/// keeping absence and refusal apart.
+pub(super) fn open_owned_reporting(root: HKEY, subpath: &str) -> Found {
+    match open_subkey_reporting(root, subpath) {
+        Ok(h) => Found::Key(OwnedKey(h)),
+        Err(OpenFailure::Absent) => Found::Absent,
+        Err(OpenFailure::Failed(e)) => {
+            Found::Refused(format!("{} {}", normalised(subpath), explain_error(e)))
+        }
+    }
 }
 
 /// The immediate subkey names of `root\subpath`, or `Err` with a reason when
@@ -168,7 +199,7 @@ pub(super) fn open_owned(root: HKEY, subpath: &str) -> Option<OwnedKey> {
 /// Either way the reason names the key it is about, so a caller can put the
 /// hive in front of it and have a line that reads as one path.
 ///
-/// Like `open_subkey`, this follows a symbolic link at any segment, so it is
+/// Like `open_owned`, this follows a symbolic link at any segment, so it is
 /// for reading only.
 pub(super) fn enum_subkeys(root: HKEY, subpath: &str) -> Result<Vec<String>, String> {
     let named = normalised(subpath);
@@ -431,8 +462,8 @@ fn walk_no_links(
     }
 }
 
-/// Open `root\subpath` without ever being redirected by a symbolic link, and
-/// hand back the handle for the caller to close.
+/// Open `root\subpath` without ever being redirected by a symbolic link, as a
+/// handle that closes itself.
 ///
 /// Each segment is opened from the handle above it with
 /// `REG_OPTION_OPEN_LINK` — which protects only the *last* component of a
@@ -450,13 +481,13 @@ fn walk_no_links(
 ///
 /// This is the only opener to use for a handle you will write or delete
 /// through.
-pub(super) fn open_path_no_links(
+pub(super) fn open_owned_no_links(
     root: HKEY,
     subpath: &str,
     access: REG_SAM_FLAGS,
-) -> Result<HKEY, String> {
+) -> Result<OwnedKey, String> {
     match walk_no_links(root, subpath, access) {
-        Ok(key) => Ok(key.into_raw()),
+        Ok(key) => Ok(key),
         Err(PathFailure::Absent) => Err(format!("{} is not there", normalised(subpath))),
         Err(PathFailure::Refused(why)) => Err(why),
     }
@@ -591,7 +622,7 @@ impl Sweep {
 /// key inside the subtree.
 ///
 /// The path is opened by the same segment-at-a-time walk as
-/// `open_path_no_links`, which refuses to go through a segment carrying a
+/// `open_owned_no_links`, which refuses to go through a segment carrying a
 /// link value (it just keeps absence apart from refusal, which the outcome
 /// needs); the subtree below it is then removed by
 /// `clear_children` and `NtDeleteKey`, which go through a handle for every key
@@ -750,9 +781,8 @@ mod tests {
             let swept = purge(HKEY_CURRENT_USER, &self.path);
             // Say so loudly rather than leaving a key behind in silence: the
             // next run would not reuse this name, so nobody would notice.
-            match open_path_no_links(HKEY_CURRENT_USER, &self.path, KEY_READ) {
-                Ok(h) => {
-                    close(h);
+            match open_owned_no_links(HKEY_CURRENT_USER, &self.path, READ_ACCESS) {
+                Ok(_) => {
                     eprintln!(
                         "scratch key HKCU\\{} survived cleanup ({swept:?}); remove it by hand",
                         self.path
@@ -775,8 +805,7 @@ mod tests {
             if sid.ends_with("_Classes") {
                 continue;
             }
-            if let Some(h) = open_subkey(HKEY_USERS, &format!(r"{sid}\{}", scratch.path)) {
-                close(h);
+            if open_owned(HKEY_USERS, &format!(r"{sid}\{}", scratch.path)).is_some() {
                 return format!(r"\Registry\User\{sid}");
             }
         }
@@ -830,10 +859,9 @@ mod tests {
 
     /// Dress a plain, existing key up as a link without making it one.
     fn fake_link_value(path: &str, target_nt: &str) {
-        let h = open_path_no_links(HKEY_CURRENT_USER, path, KEY_SET_VALUE)
+        let key = open_owned_no_links(HKEY_CURRENT_USER, path, KEY_SET_VALUE)
             .unwrap_or_else(|why| panic!("open {path}: {why}"));
-        let status = set_link_value(h, target_nt);
-        close(h);
+        let status = set_link_value(key.get(), target_nt);
         assert_eq!(
             status, 0,
             "a plain key should accept a REG_LINK SymbolicLinkValue"
@@ -957,7 +985,7 @@ mod tests {
             outcome.notes()
         );
         assert!(!is_reg_link(HKEY_CURRENT_USER, &link));
-        assert!(open_subkey(HKEY_CURRENT_USER, &link).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &link).is_none());
 
         // …and what it pointed at is untouched.
         assert_eq!(
@@ -1003,7 +1031,7 @@ mod tests {
             "a planted link should be named, got {:?}",
             outcome.notes()
         );
-        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
         // The link entry went with the tree; its target did not.
         assert_eq!(
             kids(&scratch.at("victim")),
@@ -1025,7 +1053,7 @@ mod tests {
             matches!(outcome, DeleteOutcome::Deleted { .. }),
             "{outcome:?}"
         );
-        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
         assert_eq!(kids(&scratch.at("victim")), vec!["precious"]);
     }
 
@@ -1043,7 +1071,7 @@ mod tests {
             matches!(outcome, DeleteOutcome::Deleted { .. }),
             "{outcome:?}"
         );
-        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
     }
 
     #[test]
@@ -1067,7 +1095,7 @@ mod tests {
             matches!(outcome, DeleteOutcome::Deleted { .. }),
             "{outcome:?}"
         );
-        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
         // Nothing was followed on the way: the named target is untouched.
         assert_eq!(kids(&scratch.at("victim")), vec!["precious"]);
     }
@@ -1089,30 +1117,35 @@ mod tests {
         };
 
         // The ACE really bites: KEY_READ asks for KEY_NOTIFY and is refused.
-        let parent =
-            open_path_no_links(HKEY_CURRENT_USER, &scratch.path, TRAVERSE_ACCESS).expect("scratch");
-        let denied_read = open_component(parent, "Kuvatin", KEY_READ);
+        // That it is KEY_READ spelled out here and not one of this module's own
+        // constants is the point — none of them asks for KEY_NOTIFY any more.
+        let parent = open_owned_no_links(HKEY_CURRENT_USER, &scratch.path, TRAVERSE_ACCESS)
+            .expect("scratch");
+        let denied_read = open_component(parent.get(), "Kuvatin", KEY_READ);
         assert!(
             matches!(denied_read, Err(OpenFailure::Failed(e)) if e == ERROR_ACCESS_DENIED.0),
             "the Deny ACE should refuse KEY_READ, or this test proves nothing"
         );
-        // …while the right the walk actually asks for still opens.
-        let traversed = open_component(parent, "Kuvatin", TRAVERSE_ACCESS);
-        assert!(
-            traversed.is_ok(),
-            "KEY_QUERY_VALUE should still open under the same ACE"
-        );
-        if let Ok(h) = traversed {
-            close(h);
+        // …while the rights this module actually asks for still open.
+        for (access, named) in [
+            (TRAVERSE_ACCESS, "TRAVERSE_ACCESS"),
+            (READ_ACCESS, "READ_ACCESS"),
+            (DELETE_ACCESS, "DELETE_ACCESS"),
+        ] {
+            let opened = open_component(parent.get(), "Kuvatin", access);
+            assert!(opened.is_ok(), "{named} should open under the same ACE");
+            if let Ok(h) = opened {
+                close(h);
+            }
         }
-        close(parent);
+        drop(parent);
 
         // So a delete below the gated key goes through.
         assert_eq!(
             delete_tree_under(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")),
             deleted()
         );
-        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")).is_none());
         drop(denied);
     }
 
@@ -1129,9 +1162,12 @@ mod tests {
             "an absent key is not a read failure"
         );
 
+        // Denying the right the read actually asks for. `KEY_NOTIFY` would not
+        // do: nothing here asks for it any more, which is the whole point of
+        // `READ_ACCESS`, and a test denying it would pass while proving nothing.
         // Setting a DACL from the test process may not be possible everywhere;
         // say so rather than quietly proving nothing.
-        let denied = match Denied::on(&gate, KEY_NOTIFY) {
+        let denied = match Denied::on(&gate, KEY_ENUMERATE_SUB_KEYS) {
             Ok(guard) => guard,
             Err(why) => {
                 eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
@@ -1170,24 +1206,29 @@ mod tests {
             delete_tree_under(HKEY_CURRENT_USER, &scratch.at("many")),
             deleted()
         );
-        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("many")).is_none());
+        assert!(open_owned(HKEY_CURRENT_USER, &scratch.at("many")).is_none());
     }
 
     #[test]
-    fn open_path_no_links_says_which_way_it_failed() {
+    fn open_owned_no_links_says_which_way_it_failed() {
         let scratch = Scratch::new();
         create(&scratch.at(r"Kuvatin\shell"));
-        let h = open_path_no_links(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell"), KEY_READ)
-            .expect("open a plain path");
-        close(h);
+        drop(
+            open_owned_no_links(
+                HKEY_CURRENT_USER,
+                &scratch.at(r"Kuvatin\shell"),
+                READ_ACCESS,
+            )
+            .expect("open a plain path"),
+        );
 
-        let why = open_path_no_links(HKEY_CURRENT_USER, &scratch.at("nowhere"), KEY_READ)
+        let why = open_owned_no_links(HKEY_CURRENT_USER, &scratch.at("nowhere"), READ_ACCESS)
             .expect_err("absent");
         assert!(why.contains("is not there"), "{why}");
 
         let target_nt = format!(r"{}\{}", hive_nt_path(&scratch), scratch.at("Kuvatin"));
         create_link(&scratch.at("a-link"), &target_nt);
-        let why = open_path_no_links(HKEY_CURRENT_USER, &scratch.at(r"a-link\shell"), KEY_READ)
+        let why = open_owned_no_links(HKEY_CURRENT_USER, &scratch.at(r"a-link\shell"), READ_ACCESS)
             .expect_err("through a link");
         assert!(why.contains("SymbolicLinkValue"), "{why}");
     }
@@ -1205,15 +1246,15 @@ mod tests {
         let target_nt = format!(r"{}\{}", hive_nt_path(&scratch), scratch.at("empty-target"));
         create_link(&link, &target_nt);
 
-        let parent = open_path_no_links(HKEY_CURRENT_USER, &scratch.path, DELETE_ACCESS)
+        let parent = open_owned_no_links(HKEY_CURRENT_USER, &scratch.path, DELETE_ACCESS)
             .expect("open scratch");
         let name = wide("probe-link");
-        let removed = unsafe { RegDeleteKeyExW(parent, PCWSTR(name.as_ptr()), 0, 0) };
-        close(parent);
+        let removed = unsafe { RegDeleteKeyExW(parent.get(), PCWSTR(name.as_ptr()), 0, 0) };
+        drop(parent);
 
         assert_eq!(removed, ERROR_SUCCESS);
         assert!(
-            open_subkey(HKEY_CURRENT_USER, &scratch.at("empty-target")).is_none(),
+            open_owned(HKEY_CURRENT_USER, &scratch.at("empty-target")).is_none(),
             "RegDeleteKeyExW took the link's target"
         );
         assert!(
@@ -1231,19 +1272,19 @@ mod tests {
         let target_nt = format!(r"{}\{}", hive_nt_path(&scratch), scratch.at("victim"));
         create_link(&nested, &target_nt);
 
-        let parent = open_path_no_links(HKEY_CURRENT_USER, &scratch.path, DELETE_ACCESS)
+        let parent = open_owned_no_links(HKEY_CURRENT_USER, &scratch.path, DELETE_ACCESS)
             .expect("open scratch");
-        let leaf = open_as_itself(parent, "doomed").expect("open doomed");
+        let leaf = open_as_itself(parent.get(), "doomed").expect("open doomed");
         // Even handed a vetted handle and a NULL subkey, RegDeleteTreeW walks
         // its descendants by name — and follows the link it meets.
         unsafe {
             let _ = RegDeleteTreeW(leaf, PCWSTR::null());
         }
         close(leaf);
-        close(parent);
+        drop(parent);
 
         assert!(
-            open_subkey(HKEY_CURRENT_USER, &scratch.at("victim")).is_none(),
+            open_owned(HKEY_CURRENT_USER, &scratch.at("victim")).is_none(),
             "RegDeleteTreeW reached out of the subtree and took the link's target"
         );
         assert!(

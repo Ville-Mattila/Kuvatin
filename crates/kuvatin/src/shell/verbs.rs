@@ -59,30 +59,45 @@ pub(super) fn classes_subkeys() -> Vec<String> {
 /// and every name we put in the list is ASCII, so a `.PNG` someone else
 /// created is our own `.png` key and is deleted once.
 ///
-/// The static list comes back whatever happens; the `Option` says why the
-/// enumeration beside it could not be read in full. Dropping the list on such
-/// a failure would be the worst of both worlds — a hive we could not finish
-/// reading is exactly one we should still delete the known keys from — so a
-/// caller deletes everything in the `Vec` and logs the reason, which
-/// `regutil::enum_subkeys` has already put into words.
-pub(super) fn subkeys_to_delete(classes_root: HKEY) -> (Vec<String>, Option<String>) {
+/// The static list comes back whatever happens; the second `Vec` says, in
+/// words, everything that could not be read in full — the enumeration itself,
+/// and any one candidate that is there and would not open. Dropping the list on
+/// such a failure would be the worst of both worlds — a hive we could not
+/// finish reading is exactly one we should still delete the known keys from —
+/// so a caller deletes everything in the first `Vec` and reports the second.
+///
+/// A candidate that refuses to open is *kept* on the list as well as reported.
+/// Reading a refusal as absence is how a stray verb gets left behind in
+/// silence, and the delete is worth attempting anyway: it asks for different
+/// rights than the read did, so it may well go — and if it does not, it says so
+/// as a refusal naming the key, which is more use than the bare read failure.
+pub(super) fn subkeys_to_delete(classes_root: HKEY) -> (Vec<String>, Vec<String>) {
     let mut keys = classes_subkeys();
-    let (children, trouble) =
-        match super::regutil::enum_subkeys(classes_root, "SystemFileAssociations") {
-            Ok(children) => (children, None),
-            Err(why) => (Vec::new(), Some(why)),
-        };
+    let mut troubles = Vec::new();
+    let children = match super::regutil::enum_subkeys(classes_root, "SystemFileAssociations") {
+        Ok(children) => children,
+        Err(why) => {
+            troubles.push(why);
+            Vec::new()
+        }
+    };
     for child in children {
         let candidate = format!(r"SystemFileAssociations\{child}\shell\Kuvatin");
         // Opened only to ask whether it is there at all; the handle closes
-        // itself on the way out of the condition.
-        if super::regutil::open_owned(classes_root, &candidate).is_some()
-            && !keys.iter().any(|k| k.eq_ignore_ascii_case(&candidate))
-        {
+        // itself at the end of the match.
+        let here = match super::regutil::open_owned_reporting(classes_root, &candidate) {
+            super::regutil::Found::Key(_) => true,
+            super::regutil::Found::Absent => false,
+            super::regutil::Found::Refused(why) => {
+                troubles.push(why);
+                true
+            }
+        };
+        if here && !keys.iter().any(|k| k.eq_ignore_ascii_case(&candidate)) {
             keys.push(candidate);
         }
     }
-    (keys, trouble)
+    (keys, troubles)
 }
 
 /// One line the sweep produced, kept apart by what it means rather than by how
@@ -125,12 +140,10 @@ pub(super) struct VerbSweep {
 // uninstall, whose orchestrator is a later task in that plan.
 #[allow(dead_code)]
 impl VerbSweep {
-    /// Why the key list may be short, when it may be.
-    pub(super) fn trouble(&self) -> Option<&str> {
-        self.lines.iter().find_map(|line| match line {
-            SweepLine::Trouble(why) => Some(why.as_str()),
-            _ => None,
-        })
+    /// Every reason the key list may be short. Empty on a hive that read in
+    /// full, which is every hive nobody has locked anything in.
+    pub(super) fn troubles(&self) -> Vec<&str> {
+        self.pick(|line| matches!(line, SweepLine::Trouble(_)))
     }
 
     /// Anything the deletion met and dealt with along the way.
@@ -178,6 +191,22 @@ impl VerbSweep {
             },
         )
     }
+
+    /// The refusals [`Self::shared_obstacle`] does not account for: what is
+    /// still to be dealt with once that one key has been named. With no shared
+    /// obstacle this is simply every refusal, so a caller can print the
+    /// obstacle (when there is one) and then this, and have said each thing
+    /// exactly once.
+    pub(super) fn other_refusals(&self) -> Vec<&str> {
+        match self.shared_obstacle() {
+            Some((shared, _)) => self
+                .refusals()
+                .into_iter()
+                .filter(|why| *why != shared)
+                .collect(),
+            None => self.refusals(),
+        }
+    }
 }
 
 /// Delete every Kuvatin verb key under an already-open classes root — the one
@@ -196,8 +225,8 @@ impl VerbSweep {
 /// carries the result back to whoever prints.
 pub(super) fn remove_verbs_under(classes_root: HKEY) -> VerbSweep {
     let mut sweep = VerbSweep::default();
-    let (keys, trouble) = subkeys_to_delete(classes_root);
-    if let Some(why) = trouble {
+    let (keys, troubles) = subkeys_to_delete(classes_root);
+    for why in troubles {
         sweep.lines.push(SweepLine::Trouble(why));
     }
     for sub in keys {
@@ -219,9 +248,7 @@ pub(super) fn remove_verbs_under(classes_root: HKEY) -> VerbSweep {
 
 #[cfg(test)]
 mod tests {
-    use super::super::regutil::{
-        close, delete_tree_under, open_owned, wide, DeleteOutcome, OwnedKey,
-    };
+    use super::super::regutil::{delete_tree_under, open_owned, wide, DeleteOutcome, OwnedKey};
     use super::super::test_support::Denied;
     use super::super::windows::{
         extension_roots, BACKGROUND_ROOT, CLASSES_ROOT, FOLDER_ROOT, LEGACY_ROOT, STORE_BACKGROUND,
@@ -233,7 +260,8 @@ mod tests {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
-        RegCreateKeyExW, HKEY_CURRENT_USER, KEY_NOTIFY, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+        RegCreateKeyExW, HKEY_CURRENT_USER, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_WRITE,
+        REG_OPTION_NON_VOLATILE,
     };
 
     fn create(path: &str) {
@@ -253,7 +281,7 @@ mod tests {
             )
         };
         assert_eq!(status, ERROR_SUCCESS, "create {path}");
-        close(h);
+        drop(OwnedKey::own(h));
     }
 
     /// A scratch key under HKCU standing in for a classes root, unique to this
@@ -343,7 +371,7 @@ mod tests {
         create(&scratch.at(r"SystemFileAssociations\.tga\shell\OtherApp"));
 
         let (keys, trouble) = subkeys_to_delete(scratch.root.get());
-        assert_eq!(trouble, None, "a readable hive has nothing to report");
+        assert!(trouble.is_empty(), "a readable hive has nothing to report");
         assert_eq!(
             keys.iter().filter(|k| k.as_str() == stray).count(),
             1,
@@ -363,7 +391,7 @@ mod tests {
         let scratch = Scratch::new();
 
         let (keys, trouble) = subkeys_to_delete(scratch.root.get());
-        assert_eq!(trouble, None, "an absent key is not a read failure");
+        assert!(trouble.is_empty(), "an absent key is not a read failure");
         assert_eq!(keys, classes_subkeys());
     }
 
@@ -377,9 +405,11 @@ mod tests {
         create(&scratch.at(r"SystemFileAssociations\.qoi\shell\Kuvatin"));
         let gate = scratch.at("SystemFileAssociations");
 
-        // Setting a DACL from the test process may not be possible everywhere;
-        // say so rather than quietly proving nothing.
-        let denied = match Denied::on(&gate, KEY_NOTIFY) {
+        // The right the enumeration actually asks for — `KEY_NOTIFY` is not one
+        // of them any more, so denying that would prove nothing. Setting a DACL
+        // from the test process may not be possible everywhere; say so rather
+        // than quietly proving nothing either way.
+        let denied = match Denied::on(&gate, KEY_ENUMERATE_SUB_KEYS) {
             Ok(guard) => guard,
             Err(why) => {
                 eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
@@ -393,12 +423,46 @@ mod tests {
             classes_subkeys(),
             "the static list must survive a hive we cannot enumerate"
         );
-        let why = trouble.expect("a hive we cannot read must say so");
+        let why = trouble.first().expect("a hive we cannot read must say so");
         assert!(why.contains("not allowed"), "vague reason: {why}");
         assert!(
             why.contains("SystemFileAssociations"),
             "a log line needs the key, got: {why}"
         );
+        // Before the scratch cleanup, so it can delete the key again.
+        drop(denied);
+    }
+
+    /// A stray verb whose key we may enumerate but not open. Reading that
+    /// refusal as "not there" would keep the key off the list in silence, which
+    /// is the one outcome an uninstall must never produce: the verb stays in
+    /// that account's menu and nothing anywhere says so. It is listed — the
+    /// delete asks for different rights and may well succeed — and reported.
+    #[test]
+    fn a_candidate_we_may_not_open_is_listed_and_reported() {
+        let scratch = Scratch::new();
+        let stray = r"SystemFileAssociations\.qoi\shell\Kuvatin";
+        create(&scratch.at(stray));
+        let gate = scratch.at(stray);
+
+        let denied = match Denied::on(&gate, KEY_QUERY_VALUE) {
+            Ok(guard) => guard,
+            Err(why) => {
+                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                return;
+            }
+        };
+
+        let (keys, trouble) = subkeys_to_delete(scratch.root.get());
+        assert!(
+            keys.iter().any(|k| k == stray),
+            "a key we could not open is still ours to try: {keys:?}"
+        );
+        let why = trouble
+            .first()
+            .expect("a candidate we may not open must say so");
+        assert!(why.contains("not allowed"), "vague reason: {why}");
+        assert!(why.contains(".qoi"), "a log line needs the key, got: {why}");
         // Before the scratch cleanup, so it can delete the key again.
         drop(denied);
     }
@@ -412,7 +476,7 @@ mod tests {
         create(&scratch.at(r"SystemFileAssociations\.PNG\shell\Kuvatin"));
 
         let (keys, trouble) = subkeys_to_delete(scratch.root.get());
-        assert_eq!(trouble, None);
+        assert!(trouble.is_empty());
         let png = keys
             .iter()
             .filter(|k| k.eq_ignore_ascii_case(r"SystemFileAssociations\.png\shell\Kuvatin"))
@@ -431,7 +495,7 @@ mod tests {
         create(&scratch.at("Kuvatin.CommandStore"));
 
         let sweep = remove_verbs_under(scratch.root.get());
-        assert_eq!(sweep.trouble(), None);
+        assert!(sweep.troubles().is_empty());
         assert_eq!(sweep.removed, 2, "{:?}", sweep.lines);
         assert_eq!(sweep.refused, 0, "{:?}", sweep.lines);
         assert_eq!(

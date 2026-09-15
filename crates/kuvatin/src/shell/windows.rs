@@ -587,7 +587,7 @@ mod tests {
     use super::*;
 
     use super::super::regutil::{
-        delete_tree_under, is_reg_link, open_path_no_links, DeleteOutcome,
+        delete_tree_under, is_reg_link, open_owned_no_links, DeleteOutcome,
     };
     use std::sync::atomic::AtomicU64;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -665,7 +665,7 @@ mod tests {
         // is Windows' behaviour being reported, not ours: where the classes
         // root is not a link there is nothing to refuse.
         if is_reg_link(HKEY_CURRENT_USER, CLASSES_ROOT) {
-            let why = open_path_no_links(
+            let why = open_owned_no_links(
                 HKEY_CURRENT_USER,
                 &scratch.absolute(r"shell\Kuvatin"),
                 KEY_WRITE,
@@ -682,7 +682,7 @@ mod tests {
         );
         // Reading may follow the link; only deleting must not.
         assert!(
-            super::super::regutil::open_subkey(
+            super::super::regutil::open_owned(
                 HKEY_CURRENT_USER,
                 &scratch.absolute(r"shell\Kuvatin")
             )
