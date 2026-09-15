@@ -12,13 +12,18 @@
 //! privilege at all, so its owner can aim `AppData`, `Local`, `Temp`,
 //! `Kuvatin`, `Packages` — or a `VilleMattila.Kuvatin_*` entry of their own
 //! making — anywhere on the machine and wait for the SYSTEM uninstall to come
-//! and delete through it. Turning these names into deletions is
-//! [`super::files`]'s job, and it does it the only way that holds: it walks
-//! down from the profile directory `profiles::vet_dir` already vetted, one
-//! component at a time, refuses a reparse point at every one of them —
-//! including the leaf, and including the components of `files`, not only of
-//! `trees` — and holds each ancestor open so nothing can be swapped in behind
-//! it. Nothing may take a path from here and hand it straight to a delete.
+//! and delete through it, and can do it *while* the uninstall is running.
+//! Turning these names into deletions is [`super::files`]'s job, and it is
+//! harder than it looks: a directory can be turned into a junction in place,
+//! without being renamed or deleted, so no share mode holds a name still and
+//! nothing checked by name stays checked. What that module does instead is
+//! walk down from the profile directory `profiles::vet_dir` already vetted,
+//! refusing a reparse point at every component — the components of `files` as
+//! much as those of `trees` — then hold the leaf itself so its parent can no
+//! longer be emptied, then look at every ancestor *again* through the handles
+//! it has held all along, and only then delete, through a handle rather than
+//! through a path wherever it can. Nothing may take a path from here and hand
+//! it straight to a delete.
 //!
 //! [`package_data_dirs`] is the one thing here that reads the disk, and it
 //! reads it by name like everything else: a junction at `AppData` would have it
@@ -89,7 +94,14 @@ pub(super) fn plan(profile: &Path, package_data_dirs: &[PathBuf]) -> FilePlan {
 }
 
 /// The `AppData\Local\Packages\VilleMattila.Kuvatin_*` folders in one profile
-/// (usually zero or one). Reads the disk; `[]` when the parent is absent.
+/// (usually zero or one), plus whatever went wrong on the way.
+///
+/// Same shape as `verbs::subkeys_to_delete` and for the same reason: an
+/// account whose `Packages` folder we could not read is an account whose
+/// package data this uninstall will not find, and reporting that as "there is
+/// none" would have the uninstall call it clean. Only a `Packages` folder that
+/// is genuinely *not there* is an empty list with nothing to say — which is
+/// every account that has never run a packaged app.
 ///
 /// Directories only. `DirEntry::file_type` on Windows answers out of the
 /// directory listing without opening anything, and it calls a junction a
@@ -97,16 +109,46 @@ pub(super) fn plan(profile: &Path, package_data_dirs: &[PathBuf]) -> FilePlan {
 /// junction planted here is not returned at all, and this hands out one fewer
 /// name for the walk in `super::files` to refuse. That is a convenience, not
 /// the defence: see this module's documentation for where the defence is.
-pub(super) fn package_data_dirs(profile: &Path) -> Vec<PathBuf> {
+pub(super) fn package_data_dirs(profile: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let packages = profile.join("AppData").join("Local").join("Packages");
-    let Ok(rd) = std::fs::read_dir(&packages) else {
-        return Vec::new();
+    let rd = match std::fs::read_dir(&packages) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
+        Err(e) => {
+            return (
+                Vec::new(),
+                vec![format!("{} would not be read ({e})", packages.display())],
+            )
+        }
     };
-    rd.flatten()
-        .filter(|e| is_package_data_name(&e.file_name()))
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .collect()
+    let mut found = Vec::new();
+    let mut trouble = Vec::new();
+    for entry in rd {
+        let entry = match entry {
+            Ok(entry) => entry,
+            // One unreadable entry does not say which name it was, so name the
+            // folder it was in — it is still the difference between a complete
+            // list and a short one passed off as complete.
+            Err(e) => {
+                trouble.push(format!("{} did not list in full ({e})", packages.display()));
+                continue;
+            }
+        };
+        if !is_package_data_name(&entry.file_name()) {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => found.push(entry.path()),
+            // A name of ours that is not a folder is not package data, and
+            // saying so is cheaper than the walk refusing it later.
+            Ok(_) => {}
+            Err(e) => trouble.push(format!(
+                "{} would not say what it is ({e})",
+                entry.path().display()
+            )),
+        }
+    }
+    (found, trouble)
 }
 
 /// Whether a `Packages` entry carries our package's family-name prefix,
@@ -250,7 +292,10 @@ mod tests {
 
         assert_eq!(
             package_data_dirs(&profile),
-            vec![packages.join("VilleMattila.Kuvatin_5jce0xfqz5w2a")]
+            (
+                vec![packages.join("VilleMattila.Kuvatin_5jce0xfqz5w2a")],
+                Vec::new()
+            )
         );
     }
 
@@ -259,7 +304,11 @@ mod tests {
     #[test]
     fn a_profile_without_packages_yields_nothing() {
         let dir = tempfile::tempdir().expect("a temp directory");
-        assert_eq!(package_data_dirs(dir.path()), Vec::<PathBuf>::new());
+        assert_eq!(
+            package_data_dirs(dir.path()),
+            (Vec::new(), Vec::new()),
+            "no Packages folder at all is nothing to report"
+        );
     }
 
     /// Matched without regard to case, like [`is_protected`] and like the file
@@ -274,7 +323,10 @@ mod tests {
 
         assert_eq!(
             package_data_dirs(&profile),
-            vec![packages.join("villemattila.kuvatin_5JCE0XFQZ5W2A")]
+            (
+                vec![packages.join("villemattila.kuvatin_5JCE0XFQZ5W2A")],
+                Vec::new()
+            )
         );
     }
 
@@ -292,6 +344,33 @@ mod tests {
         )
         .expect("a file where a folder would be");
 
-        assert_eq!(package_data_dirs(&profile), Vec::<PathBuf>::new());
+        assert_eq!(package_data_dirs(&profile), (Vec::new(), Vec::new()));
+    }
+
+    /// A `Packages` folder that is there and will not read is reported, never
+    /// handed back as "there is nothing of ours here" — that difference is the
+    /// difference between an account this uninstall cleaned and one it only
+    /// believed it had.
+    ///
+    /// Provoked with a file standing where the folder should be, which fails
+    /// the read with `ERROR_DIRECTORY` and needs no privilege to arrange, so
+    /// this test never skips. A Deny ACE on a real `Packages` folder — the case
+    /// this is really about — comes back through the same arm.
+    #[test]
+    fn a_packages_folder_that_will_not_read_is_reported_not_swallowed() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let profile = dir.path().to_path_buf();
+        let local = profile.join("AppData").join("Local");
+        std::fs::create_dir_all(&local).expect("the AppData\\Local tree");
+        std::fs::write(local.join("Packages"), b"not a folder").expect("a file in its place");
+
+        let (found, trouble) = package_data_dirs(&profile);
+        assert_eq!(found, Vec::<PathBuf>::new());
+        assert_eq!(trouble.len(), 1, "{trouble:?}");
+        assert!(
+            trouble[0].contains("Packages"),
+            "the folder we could not read should be named: {}",
+            trouble[0]
+        );
     }
 }

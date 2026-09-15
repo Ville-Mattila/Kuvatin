@@ -48,6 +48,10 @@ windows = { version = "0.58", features = [
     # NtDeleteKey: removes the key a vetted handle names, with no second name
     # lookup for a planted symbolic link to hijack (see shell::regutil).
     "Wdk_System_Registry",
+    # SetFileInformationByHandle + FILE_DISPOSITION_INFO: deletes the file a
+    # vetted handle names, with no path for a planted junction to redirect
+    # (see shell::files).
+    "Win32_Storage_FileSystem",
 ] }
 
 [build-dependencies]
