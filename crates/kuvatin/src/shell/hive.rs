@@ -1235,7 +1235,9 @@ mod tests {
     /// that privilege lets straight past a DACL. So on an elevated runner
     /// whether the deny bites depends on which test ran first — which is why
     /// this asks instead of assuming, and why its skip is the one kind that is
-    /// honest on CI as well.
+    /// honest on CI as well. Only on an *elevated* one: unelevated there is no
+    /// such privilege to hold, so the same success means the ACE never went on,
+    /// and that is a failure.
     #[test]
     fn a_hive_file_we_may_not_read_is_refused_by_name() {
         let dir = tempfile::tempdir().expect("a temp directory");
@@ -1253,18 +1255,30 @@ mod tests {
         let Some(_denied) = DeniedFile::new(&hive) else {
             return;
         };
-        // Does the ACE actually bite in this process? Under SeBackupPrivilege
-        // it does not, and there is nothing wrong with the machine when it
-        // does not — so measure, then say so and stop.
-        // Does the ACE actually bite in this process? Ask the call that does
-        // the refusing, which measurement says is `canonicalize` and not the
-        // `symlink_metadata` above it: the walk's stat opens with no desired
-        // access at all, and an access check for no rights is one nothing can
-        // fail, so a deny-all ACE sails past it (measured here: attributes
-        // Ok, `is_file` true, resolve error 5). `canonicalize` is also the one
-        // `SeBackupPrivilege` would carry through, which is what makes this
-        // worth asking rather than assuming.
-        if std::fs::canonicalize(&hive).is_ok() {
+        // Does the ACE actually bite in this process? Ask `canonicalize`, which
+        // measurement says is the call that refuses — not the
+        // `symlink_metadata` in `vet_step` above it, which answers `Ok` under
+        // the very same ACE (measured here: attributes Ok, `is_file` true,
+        // resolve error 5).
+        //
+        // Not because the two ask for different rights: both issue the same
+        // zero-rights `FILE_FLAG_BACKUP_SEMANTICS` open, and that open is what
+        // fails with error 5. The difference is what std does next. Its
+        // `metadata` catches `ERROR_ACCESS_DENIED` and falls back to
+        // `FindFirstFileExW`, which reads the parent directory's entry and so
+        // never touches the file's own DACL at all (`library/std/src/sys/fs/
+        // windows.rs`, the `metadata` fallback). `canonicalize` has no such
+        // fallback: the handle is the answer.
+        //
+        // So `canonicalize` is both the call that can say no and the call
+        // `SeBackupPrivilege` would carry through, which is exactly what makes
+        // this worth asking rather than assuming.
+        //
+        // …and only an elevated token can hold that privilege. A resolve that
+        // succeeds unelevated means the ACE never went on, which is a broken
+        // test rather than a process that cannot be denied — so fail there
+        // instead of skipping.
+        if std::fs::canonicalize(&hive).is_ok() && is_elevated() {
             skip_even_on_ci("SeBackupPrivilege overrides the deny in this process");
             return;
         }

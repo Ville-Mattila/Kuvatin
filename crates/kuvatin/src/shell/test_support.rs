@@ -99,15 +99,31 @@ fn set_dacl(path: &str, denied: u32) -> Result<(), String> {
 /// GitHub Actions included.
 ///
 /// Every self-skipping test in this crate goes through here or through
-/// [`skip_even_on_ci`], so the rule is one rule and lives in one place. The
-/// line itself stays `skipping: <reason>` on stdout, which is what the release
-/// workflow greps for.
+/// [`skip_even_on_ci`], so the rule is one rule and lives in one place.
+///
+/// What the release workflow relies on is the exit code, not the text: the
+/// panic below is what turns a skipped gate into a failed build, and no step
+/// greps the output for it. The line is `println!` rather than `eprintln!` all
+/// the same, so that a developer running with `--nocapture` sees it in order
+/// with the test names rather than interleaved from another stream.
+#[track_caller]
 pub(super) fn skip_or_fail_on_ci(reason: &str) {
-    assert!(
-        std::env::var_os("CI").is_none(),
-        "this test must not skip on CI: {reason}"
-    );
+    assert!(!on_ci(), "this test must not skip on CI: {reason}");
     println!("skipping: {reason}");
+}
+
+/// Whether this is a CI run: `CI` set to something that is not empty and not
+/// `false`.
+///
+/// Presence alone will not do. Some local tooling exports `CI=false` to say the
+/// opposite of what `var_os(..).is_some()` would read it as, and a developer
+/// whose shell does that would find every one of these tests failing for a
+/// reason nothing on screen explains.
+fn on_ci() -> bool {
+    match std::env::var("CI") {
+        Ok(value) => !value.is_empty() && !value.eq_ignore_ascii_case("false"),
+        Err(_) => false,
+    }
 }
 
 /// The same line, for the one kind of skip that is honest everywhere: the
@@ -118,6 +134,7 @@ pub(super) fn skip_or_fail_on_ci(reason: &str) {
 /// runner could do anything about it and failing there would be noise. Use this
 /// only where the test has *measured* that the condition does not hold — never
 /// where it merely failed to arrange it.
+#[track_caller]
 pub(super) fn skip_even_on_ci(reason: &str) {
     println!("skipping: {reason}");
 }
