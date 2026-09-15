@@ -18,6 +18,15 @@
 //! Every one of them hands back an [`OwnedKey`] that closes itself, so no
 //! caller outside this module holds a raw `HKEY` it has to remember to close.
 //!
+//! Every reason this module hands back is written to be printed as it stands,
+//! and they are all punctuated the same way: `<key>: <what happened>`, the key
+//! relative to whichever root was passed in. One rule, so a caller can put the
+//! hive in front of any of them and get a line that reads as one thought, and
+//! so a log of several reads as a list rather than as several styles. The
+//! colon is what keeps `SystemFileAssociations: subkey 12 claims a name
+//! longer than…` from reading as a key called "SystemFileAssociations subkey
+//! 12".
+//!
 //! The per-user unregister in `windows.rs` deletes through this module, so
 //! most of it is live. What is not called outside `#[cfg(test)]` yet is
 //! `is_reg_link`, because the path that needs it is the offline one: a later
@@ -186,7 +195,7 @@ pub(super) fn open_owned_reporting(root: HKEY, subpath: &str) -> Found {
         Ok(h) => Found::Key(OwnedKey(h)),
         Err(OpenFailure::Absent) => Found::Absent,
         Err(OpenFailure::Failed(e)) => {
-            Found::Refused(format!("{} {}", normalised(subpath), explain_error(e)))
+            Found::Refused(format!("{}: {}", normalised(subpath), explain_error(e)))
         }
     }
 }
@@ -200,11 +209,8 @@ pub(super) fn open_owned_reporting(root: HKEY, subpath: &str) -> Found {
 /// one `Ok(empty)`. A key that is there and refuses to open — the hive's owner
 /// can deny us the read — is a failure and says so.
 ///
-/// Either way the reason opens with the key it is about, punctuated the same
-/// way — `<key>: <what happened>` — so a caller can put the hive in front and
-/// get one line that reads as one thought. The colon earns its keep on the
-/// enumeration failures, whose text starts with a noun (`subkey 12 claims…`)
-/// and would otherwise read as part of the key's name.
+/// Either way the reason opens with the key it is about, punctuated as every
+/// reason in this module is (see the module docs).
 ///
 /// Like `open_owned`, this follows a symbolic link at any segment, so it is
 /// for reading only.
@@ -427,14 +433,14 @@ fn open_through(parent: HKEY, name: &str, trail: &str) -> Result<OwnedKey, PathF
         Err(OpenFailure::Absent) => return Err(PathFailure::Absent),
         Err(OpenFailure::Failed(e)) => {
             return Err(PathFailure::Refused(format!(
-                "{trail} {}",
+                "{trail}: {}",
                 explain_error(e)
             )))
         }
     };
     if is_link_handle(key.get()) {
         return Err(PathFailure::Refused(format!(
-            "{trail} carries a REG_LINK SymbolicLinkValue; not walking through it"
+            "{trail}: carries a REG_LINK SymbolicLinkValue; not walking through it"
         )));
     }
     Ok(key)
@@ -475,7 +481,7 @@ fn walk_no_links(
         Ok(h) => Ok(OwnedKey(h)),
         Err(OpenFailure::Absent) => Err(PathFailure::Absent),
         Err(OpenFailure::Failed(e)) => Err(PathFailure::Refused(format!(
-            "{trail} {}",
+            "{trail}: {}",
             explain_error(e)
         ))),
     }
@@ -507,7 +513,7 @@ pub(super) fn open_owned_no_links(
 ) -> Result<OwnedKey, String> {
     match walk_no_links(root, subpath, access) {
         Ok(key) => Ok(key),
-        Err(PathFailure::Absent) => Err(format!("{} is not there", normalised(subpath))),
+        Err(PathFailure::Absent) => Err(format!("{}: is not there", normalised(subpath))),
         Err(PathFailure::Refused(why)) => Err(why),
     }
 }
@@ -537,7 +543,7 @@ impl Sweep {
     fn note_link_removed(&mut self, path: &str) {
         if self.noted.insert(path.to_string()) {
             self.notes.push(format!(
-                "{path} carried a REG_LINK SymbolicLinkValue; removed that key itself, never what it named"
+                "{path}: carried a REG_LINK SymbolicLinkValue; removed that key itself, never what it named"
             ));
         }
     }
@@ -561,7 +567,7 @@ impl Sweep {
 impl Sweep {
     fn clear_children(&mut self, key: HKEY, trail: &str, depth: u32) -> Result<(), String> {
         if depth == 0 {
-            return Err(format!("{trail} is nested deeper than we will walk"));
+            return Err(format!("{trail}: nested deeper than we will walk"));
         }
         let names = enum_children(key).map_err(|why| format!("{trail}: {why}"))?;
         let mut first: Option<String> = None;
@@ -574,7 +580,7 @@ impl Sweep {
                 Err(OpenFailure::Failed(e)) => {
                     failed += 1;
                     if first.is_none() {
-                        first = Some(format!("{here} {}", explain_error(e)));
+                        first = Some(format!("{here}: {}", explain_error(e)));
                     }
                     continue;
                 }
@@ -616,7 +622,7 @@ impl Sweep {
             if round > 0 {
                 if self.retries_left == 0 {
                     return Err(format!(
-                        "{trail} kept changing while we worked; gave up after {RETRY_BUDGET} retries across the tree"
+                        "{trail}: kept changing while we worked; gave up after {RETRY_BUDGET} retries across the tree"
                     ));
                 }
                 self.retries_left -= 1;
@@ -626,13 +632,13 @@ impl Sweep {
             if status == STATUS_SUCCESS {
                 return Ok(());
             }
-            let why = format!("{trail} {}", explain_status(status));
+            let why = format!("{trail}: {}", explain_status(status));
             if status != STATUS_CANNOT_DELETE {
                 return Err(why);
             }
             last = Some(why);
         }
-        Err(last.unwrap_or_else(|| format!("{trail} would not delete")))
+        Err(last.unwrap_or_else(|| format!("{trail}: would not delete")))
     }
 }
 
@@ -755,7 +761,7 @@ mod tests {
         let status = delete_this_key(h);
         close(h);
         if status != STATUS_SUCCESS {
-            trouble.get_or_insert(format!("{name} {}", explain_status(status)));
+            trouble.get_or_insert(format!("{name}: {}", explain_status(status)));
         }
         match trouble {
             Some(why) => Err(why),
