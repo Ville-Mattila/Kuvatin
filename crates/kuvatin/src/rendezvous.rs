@@ -109,6 +109,24 @@ pub fn gather(group: &str, mine: &[PathBuf], quiet: Duration) -> Role {
 
 /// [`gather`] under an explicit root directory.
 pub fn gather_in(root: &Path, group: &str, mine: &[PathBuf], quiet: Duration) -> Role {
+    let alone = lone_grace(startup_elapsed()).min(quiet);
+    gather_with(root, group, mine, quiet, alone)
+}
+
+/// [`gather_in`] with the lone-arrival wait supplied rather than measured.
+///
+/// Production always goes through [`gather_in`], which derives `alone` from
+/// this process' own startup. Tests that are about *batching* rather than
+/// about the lone-arrival shortcut pass `alone == quiet`, so a leader that
+/// happens to look at an empty spool doesn't close the batch before threads
+/// the scheduler has parked get to arrive.
+fn gather_with(
+    root: &Path,
+    group: &str,
+    mine: &[PathBuf],
+    quiet: Duration,
+    alone: Duration,
+) -> Role {
     let dir = root.join(group_dir(group));
     if std::fs::create_dir_all(&dir).is_err() || spool(&dir, mine).is_err() {
         return Role::Leader(mine.to_vec());
@@ -122,7 +140,6 @@ pub fn gather_in(root: &Path, group: &str, mine: &[PathBuf], quiet: Duration) ->
     let started = Instant::now();
     let mut last_change = Instant::now();
     let mut seen = spool_count(&dir);
-    let alone = lone_grace(startup_elapsed()).min(quiet);
     loop {
         std::thread::sleep(Duration::from_millis(40));
         let n = spool_count(&dir);
@@ -384,22 +401,31 @@ mod tests {
 
     /// Eight "processes" arrive in a staggered burst (like Explorer's
     /// CreateProcess loop): exactly one leads and it holds every path, no
-    /// path is lost or duplicated, and nothing is left behind. The quiet
-    /// window is generous: a loaded CI runner scheduled 15 ms-staggered
-    /// threads more than 250 ms apart, which correctly made two batches.
+    /// path is lost or duplicated, and nothing is left behind.
+    ///
+    /// The leader is asked to hold the whole quiet window even while it still
+    /// looks alone. What is under test here is the batching; the lone-arrival
+    /// shortcut has its own tests (the `lone_grace` ones above and
+    /// `a_lone_arrival_does_not_wait_the_full_quiet_window` below), and it is
+    /// capped at [`QUIET`] however wide the caller's window is. On a loaded CI
+    /// runner the 15 ms-staggered threads were descheduled for longer than
+    /// that cap, so the first thread closed a batch alone and the other seven
+    /// formed a second one — correct behaviour, but not what this test is for.
     #[test]
     fn a_burst_of_processes_yields_one_leader_holding_every_path() {
         let root = tempfile::tempdir().unwrap();
+        let quiet = Duration::from_millis(1200);
         let handles: Vec<_> = (0..8)
             .map(|i| {
                 let root = root.path().to_path_buf();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(i as u64 * 15));
-                    gather_in(
+                    gather_with(
                         &root,
                         "preset:test",
                         &[p(&format!("C:/img/{i}.png"))],
-                        Duration::from_millis(1200),
+                        quiet,
+                        quiet,
                     )
                 })
             })
@@ -453,7 +479,9 @@ mod tests {
     /// Two processes that both judge a lock stale must not both lead: only
     /// the rename winner retires it, the other follows. The threads start
     /// through a barrier so they really race (a thread scheduled only after
-    /// the first batch closed would legitimately lead a second one).
+    /// the first batch closed would legitimately lead a second one), and —
+    /// like the burst test above — the leader holds the whole window rather
+    /// than the lone-arrival grace, which is shorter and tested separately.
     #[test]
     fn a_stale_lock_is_retired_by_exactly_one_process() {
         let root = tempfile::tempdir().unwrap();
@@ -464,18 +492,14 @@ mod tests {
             .unwrap();
         drop(lock);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let quiet = Duration::from_millis(400);
         let handles: Vec<_> = (0..4)
             .map(|i| {
                 let root = root.path().to_path_buf();
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    gather_in(
-                        &root,
-                        "g",
-                        &[p(&format!("{i}.png"))],
-                        Duration::from_millis(400),
-                    )
+                    gather_with(&root, "g", &[p(&format!("{i}.png"))], quiet, quiet)
                 })
             })
             .collect();
