@@ -12,7 +12,9 @@
 use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+use windows::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
+};
 use windows::Win32::System::Registry::{
     RegGetValueW, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
 };
@@ -51,8 +53,15 @@ pub(super) fn is_cleanup_sid(sid: &str) -> bool {
 }
 
 /// Read the `ProfileImagePath` of a ProfileList entry unexpanded, then expand
-/// the environment strings ourselves. `None` when absent/unreadable.
-fn profile_dir(sid: &str) -> Option<PathBuf> {
+/// the environment strings ourselves.
+///
+/// `Err` says which way it failed, in words fit to print and naming no SID (the
+/// caller puts that in front). Absent and refused are kept apart for the same
+/// reason `enum_subkeys` keeps them apart: a `ProfileList` entry with no
+/// `ProfileImagePath` is a stub that never was a profile, while one we are not
+/// allowed to read is a real account whose files this uninstall will not find,
+/// and whoever reads the log can act on the second.
+fn profile_dir(sid: &str) -> Result<PathBuf, String> {
     let subkey = wide(&format!(r"{PROFILE_LIST}\{sid}"));
     let name = wide("ProfileImagePath");
     // Roomy enough for any real profile path; grown and asked again if a hive
@@ -80,13 +89,27 @@ fn profile_dir(sid: &str) -> Option<PathBuf> {
             // cannot hold us here.
             let needed = (cb as usize).div_ceil(2);
             if needed <= buf.len() || needed > MAX_VALUE_CHARS {
-                return None;
+                return Err(format!(
+                    "its ProfileImagePath does not fit in {MAX_VALUE_CHARS} characters"
+                ));
             }
             buf = vec![0u16; needed];
             continue;
         }
+        if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+            return Err("it has no ProfileImagePath value".to_string());
+        }
+        if status == ERROR_ACCESS_DENIED {
+            return Err(format!(
+                "we are not allowed to read its ProfileImagePath (error {})",
+                status.0
+            ));
+        }
         if status != ERROR_SUCCESS {
-            return None;
+            return Err(format!(
+                "its ProfileImagePath would not read (error {})",
+                status.0
+            ));
         }
         let units = (cb as usize / 2).min(buf.len());
         // The value carries its own terminating NUL, and one written with a
@@ -96,7 +119,7 @@ fn profile_dir(sid: &str) -> Option<PathBuf> {
         let value = &buf[..units];
         let value = &value[..value.iter().position(|&u| u == 0).unwrap_or(value.len())];
         let raw = String::from_utf16_lossy(value);
-        return Some(PathBuf::from(expand_env(&raw)));
+        return Ok(PathBuf::from(expand_env(&raw)));
     }
 }
 
@@ -113,7 +136,7 @@ const EXPANDABLE: &[&str] = &["SystemDrive", "SystemRoot"];
 /// a value happens to contain — out of *our* environment, which is not the
 /// environment it was written against — is a way to be pointed somewhere else
 /// entirely. A token left standing yields a path that simply does not exist,
-/// which `cleanable_dir` reports and skips.
+/// which `vet_dir` reports and skips.
 ///
 /// Matched without regard to case, as the registry and the environment both
 /// are: `%systemdrive%` appears in the wild as often as `%SystemDrive%`.
@@ -146,29 +169,49 @@ fn expand_env(s: &str) -> String {
     out
 }
 
-/// Where one profile's files are, or why we will not touch it.
+/// Vet a directory before it is handed to anything that deletes inside it.
 ///
-/// Every `Err` here is something to say out loud rather than to pass over: a
-/// cleanable account whose directory we cannot pin down is an account the
-/// uninstall will not finish cleaning, and whoever ran it should be told which.
-fn cleanable_dir(sid: &str) -> Result<PathBuf, String> {
-    let dir =
-        profile_dir(sid).ok_or_else(|| format!("{sid}: its ProfileImagePath would not read"))?;
+/// Split out from the read so it can be tested against a real junction —
+/// `a_junction_is_not_a_profile_directory` does exactly that.
+///
+/// This vets one path: the profile directory itself, where a file walk would
+/// start. The walk below it vets every path it takes for itself, so this is
+/// the one step that has to happen before it begins.
+fn vet_dir(sid: &str, dir: PathBuf) -> Result<PathBuf, String> {
     let shown = dir.display();
-    // symlink_metadata, so a reparse point is reported as itself rather than as
-    // whatever it points at.
-    let meta = std::fs::symlink_metadata(&dir)
-        .map_err(|e| format!("{sid}: {shown} would not open ({e})"))?;
+    // `symlink_metadata`, so a reparse point is reported as itself rather than
+    // as whatever it points at. Do not simplify this back to `Path::is_dir()`:
+    // that follows a junction and answers `true`, so a junction would sail
+    // through as an ordinary directory. Measured on a real one: `is_dir()`
+    // true, `symlink_metadata().is_symlink()` true, attributes `0x410`.
+    let meta = std::fs::symlink_metadata(&dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("{sid}: {shown} does not exist")
+        } else {
+            format!("{sid}: {shown} would not open ({e})")
+        }
+    })?;
     if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(format!(
-            "{sid}: {shown} is a reparse point, not a profile directory; \
-             deleting through it would reach files outside the profile"
+            "{sid}: {shown} is a reparse point, not a profile directory; the \
+             file walk below vets every path it takes for itself, but this one \
+             is where it would start, so it is ours to refuse here"
         ));
     }
     if !meta.is_dir() {
         return Err(format!("{sid}: {shown} is not a directory"));
     }
     Ok(dir)
+}
+
+/// Where one profile's files are, or why we will not touch it.
+///
+/// Every `Err` here is something to say out loud rather than to pass over: a
+/// cleanable account whose directory we cannot pin down is an account the
+/// uninstall will not finish cleaning, and whoever ran it should be told which.
+fn cleanable_dir(sid: &str) -> Result<PathBuf, String> {
+    let dir = profile_dir(sid).map_err(|why| format!("{sid}: {why}"))?;
+    vet_dir(sid, dir)
 }
 
 /// Every cleanable profile whose directory we can stand behind, plus what went
@@ -216,6 +259,127 @@ pub(super) fn all() -> (Vec<Profile>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A scratch directory tree under the temp directory, unique to this run
+    /// and removed when the test ends — pass, fail or panic.
+    struct TempTree {
+        root: PathBuf,
+    }
+
+    impl TempTree {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "kuvatin-profiles-test-{}-{nanos}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&root).expect("create the temp tree");
+            TempTree { root }
+        }
+
+        fn at(&self, rest: &str) -> PathBuf {
+            self.root.join(rest)
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            // A junction goes as the link it is. Handing it to `remove_dir_all`
+            // would be asking to delete whatever it points at — the very thing
+            // `vet_dir` exists to prevent.
+            for entry in std::fs::read_dir(&self.root)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let path = entry.path();
+                let linked = std::fs::symlink_metadata(&path)
+                    .map(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                    .unwrap_or(false);
+                let swept = if linked {
+                    std::fs::remove_dir(&path)
+                } else {
+                    std::fs::remove_dir_all(&path)
+                };
+                if let Err(e) = swept {
+                    eprintln!("could not remove {} ({e})", path.display());
+                }
+            }
+            // Say so loudly rather than leaving a directory behind in silence:
+            // the next run would not reuse this name, so nobody would notice.
+            if let Err(e) = std::fs::remove_dir(&self.root) {
+                eprintln!(
+                    "temp tree {} survived cleanup ({e}); remove it by hand",
+                    self.root.display()
+                );
+            }
+        }
+    }
+
+    const A_SID: &str = "S-1-5-21-1-2-3-1001";
+
+    /// A junction is a directory to `Path::is_dir()` and a reparse point to
+    /// `symlink_metadata`, which is the whole reason the check is written the
+    /// way it is: deleting a profile's files through one would reach whatever
+    /// it points at, anywhere on the machine.
+    #[test]
+    fn a_junction_is_not_a_profile_directory() {
+        let tree = TempTree::new();
+        let target = tree.at("target");
+        let link = tree.at("link");
+        std::fs::create_dir(&target).expect("create the target directory");
+
+        // Junctions need no privilege, unlike symbolic links — but say so
+        // rather than quietly proving nothing if this ever fails.
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output();
+        if made.is_err() || !link.exists() {
+            eprintln!(
+                "skipping: could not create a junction at {} ({made:?})",
+                link.display()
+            );
+            return;
+        }
+
+        // The measurement the comment in `vet_dir` records, asserted here so it
+        // stays true: this is why `is_dir()` alone would not do.
+        assert!(link.is_dir(), "a junction answers is_dir() with true");
+        let meta = std::fs::symlink_metadata(&link).expect("stat the junction");
+        assert_ne!(
+            meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
+            0,
+            "a junction carries FILE_ATTRIBUTE_REPARSE_POINT"
+        );
+
+        let why = vet_dir(A_SID, link.clone()).expect_err("a junction must be refused");
+        assert!(why.contains("reparse point"), "vague reason: {why}");
+        assert!(why.contains(A_SID), "a log line needs the account: {why}");
+
+        // …while the plain directory it points at is exactly what we want.
+        assert_eq!(vet_dir(A_SID, target.clone()), Ok(target));
+    }
+
+    #[test]
+    fn a_missing_profile_directory_says_it_is_missing() {
+        let tree = TempTree::new();
+
+        let why = vet_dir(A_SID, tree.at("nobody-here")).expect_err("absent");
+        assert!(why.contains("does not exist"), "{why}");
+        assert!(
+            !why.contains("os error"),
+            "a missing directory is not an error code to decipher: {why}"
+        );
+    }
 
     #[test]
     fn only_real_end_user_sids_are_cleaned() {
@@ -262,6 +426,15 @@ mod tests {
     /// `ProfileList` is out of this test's control) but is worth a line if it
     /// ever shows up, since it should not happen on a normal dev machine or
     /// CI runner.
+    ///
+    /// The `!profiles.is_empty()` assertion below reads the machine this runs
+    /// on, deliberately: it is there to catch an enumeration that finds nobody,
+    /// which is what a broken all-users uninstall looks like from the outside.
+    /// It therefore assumes the machine has at least one real user account,
+    /// which a dev box and a CI runner both do. Somewhere that genuinely has
+    /// only service SIDs — a bare container image — would fail it, and the
+    /// answer there is to give that environment an account, not to drop the
+    /// assertion.
     #[test]
     fn enumeration_returns_only_real_user_profiles() {
         let (profiles, trouble) = all();

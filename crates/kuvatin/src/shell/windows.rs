@@ -712,6 +712,24 @@ mod tests {
         assert_eq!(listed, menu_extensions(), "update build-msix.ps1");
     }
 
+    /// The token each store's command lines substitute, pinned per store.
+    ///
+    /// A background verb is invoked on no item at all: it has only `%V`, the
+    /// folder the right-click happened in. Give that store `%1` and every
+    /// background conversion would run with an empty path — a menu that looks
+    /// right and does nothing. The other two are invoked on the item itself.
+    #[test]
+    fn each_store_takes_the_token_its_verbs_can_supply() {
+        for (store, token, _) in command_stores(&[], &[]) {
+            let want = if store == STORE_BACKGROUND {
+                "%V"
+            } else {
+                "%1"
+            };
+            assert_eq!(token, want, "{store} substitutes {want}");
+        }
+    }
+
     /// Registration points every verb root at a command store and writes every
     /// store, and the uninstall deletes the stores in `STORES`. A fourth store
     /// written or pointed at, but never added to that list, would be created on

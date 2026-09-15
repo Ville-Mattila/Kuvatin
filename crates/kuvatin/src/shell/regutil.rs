@@ -115,6 +115,10 @@ fn close(h: HKEY) {
 /// An open key that closes itself, so a walk can give up at any point without
 /// leaking the handles it opened on the way down — and so can a caller holding
 /// a root it works relative to (see `open_owned`).
+///
+/// The only kind of key handle this module hands out, and with [`OwnedKey::own`]
+/// the only kind anyone else need hold either: closing is nobody's job to
+/// remember, and there is no raw handle about to be closed twice.
 #[derive(Debug)]
 pub(super) struct OwnedKey(HKEY);
 
@@ -196,8 +200,11 @@ pub(super) fn open_owned_reporting(root: HKEY, subpath: &str) -> Found {
 /// one `Ok(empty)`. A key that is there and refuses to open — the hive's owner
 /// can deny us the read — is a failure and says so.
 ///
-/// Either way the reason names the key it is about, so a caller can put the
-/// hive in front of it and have a line that reads as one path.
+/// Either way the reason opens with the key it is about, punctuated the same
+/// way — `<key>: <what happened>` — so a caller can put the hive in front and
+/// get one line that reads as one thought. The colon earns its keep on the
+/// enumeration failures, whose text starts with a noun (`subkey 12 claims…`)
+/// and would otherwise read as part of the key's name.
 ///
 /// Like `open_owned`, this follows a symbolic link at any segment, so it is
 /// for reading only.
@@ -206,7 +213,7 @@ pub(super) fn enum_subkeys(root: HKEY, subpath: &str) -> Result<Vec<String>, Str
     let key = match open_subkey_reporting(root, subpath) {
         Ok(h) => h,
         Err(OpenFailure::Absent) => return Ok(Vec::new()),
-        Err(OpenFailure::Failed(e)) => return Err(format!("{named} {}", explain_error(e))),
+        Err(OpenFailure::Failed(e)) => return Err(format!("{named}: {}", explain_error(e))),
     };
     let out = enum_children(key).map_err(|why| format!("{named}: {why}"));
     close(key);
