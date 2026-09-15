@@ -1,6 +1,8 @@
 #[cfg(windows)]
 mod package;
 #[cfg(windows)]
+mod regutil;
+#[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
