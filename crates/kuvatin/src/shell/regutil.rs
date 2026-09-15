@@ -34,14 +34,22 @@ use windows::Win32::System::Registry::{
 };
 
 /// Keys nested deeper than this inside a subtree we are deleting are treated
-/// as a refusal rather than walked; the registry's own limit is well under it.
+/// as a refusal rather than walked. 512 is the registry's own documented
+/// nesting limit, so nothing legitimate reaches it.
 const MAX_DEPTH: u32 = 512;
 
-/// How many times to empty a key and try again when something re-creates
+/// How many times to empty one key and try again when something re-creates
 /// subkeys under it while we work. Enough for a benign race — Explorer
 /// touching the key mid-uninstall — without grinding on against an owner who
 /// is re-creating keys on purpose.
 const DELETE_ROUNDS: u32 = 3;
+
+/// How many *re*-attempts one `delete_tree_under` call may spend in total.
+/// `DELETE_ROUNDS` alone is per key and the rounds nest, so a deep tree could
+/// otherwise cost `DELETE_ROUNDS^depth` attempts. Each key's first attempt is
+/// free; only a retry draws on this budget, so an ordinary delete of any size
+/// never touches it.
+const RETRY_BUDGET: u32 = 32;
 
 /// What removing a key actually needs: `DELETE` for `NtDeleteKey`, plus the
 /// two read rights that let us list a key's children and see a link value on
@@ -51,6 +59,14 @@ const DELETE_ROUNDS: u32 = 3;
 /// file-system namespace, which this crate does not otherwise need.
 const DELETE_ACCESS: REG_SAM_FLAGS =
     REG_SAM_FLAGS(0x0001_0000 | KEY_ENUMERATE_SUB_KEYS.0 | KEY_QUERY_VALUE.0);
+
+/// What a segment we merely pass *through* needs: enough to read
+/// `SymbolicLinkValue` on it, and not one right more. Opening a child needs no
+/// particular right on the parent's handle, so `KEY_READ` — which also asks
+/// for `READ_CONTROL`, `KEY_ENUMERATE_SUB_KEYS` and `KEY_NOTIFY` — would only
+/// hand the hive's owner three more ACEs to deny. One of those on, say,
+/// `Directory\shell` would have blocked every delete below it.
+const TRAVERSE_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(KEY_QUERY_VALUE.0);
 
 /// A name buffer past this size means something other than a key name; the
 /// registry caps names at 255 characters.
@@ -152,9 +168,14 @@ fn enum_children(key: HKEY) -> Result<Vec<String>, String> {
             continue;
         }
         if status != ERROR_SUCCESS {
+            let trouble = if status == ERROR_ACCESS_DENIED {
+                "we are not allowed to read"
+            } else {
+                "could not read"
+            };
             return Err(format!(
-                "subkey {index} would not read ({}); read {} before it",
-                explain_error(status.0),
+                "{trouble} subkey {index} (error {}); read {} before it",
+                status.0,
                 out.len()
             ));
         }
@@ -299,14 +320,11 @@ fn normalised(subpath: &str) -> String {
         .join("\\")
 }
 
-/// Open one segment and refuse to go through it if it carries a link value.
-fn open_step(
-    parent: HKEY,
-    name: &str,
-    access: REG_SAM_FLAGS,
-    trail: &str,
-) -> Result<OwnedKey, PathFailure> {
-    let key = match open_component(parent, name, access) {
+/// Open one segment of a path as itself, ready to be passed *through*: a
+/// segment carrying a link value stops the walk, because stepping through a
+/// real link is what would take us out of the hive.
+fn open_through(parent: HKEY, name: &str, trail: &str) -> Result<OwnedKey, PathFailure> {
+    let key = match open_component(parent, name, TRAVERSE_ACCESS) {
         Ok(h) => OwnedKey(h),
         Err(OpenFailure::Absent) => return Err(PathFailure::Absent),
         Err(OpenFailure::Failed(e)) => {
@@ -345,14 +363,24 @@ fn walk_no_links(
         trail.push_str(seg);
         let parent = held.as_ref().map_or(root, OwnedKey::get);
         // Opened from the handle above before the old one is dropped.
-        held = Some(open_step(parent, seg, KEY_READ, &trail)?);
+        held = Some(open_through(parent, seg, &trail)?);
     }
     if !trail.is_empty() {
         trail.push('\\');
     }
     trail.push_str(leaf_name);
     let parent = held.as_ref().map_or(root, OwnedKey::get);
-    open_step(parent, leaf_name, access, &trail)
+    // The leaf is a destination, not a step: we stop here, so a link value on
+    // it redirects nothing. `REG_OPTION_OPEN_LINK` means the handle names the
+    // leaf itself either way.
+    match open_component(parent, leaf_name, access) {
+        Ok(h) => Ok(OwnedKey(h)),
+        Err(OpenFailure::Absent) => Err(PathFailure::Absent),
+        Err(OpenFailure::Failed(e)) => Err(PathFailure::Refused(format!(
+            "{trail} {}",
+            explain_error(e)
+        ))),
+    }
 }
 
 /// Open `root\subpath` without ever being redirected by a symbolic link, and
@@ -361,10 +389,16 @@ fn walk_no_links(
 /// Each segment is opened from the handle above it with
 /// `REG_OPTION_OPEN_LINK` — which protects only the *last* component of a
 /// path, so one call per segment is the point — and the walk stops at the
-/// first segment carrying a `REG_LINK` `SymbolicLinkValue`. That check fails
-/// closed: a plain key wearing that value blocks the path too. On a path the
-/// uninstall owns that is the safe way round, and the message says plainly
-/// what was found rather than asserting the key is a link.
+/// first segment it would have to pass *through* that carries a `REG_LINK`
+/// `SymbolicLinkValue`. That check fails closed: a plain key wearing the value
+/// blocks the path too. On a path the uninstall owns that is the safe way
+/// round, and the message says what was found rather than asserting the key is
+/// a link.
+///
+/// The leaf is exempt, because the walk ends there rather than going through
+/// it: if it is a link you get a handle to the link key itself, never its
+/// target. A caller that means to write values should bear that in mind; one
+/// that means to delete wants exactly this.
 ///
 /// This is the only opener to use for a handle you will write or delete
 /// through.
@@ -377,6 +411,37 @@ pub(super) fn open_path_no_links(
         Ok(key) => Ok(key.into_raw()),
         Err(PathFailure::Absent) => Err(format!("{} is not there", normalised(subpath))),
         Err(PathFailure::Refused(why)) => Err(why),
+    }
+}
+
+/// One `delete_tree_under` call: the notes it has gathered and what is left
+/// of its shared retry budget.
+struct Sweep {
+    /// Paths already noted, so a retry round that meets the same key again
+    /// does not say it twice.
+    noted: std::collections::HashSet<String>,
+    notes: Vec<String>,
+    retries_left: u32,
+}
+
+impl Sweep {
+    fn new() -> Self {
+        Sweep {
+            noted: std::collections::HashSet::new(),
+            notes: Vec::new(),
+            retries_left: RETRY_BUDGET,
+        }
+    }
+
+    /// Record that a key wearing a link value has been removed. Call this only
+    /// once the delete has succeeded — a note that says "removed" about a key
+    /// still sitting there would be worse than no note at all.
+    fn note_link_removed(&mut self, path: &str) {
+        if self.noted.insert(path.to_string()) {
+            self.notes.push(format!(
+                "{path} carried a REG_LINK SymbolicLinkValue; removed that key itself, never what it named"
+            ));
+        }
     }
 }
 
@@ -395,76 +460,82 @@ pub(super) fn open_path_no_links(
 /// Every child is attempted even after one fails, so a single key the owner
 /// has locked does not shelter its siblings; the first failure is reported
 /// with a count of the rest.
-fn clear_children(
-    key: HKEY,
-    trail: &str,
-    depth: u32,
-    notes: &mut Vec<String>,
-) -> Result<(), String> {
-    if depth == 0 {
-        return Err(format!("{trail} is nested deeper than we will walk"));
-    }
-    let names = enum_children(key).map_err(|why| format!("{trail}: {why}"))?;
-    let mut first: Option<String> = None;
-    let mut failed = 0usize;
-    for name in names {
-        let here = format!(r"{trail}\{name}");
-        let child = match open_component(key, &name, DELETE_ACCESS) {
-            Ok(h) => OwnedKey(h),
-            Err(OpenFailure::Absent) => continue, // already gone
-            Err(OpenFailure::Failed(e)) => {
-                failed += 1;
-                if first.is_none() {
-                    first = Some(format!("{here} {}", explain_error(e)));
+impl Sweep {
+    fn clear_children(&mut self, key: HKEY, trail: &str, depth: u32) -> Result<(), String> {
+        if depth == 0 {
+            return Err(format!("{trail} is nested deeper than we will walk"));
+        }
+        let names = enum_children(key).map_err(|why| format!("{trail}: {why}"))?;
+        let mut first: Option<String> = None;
+        let mut failed = 0usize;
+        for name in names {
+            let here = format!(r"{trail}\{name}");
+            let child = match open_component(key, &name, DELETE_ACCESS) {
+                Ok(h) => OwnedKey(h),
+                Err(OpenFailure::Absent) => continue, // already gone
+                Err(OpenFailure::Failed(e)) => {
+                    failed += 1;
+                    if first.is_none() {
+                        first = Some(format!("{here} {}", explain_error(e)));
+                    }
+                    continue;
                 }
-                continue;
+            };
+            let was_link = is_link_handle(child.get());
+            match self.clear_and_delete(&child, &here, depth - 1) {
+                // Only now is the note true: the key is actually gone.
+                Ok(()) => {
+                    if was_link {
+                        self.note_link_removed(&here);
+                    }
+                }
+                Err(why) => {
+                    failed += 1;
+                    if first.is_none() {
+                        first = Some(why);
+                    }
+                }
             }
-        };
-        if is_link_handle(child.get()) {
-            notes.push(format!(
-                "{here} carried a REG_LINK SymbolicLinkValue; removed that key itself, never what it named"
-            ));
         }
-        if let Err(why) = clear_and_delete(&child, &here, depth - 1, notes) {
-            failed += 1;
-            if first.is_none() {
-                first = Some(why);
-            }
+        match first {
+            None => Ok(()),
+            Some(why) if failed == 1 => Err(why),
+            Some(why) => Err(format!(
+                "{why} — and {} more under {trail} would not go either",
+                failed - 1
+            )),
         }
     }
-    match first {
-        None => Ok(()),
-        Some(why) if failed == 1 => Err(why),
-        Some(why) => Err(format!(
-            "{why} — and {} more under {trail} would not go either",
-            failed - 1
-        )),
-    }
-}
 
-/// Empty a key and delete it, through its own handle throughout. If something
-/// re-creates subkeys under it while we work, empty it and try again a few
-/// times before giving up, so a benign race does not read as a refusal.
-fn clear_and_delete(
-    key: &OwnedKey,
-    trail: &str,
-    depth: u32,
-    notes: &mut Vec<String>,
-) -> Result<(), String> {
-    let mut last = None;
-    for _ in 0..DELETE_ROUNDS {
-        clear_children(key.get(), trail, depth, notes)?;
-        let status = delete_this_key(key.get());
-        if status == STATUS_SUCCESS {
-            return Ok(());
+    /// Empty a key and delete it, through its own handle throughout. If
+    /// something re-creates subkeys under it while we work, empty it and try
+    /// again a few times before giving up, so a benign race does not read as a
+    /// refusal. Re-attempts draw on a budget shared by the whole operation, so
+    /// nesting cannot multiply them out.
+    fn clear_and_delete(&mut self, key: &OwnedKey, trail: &str, depth: u32) -> Result<(), String> {
+        let mut last = None;
+        for round in 0..DELETE_ROUNDS {
+            if round > 0 {
+                if self.retries_left == 0 {
+                    return Err(format!(
+                        "{trail} kept changing while we worked; gave up after {RETRY_BUDGET} retries across the tree"
+                    ));
+                }
+                self.retries_left -= 1;
+            }
+            self.clear_children(key.get(), trail, depth)?;
+            let status = delete_this_key(key.get());
+            if status == STATUS_SUCCESS {
+                return Ok(());
+            }
+            let why = format!("{trail} {}", explain_status(status));
+            if status != STATUS_CANNOT_DELETE {
+                return Err(why);
+            }
+            last = Some(why);
         }
-        let why = format!("{trail} {}", explain_status(status));
-        if status != STATUS_CANNOT_DELETE {
-            return Err(why);
-        }
-        last = Some(why);
+        Err(last.unwrap_or_else(|| format!("{trail} would not delete")))
     }
-    Err(last.unwrap_or_else(|| format!("{trail} would not delete")))
 }
 
 /// Delete the subtree `root\subpath` on a hive we do not trust, never
@@ -483,18 +554,19 @@ fn clear_and_delete(
 /// target and leaving the link standing (`reg_delete_key_ex_follows_a_link`
 /// shows it).
 ///
-/// The two halves treat a link value differently on purpose. On the *path* it
-/// is a stop sign, because walking through a real link would take SYSTEM out
-/// of the hive. *Inside* the subtree every key is deleted regardless, because
-/// the value proves nothing — an ordinary key can carry it — and honouring it
-/// there would let a hive owner keep any subtree simply by labelling it. A
-/// link entry found inside is removed as the key it is, its target untouched,
-/// and noted for the log.
+/// A link value only ever stops the walk at a segment we would pass
+/// *through*, because stepping through a real link is what would take SYSTEM
+/// out of the hive. At the leaf and at every key inside the subtree it stops
+/// nothing: we never step through those, the value proves nothing anyway — an
+/// ordinary key can carry it — and honouring it would let a hive owner keep
+/// any key, the menu key included, simply by labelling it. Such a key is
+/// removed as the key it is, whatever it names left untouched, and noted for
+/// the log.
 ///
 /// What remains is not a way through but a way to be told no: the hive's owner
 /// can lock a key against us, or keep re-creating keys faster than
-/// `DELETE_ROUNDS` empties them, and either ends as `Refused` naming the key
-/// that would not go.
+/// `DELETE_ROUNDS` and `RETRY_BUDGET` allow, and either ends as `Refused`
+/// naming the key that would not go.
 pub(super) fn delete_tree_under(root: HKEY, subpath: &str) -> DeleteOutcome {
     let leaf = match walk_no_links(root, subpath, DELETE_ACCESS) {
         Ok(key) => key,
@@ -507,8 +579,14 @@ pub(super) fn delete_tree_under(root: HKEY, subpath: &str) -> DeleteOutcome {
         }
     };
     let trail = normalised(subpath);
-    let mut notes = Vec::new();
-    match clear_and_delete(&leaf, &trail, MAX_DEPTH, &mut notes) {
+    let was_link = is_link_handle(leaf.get());
+    let mut sweep = Sweep::new();
+    let outcome = sweep.clear_and_delete(&leaf, &trail, MAX_DEPTH);
+    if outcome.is_ok() && was_link {
+        sweep.note_link_removed(&trail);
+    }
+    let notes = sweep.notes;
+    match outcome {
         Ok(()) => DeleteOutcome::Deleted { notes },
         Err(why) => DeleteOutcome::Refused { why, notes },
     }
@@ -518,11 +596,19 @@ pub(super) fn delete_tree_under(root: HKEY, subpath: &str) -> DeleteOutcome {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use windows::Win32::System::Registry::{
-        RegCreateKeyExW, RegDeleteKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY_CURRENT_USER,
-        HKEY_USERS, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_SET_VALUE, KEY_WRITE,
-        REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::{
+        AddAccessAllowedAce, AddAccessDeniedAce, GetLengthSid, GetTokenInformation, InitializeAcl,
+        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser, ACL, ACL_REVISION,
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_DESCRIPTOR, TOKEN_QUERY,
+        TOKEN_USER,
     };
+    use windows::Win32::System::Registry::{
+        RegCreateKeyExW, RegDeleteKeyExW, RegDeleteTreeW, RegSetKeySecurity, RegSetValueExW,
+        HKEY_CURRENT_USER, HKEY_USERS, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_NOTIFY, KEY_SET_VALUE,
+        KEY_WRITE, REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     fn create(path: &str) {
         let w = wide(path);
@@ -707,6 +793,96 @@ mod tests {
         );
     }
 
+    /// `WRITE_DAC`, needed to put a DACL on a key we own.
+    const WRITE_DAC_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(0x0004_0000);
+
+    /// This process's user SID, copied out of its token so it outlives the
+    /// buffer the token handed us.
+    fn my_sid() -> Result<Vec<u8>, String> {
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+                .map_err(|e| format!("OpenProcessToken: {e}"))?;
+            let mut len = 0u32;
+            // First call just sizes the buffer; it is expected to fail.
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+            let mut buf = vec![0u8; len as usize];
+            let got = GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            );
+            let _ = CloseHandle(token);
+            got.map_err(|e| format!("GetTokenInformation(TokenUser): {e}"))?;
+            let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+            let n = GetLengthSid(user.User.Sid) as usize;
+            Ok(std::slice::from_raw_parts(user.User.Sid.0.cast::<u8>(), n).to_vec())
+        }
+    }
+
+    /// Put a DACL on `path` that denies this user `denied` and grants the
+    /// rest. `denied == 0` restores a NULL DACL, which grants everyone
+    /// everything.
+    fn set_dacl(path: &str, denied: u32) -> Result<(), String> {
+        let sid_bytes = my_sid()?;
+        let mut acl_buf = vec![0u8; 1024];
+        let mut sd = SECURITY_DESCRIPTOR::default();
+        let psd = PSECURITY_DESCRIPTOR(std::ptr::addr_of_mut!(sd).cast());
+        unsafe {
+            // SECURITY_DESCRIPTOR_REVISION is 1.
+            InitializeSecurityDescriptor(psd, 1).map_err(|e| format!("init sd: {e}"))?;
+            if denied == 0 {
+                SetSecurityDescriptorDacl(psd, true, None, false)
+                    .map_err(|e| format!("null dacl: {e}"))?;
+            } else {
+                let sid = PSID(sid_bytes.as_ptr() as *mut _);
+                let acl = acl_buf.as_mut_ptr().cast::<ACL>();
+                InitializeAcl(acl, acl_buf.len() as u32, ACL_REVISION)
+                    .map_err(|e| format!("init acl: {e}"))?;
+                // Deny first: within a DACL the order is what decides.
+                AddAccessDeniedAce(acl, ACL_REVISION, denied, sid)
+                    .map_err(|e| format!("deny ace: {e}"))?;
+                AddAccessAllowedAce(acl, ACL_REVISION, KEY_ALL_ACCESS.0, sid)
+                    .map_err(|e| format!("allow ace: {e}"))?;
+                SetSecurityDescriptorDacl(psd, true, Some(acl), false)
+                    .map_err(|e| format!("set dacl: {e}"))?;
+            }
+        }
+        let h = open_path_no_links(HKEY_CURRENT_USER, path, WRITE_DAC_ACCESS)?;
+        let status = unsafe { RegSetKeySecurity(h, DACL_SECURITY_INFORMATION, psd) };
+        close(h);
+        if status != ERROR_SUCCESS {
+            return Err(format!("RegSetKeySecurity: error {}", status.0));
+        }
+        Ok(())
+    }
+
+    /// Holds a Deny ACE on a key and takes it off again, so the scratch
+    /// cleanup can still delete that key however the test ends.
+    struct Denied {
+        path: String,
+    }
+
+    impl Denied {
+        fn on(path: &str, right: REG_SAM_FLAGS) -> Result<Self, String> {
+            set_dacl(path, right.0)?;
+            Ok(Denied {
+                path: path.to_string(),
+            })
+        }
+    }
+
+    impl Drop for Denied {
+        fn drop(&mut self) {
+            // We own the key, so WRITE_DAC is always ours to take back.
+            if let Err(why) = set_dacl(&self.path, 0) {
+                eprintln!("could not restore the DACL on {}: {why}", self.path);
+            }
+        }
+    }
+
     fn deleted() -> DeleteOutcome {
         DeleteOutcome::Deleted { notes: Vec::new() }
     }
@@ -777,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_symbolic_link_at_any_segment() {
+    fn refuses_a_link_it_would_walk_through_but_deletes_one_at_the_leaf() {
         let scratch = Scratch::new();
         // What a hostile hive would aim a link at: keys that must survive.
         create(&scratch.at("target"));
@@ -797,15 +973,8 @@ mod tests {
             "the link should resolve"
         );
 
-        // A link as the leaf.
-        let why = refusal(delete_tree_under(HKEY_CURRENT_USER, &link));
-        assert!(
-            why.contains("planted-link") && why.contains("SymbolicLinkValue"),
-            "unhelpful reason: {why}"
-        );
-
-        // A link as an *intermediate* segment — the case REG_OPTION_OPEN_LINK
-        // on the full path does not cover.
+        // A link as an *intermediate* segment is refused: walking through it
+        // is the one move that would take us out of the hive.
         let why = refusal(delete_tree_under(
             HKEY_CURRENT_USER,
             &scratch.at(r"planted-link\shell\Kuvatin"),
@@ -814,30 +983,33 @@ mod tests {
             why.contains("planted-link") && why.contains("SymbolicLinkValue"),
             "unhelpful reason: {why}"
         );
-
-        // Neither refusal touched the target.
         assert_eq!(kids(&scratch.at("target")), vec!["keep", "shell"]);
         assert_eq!(kids(&scratch.at(r"target\shell\Kuvatin")), vec!["sentinel"]);
 
-        // Deleting a link through its own handle removes the link entry, not
-        // what it points at. (Naming it for RegDeleteKeyExW would do the
-        // opposite — see `reg_delete_key_ex_follows_a_link`.)
-        let parent = open_path_no_links(HKEY_CURRENT_USER, &scratch.path, DELETE_ACCESS)
-            .expect("open scratch");
-        let itself = open_as_itself(parent, "planted-link").expect("open the link as itself");
-        let removed = delete_this_key(itself);
-        close(itself);
-        close(parent);
-        assert_eq!(removed, STATUS_SUCCESS, "delete the link entry");
+        // A link as the *leaf* is deleted, entry and all. We stop there rather
+        // than step through it, so nothing is redirected — and refusing would
+        // have let one planted value keep the menu key for ever.
+        let outcome = delete_tree_under(HKEY_CURRENT_USER, &link);
+        assert!(
+            matches!(outcome, DeleteOutcome::Deleted { .. }),
+            "a link at the leaf should go: {outcome:?}"
+        );
+        assert!(
+            outcome.notes().iter().any(|n| n.contains("planted-link")),
+            "removing a link should be noted, got {:?}",
+            outcome.notes()
+        );
         assert!(!is_reg_link(HKEY_CURRENT_USER, &link));
         assert!(open_subkey(HKEY_CURRENT_USER, &link).is_none());
+
+        // …and what it pointed at is untouched.
         assert_eq!(
             kids(&scratch.at(r"target\shell\Kuvatin")),
             vec!["sentinel"],
             "the target must outlive its link"
         );
 
-        // With no link in the way the same call deletes.
+        // With no link in the way the same call deletes, and says nothing.
         assert_eq!(
             delete_tree_under(HKEY_CURRENT_USER, &scratch.at("target")),
             deleted()
@@ -861,10 +1033,17 @@ mod tests {
             matches!(outcome, DeleteOutcome::Deleted { .. }),
             "{outcome:?}"
         );
-        // The planted link is worth a line in the uninstall log.
+        // The planted link is worth a line in the uninstall log — one line,
+        // however many rounds the sweep took.
+        assert_eq!(
+            outcome.notes().len(),
+            1,
+            "one link, one note: {:?}",
+            outcome.notes()
+        );
         assert!(
-            outcome.notes().iter().any(|n| n.contains("nested-link")),
-            "a planted link should be noted, got {:?}",
+            outcome.notes()[0].contains("nested-link"),
+            "a planted link should be named, got {:?}",
             outcome.notes()
         );
         assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
@@ -934,6 +1113,50 @@ mod tests {
         assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at("Kuvatin")).is_none());
         // Nothing was followed on the way: the named target is untouched.
         assert_eq!(kids(&scratch.at("victim")), vec!["precious"]);
+    }
+
+    #[test]
+    fn a_denied_key_notify_on_an_intermediate_does_not_block_the_delete() {
+        let scratch = Scratch::new();
+        create(&scratch.at(r"Kuvatin\shell\command"));
+        let gate = scratch.at("Kuvatin");
+
+        // Setting a DACL from the test process may not be possible everywhere;
+        // say so rather than quietly proving nothing.
+        let denied = match Denied::on(&gate, KEY_NOTIFY) {
+            Ok(guard) => guard,
+            Err(why) => {
+                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                return;
+            }
+        };
+
+        // The ACE really bites: KEY_READ asks for KEY_NOTIFY and is refused.
+        let parent =
+            open_path_no_links(HKEY_CURRENT_USER, &scratch.path, TRAVERSE_ACCESS).expect("scratch");
+        let denied_read = open_component(parent, "Kuvatin", KEY_READ);
+        assert!(
+            matches!(denied_read, Err(OpenFailure::Failed(e)) if e == ERROR_ACCESS_DENIED.0),
+            "the Deny ACE should refuse KEY_READ, or this test proves nothing"
+        );
+        // …while the right the walk actually asks for still opens.
+        let traversed = open_component(parent, "Kuvatin", TRAVERSE_ACCESS);
+        assert!(
+            traversed.is_ok(),
+            "KEY_QUERY_VALUE should still open under the same ACE"
+        );
+        if let Ok(h) = traversed {
+            close(h);
+        }
+        close(parent);
+
+        // So a delete below the gated key goes through.
+        assert_eq!(
+            delete_tree_under(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")),
+            deleted()
+        );
+        assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")).is_none());
+        drop(denied);
     }
 
     #[test]
