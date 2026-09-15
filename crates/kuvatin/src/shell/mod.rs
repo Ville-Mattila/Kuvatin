@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod files;
+#[cfg(windows)]
 mod hive;
 #[cfg(windows)]
 mod package;
