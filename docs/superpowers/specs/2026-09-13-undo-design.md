@@ -97,8 +97,8 @@ used by both modes:
   other stack. A failed apply leaves the step where it was, and seals the
   history (see Merging); a refusal that changed nothing, such as a missing
   source, leaves it unsealed.
-- Each step **describes** itself as a noun phrase ("trim of intro.mp4"), which
-  the button hints complete: "Undo trim of intro.mp4", "Redo trim of
+- Each step **describes** itself as a gerund phrase ("trimming intro.mp4"),
+  which the button hints complete: "Undo trimming intro.mp4", "Redo trimming
   intro.mp4", "Nothing to undo".
 - The current time is passed in rather than read, so tests use a fake clock.
 - `clear()` empties both stacks.
@@ -162,7 +162,7 @@ A `TimelineStep` holds:
 
 - its kind (Move, Trim, Transform, Duration, Add, Delete, Reorder tracks, Add
   track), the clip it is about if it is about one clip, and that clip's display
-  name, which its description uses ("trim of intro.mp4");
+  name, which its description uses ("trimming intro.mp4");
 - for each affected clip, its record **before** and **after**, where "none"
   means the clip did not exist on that side;
 - the timeline row of every clip that exists on only one side, so a clip that
@@ -259,7 +259,7 @@ skipped, and the user is told how many files could not come back.
   hovered, and a `TooltipLayer`, the window's last child, draws the tooltip
   above everything. The existing zoom chips get visible hints from this too.
 - **Videos mode.** Two `TimelineChip`s, "Undo" and "Redo", in the timeline
-  toolbar, left of the zoom chips. Their hint ("Undo trim of intro.mp4", or
+  toolbar, left of the zoom chips. Their hint ("Undo trimming intro.mp4", or
   "Nothing to undo" / "Nothing to redo") shows on hover. `TimelineChip` gains
   an `enabled` property and they are greyed out when unavailable; the hint
   still shows on a greyed chip.
@@ -278,11 +278,11 @@ skipped, and the user is told how many files could not come back.
 - **Accessibility.** A button's hint is also its accessible description; a
   `TimelineChip` uses it as its accessible label.
 - **How steps describe themselves** (the hint prefixes "Undo " or "Redo "):
-  - Videos: "move of intro.mp4", "trim of intro.mp4", "transform of
-    intro.mp4", "duration of still.png", "deleting intro.mp4", "adding
-    intro.mp4", "track reorder", "new track".
+  - Videos: "moving intro.mp4", "trimming intro.mp4", "transforming
+    intro.mp4", "changing the duration of still.png", "deleting intro.mp4",
+    "adding intro.mp4", "reordering tracks", "adding a track".
   - Images: "adding 12 files", "removing photo.jpg", "clearing the list (40
-    files)", "crop of photo.jpg".
+    files)", "cropping photo.jpg".
 
 ## Contract for later edits
 

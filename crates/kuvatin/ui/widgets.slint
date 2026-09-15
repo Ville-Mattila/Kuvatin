@@ -99,12 +99,17 @@ export component SecondaryButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
     in property <string> hint: "";
+    in property <bool> focus-on-click: true;
+    out property <bool> has-focus: fs.has-focus;
     callback clicked();
     height: 34px;
     min-width: 96px;
     border-radius: 8px;
     border-width: 1px;
-    border-color: fs.has-focus ? Theme.accent : Theme.line;
+    // No ring once the button is disabled: it may still be focused (nothing
+    // takes focus away just because a control becomes unusable) but showing
+    // the ring then would look like a control the user could still act on.
+    border-color: fs.has-focus && root.enabled ? Theme.accent : Theme.line;
     background: !root.enabled
         ? Theme.disabled
         : (ta.pressed ? Theme.line : (ta.has-hover ? #262b34 : Theme.card));
@@ -129,8 +134,15 @@ export component SecondaryButton inherits Rectangle {
     }
     fs := FocusScope {
         enabled: root.enabled;
+        // Only plain Space/Return click the button; Ctrl+Enter and the like
+        // (a window shortcut) pass through to `kbd` instead. Shift does not
+        // change that: Shift+Space still clicks.
         key-pressed(e) => {
-            if (e.text == Key.Return || e.text == " ") { if (root.enabled) { root.clicked(); } return accept; }
+            if ((e.text == Key.Return || e.text == " ")
+                && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta) {
+                if (root.enabled) { root.clicked(); }
+                return accept;
+            }
             return reject;
         }
     }
@@ -140,7 +152,9 @@ export component SecondaryButton inherits Rectangle {
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => {
             if (root.enabled) {
-                fs.focus();
+                if (root.focus-on-click) {
+                    fs.focus();
+                }
                 root.clicked();
             }
         }
@@ -647,7 +661,10 @@ export component TimelineChip inherits Rectangle {
     height: 22px;
     border-radius: 5px;
     background: root.enabled && ta.has-hover ? Theme.hover : #1b1f27;
-    border-width: fs.has-focus ? 1px : 0px;
+    // No ring once the chip is disabled: it may still be focused (nothing
+    // takes focus away just because a control becomes unusable) but showing
+    // the ring then would look like a control the user could still act on.
+    border-width: fs.has-focus && root.enabled ? 1px : 0px;
     border-color: Theme.accent;
     animate background { duration: 120ms; }
     accessible-role: button;
@@ -670,15 +687,22 @@ export component TimelineChip inherits Rectangle {
     }
     fs := FocusScope {
         enabled: root.enabled;
+        // Only plain Space/Return click the chip; Ctrl+Enter and the like
+        // (a window shortcut) pass through to `kbd` instead. Shift does not
+        // change that: Shift+Space still clicks.
         key-pressed(e) => {
-            if (e.text == Key.Return || e.text == " ") { if (root.enabled) { root.clicked(); } return accept; }
+            if ((e.text == Key.Return || e.text == " ")
+                && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta) {
+                if (root.enabled) { root.clicked(); }
+                return accept;
+            }
             return reject;
         }
     }
     // Enabled even when the chip is not, so a greyed chip still says why on
     // hover ("Nothing to undo").
     ta := TouchArea {
-        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => {
             if (root.enabled) {
                 if (root.focus-on-click) {

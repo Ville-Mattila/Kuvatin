@@ -187,7 +187,7 @@ export component AppWindow inherits Window {
     callback import-cancel();                  // abort an in-flight media import
     callback add-track();                      // click "+ New track" → new empty row
     // Undo and redo, one history per mode (gui/history.rs). The hints name the
-    // step ("Undo trim of intro.mp4") and show on hover over the buttons.
+    // step ("Undo trimming intro.mp4") and show on hover over the buttons.
     in property <bool> video-can-undo: false;
     in property <bool> video-can-redo: false;
     in property <string> video-undo-hint: "Nothing to undo";
@@ -756,19 +756,21 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 10px;
-                            SecondaryButton {
+                            undo-btn := SecondaryButton {
                                 text: "Undo";
                                 min-width: 72px;
                                 hint: root.image-undo-hint;
                                 enabled: root.image-can-undo && !root.running && !root.modal-open();
-                                clicked => { root.image-undo(); }
+                                focus-on-click: false;
+                                clicked => { root.image-undo(); if (!undo-btn.has-focus) { kbd.focus(); } }
                             }
-                            SecondaryButton {
+                            redo-btn := SecondaryButton {
                                 text: "Redo";
                                 min-width: 72px;
                                 hint: root.image-redo-hint;
                                 enabled: root.image-can-redo && !root.running && !root.modal-open();
-                                clicked => { root.image-redo(); }
+                                focus-on-click: false;
+                                clicked => { root.image-redo(); if (!redo-btn.has-focus) { kbd.focus(); } }
                             }
                             Rectangle { horizontal-stretch: 1; }
                         }

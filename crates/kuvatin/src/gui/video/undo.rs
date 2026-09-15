@@ -158,14 +158,14 @@ impl Step for TimelineStep {
     fn describe(&self) -> String {
         let name = &self.name;
         match self.kind {
-            StepKind::Move => format!("move of {name}"),
-            StepKind::Trim => format!("trim of {name}"),
-            StepKind::Transform => format!("transform of {name}"),
-            StepKind::Duration => format!("duration of {name}"),
+            StepKind::Move => format!("moving {name}"),
+            StepKind::Trim => format!("trimming {name}"),
+            StepKind::Transform => format!("transforming {name}"),
+            StepKind::Duration => format!("changing the duration of {name}"),
             StepKind::Add => format!("adding {name}"),
             StepKind::Delete => format!("deleting {name}"),
-            StepKind::ReorderTracks => "track reorder".into(),
-            StepKind::AddTrack => "new track".into(),
+            StepKind::ReorderTracks => "reordering tracks".into(),
+            StepKind::AddTrack => "adding a track".into(),
         }
     }
 
@@ -1015,14 +1015,14 @@ mod tests {
         let d = |kind| {
             TimelineStep::new(kind, Some("a"), "intro.mp4", &c, &c, HashMap::new()).describe()
         };
-        assert_eq!(d(StepKind::Move), "move of intro.mp4");
-        assert_eq!(d(StepKind::Trim), "trim of intro.mp4");
-        assert_eq!(d(StepKind::Transform), "transform of intro.mp4");
-        assert_eq!(d(StepKind::Duration), "duration of intro.mp4");
+        assert_eq!(d(StepKind::Move), "moving intro.mp4");
+        assert_eq!(d(StepKind::Trim), "trimming intro.mp4");
+        assert_eq!(d(StepKind::Transform), "transforming intro.mp4");
+        assert_eq!(d(StepKind::Duration), "changing the duration of intro.mp4");
         assert_eq!(d(StepKind::Add), "adding intro.mp4");
         assert_eq!(d(StepKind::Delete), "deleting intro.mp4");
-        assert_eq!(d(StepKind::ReorderTracks), "track reorder");
-        assert_eq!(d(StepKind::AddTrack), "new track");
+        assert_eq!(d(StepKind::ReorderTracks), "reordering tracks");
+        assert_eq!(d(StepKind::AddTrack), "adding a track");
     }
 
     fn recorder(rows: Vec<TimelineClip>, tracks: usize) -> Recorder {

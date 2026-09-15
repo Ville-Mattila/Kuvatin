@@ -1,9 +1,9 @@
 import { Theme } from "theme.slint";
 
-// A modal: dimmed, click-swallowing backdrop over the whole window and a
-// centred card that fades in and rises into place. The card's contents are
-// the children; `card-width` / `card-height` size it (height may be an
-// expression over the contents, see the error dialog).
+// A modal: dimmed backdrop, swallowing clicks and the wheel, over the whole
+// window and a centred card that fades in and rises into place. The card's
+// contents are the children; `card-width` / `card-height` size it (height may
+// be an expression over the contents, see the error dialog).
 export component Modal inherits Rectangle {
     in property <length> card-width: 440px;
     in property <length> card-height: 200px;
@@ -30,8 +30,10 @@ export component Modal inherits Rectangle {
     // stayed wherever it was — behind the backdrop, on controls the user can
     // no longer see, and Tab walked through them one by one.
     init => { self.opacity = 1; keys.focus(); }
-    // Swallow clicks behind the modal.
-    TouchArea {}
+    // Swallow clicks, and the mouse wheel, behind the modal.
+    TouchArea {
+        scroll-event(event) => { return accept; }
+    }
     keys := FocusScope {
         key-pressed(e) => {
             // Return here means no button had focus (a focused DialogButton

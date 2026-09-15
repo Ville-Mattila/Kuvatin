@@ -16,7 +16,7 @@ pub(super) const MERGE_WINDOW: Duration = Duration::from_secs(1);
 
 /// What a history needs from a step.
 pub(super) trait Step {
-    /// A noun phrase for the buttons: "trim of intro.mp4", "adding 3 files".
+    /// A gerund phrase for the buttons: "trimming intro.mp4", "adding 3 files".
     fn describe(&self) -> String;
     /// Whether `newer`, recorded straight after this step, continues the same
     /// gesture. The history adds the timing condition itself.
@@ -128,7 +128,7 @@ impl<S: Step> History<S> {
         !self.redo.is_empty()
     }
 
-    /// "Undo trim of intro.mp4", or "Nothing to undo".
+    /// "Undo trimming intro.mp4", or "Nothing to undo".
     pub(super) fn undo_hint(&self) -> String {
         match self.peek_undo() {
             Some(step) => format!("Undo {}", step.describe()),
@@ -136,7 +136,7 @@ impl<S: Step> History<S> {
         }
     }
 
-    /// "Redo trim of intro.mp4", or "Nothing to redo".
+    /// "Redo trimming intro.mp4", or "Nothing to redo".
     pub(super) fn redo_hint(&self) -> String {
         match self.peek_redo() {
             Some(step) => format!("Redo {}", step.describe()),
@@ -191,7 +191,7 @@ mod tests {
 
     impl Step for Set {
         fn describe(&self) -> String {
-            format!("change of {}", self.what)
+            format!("changing {}", self.what)
         }
         fn merges_with(&self, newer: &Self) -> bool {
             self.merges && newer.merges && self.what == newer.what
@@ -349,9 +349,9 @@ mod tests {
         assert_eq!(h.undo_hint(), "Nothing to undo");
         assert_eq!(h.redo_hint(), "Nothing to redo");
         h.record(set("volume", 0, 1), Instant::now());
-        assert_eq!(h.undo_hint(), "Undo change of volume");
+        assert_eq!(h.undo_hint(), "Undo changing volume");
         h.commit_undo();
-        assert_eq!(h.redo_hint(), "Redo change of volume");
+        assert_eq!(h.redo_hint(), "Redo changing volume");
     }
 
     #[test]

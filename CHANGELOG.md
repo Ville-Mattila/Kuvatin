@@ -34,6 +34,12 @@ something is fixed.
   longer marks the file as cropped.
 - A crop can no longer land on a file that was removed from the list while
   its preview was still loading.
+- Removing a clip straight after adding it, with Delete or with undo, no
+  longer crashes the app.
+- The mouse wheel no longer scrolls the timeline, the preview or the file list
+  behind an open dialog.
+- Ctrl+Enter starts a conversion even while a button has keyboard focus,
+  instead of pressing that button.
 
 ## [2.11.0] - 2026-09-13
 A smaller release, mostly about images. WebP can now be lossless, for the
