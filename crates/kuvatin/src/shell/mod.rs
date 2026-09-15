@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod hive;
+#[cfg(windows)]
 mod package;
 #[cfg(windows)]
 mod profiles;

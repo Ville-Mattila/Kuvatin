@@ -70,7 +70,13 @@ const DELETE_ACCESS: REG_SAM_FLAGS =
 /// for `READ_CONTROL`, `KEY_ENUMERATE_SUB_KEYS` and `KEY_NOTIFY` — would only
 /// hand the hive's owner three more ACEs to deny. One of those on, say,
 /// `Directory\shell` would have blocked every delete below it.
-const TRAVERSE_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(KEY_QUERY_VALUE.0);
+///
+/// It is also what a *root* handle needs when all the caller does with it is
+/// open children — which is every hive root the all-users uninstall holds (see
+/// `super::hive`), and for exactly the same reason: `KEY_READ` on
+/// `HKEY_USERS\<SID>_Classes` is one Deny ACE away from stopping the uninstall
+/// at the door.
+pub(super) const TRAVERSE_ACCESS: REG_SAM_FLAGS = REG_SAM_FLAGS(KEY_QUERY_VALUE.0);
 
 /// A name buffer past this size means something other than a key name; the
 /// registry caps names at 255 characters.

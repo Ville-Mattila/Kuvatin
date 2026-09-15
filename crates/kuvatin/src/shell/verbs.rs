@@ -84,6 +84,137 @@ pub(super) fn subkeys_to_delete(classes_root: HKEY) -> (Vec<String>, Option<Stri
     (keys, trouble)
 }
 
+/// One line the sweep produced, kept apart by what it means rather than by how
+/// it happens to read: the per-user unregister prefixes each kind differently
+/// on its way to the log, and the all-users uninstall reports the enumeration
+/// trouble and the refusals in different places entirely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SweepLine {
+    /// The list of keys may be short: the `SystemFileAssociations` enumeration
+    /// could not be read in full. Comes first when it comes at all.
+    Trouble(String),
+    /// Something the deletion met and dealt with — a symbolic link planted
+    /// inside a subtree, say.
+    Note(String),
+    /// Why one key tree would not go. The key is still there.
+    Refused(String),
+}
+
+/// What one pass of [`remove_verbs_under`] came to.
+///
+/// Removed, absent and refused are counted apart because they mean different
+/// things: keys removed is the menu coming off, keys already gone is an
+/// ordinary second uninstall, and keys refused is the menu still on the
+/// machine. `lines` holds everything worth saying in the order it happened, so
+/// one caller can log it live and another can hand it to whoever prints.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct VerbSweep {
+    /// Key trees that were there and are gone.
+    pub removed: usize,
+    /// Key trees that were not there to begin with.
+    pub absent: usize,
+    /// Key trees still wholly or partly there.
+    pub refused: usize,
+    /// Trouble, notes and refusals, in the order they happened.
+    pub lines: Vec<SweepLine>,
+}
+
+// The per-user unregister walks `lines` itself; these are for the all-users
+// uninstall, whose orchestrator is a later task in that plan.
+#[allow(dead_code)]
+impl VerbSweep {
+    /// Why the key list may be short, when it may be.
+    pub(super) fn trouble(&self) -> Option<&str> {
+        self.lines.iter().find_map(|line| match line {
+            SweepLine::Trouble(why) => Some(why.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Anything the deletion met and dealt with along the way.
+    pub(super) fn notes(&self) -> Vec<&str> {
+        self.pick(|line| matches!(line, SweepLine::Note(_)))
+    }
+
+    /// Why each key tree that is still there would not go.
+    pub(super) fn refusals(&self) -> Vec<&str> {
+        self.pick(|line| matches!(line, SweepLine::Refused(_)))
+    }
+
+    fn pick(&self, want: impl Fn(&SweepLine) -> bool) -> Vec<&str> {
+        self.lines
+            .iter()
+            .filter(|line| want(line))
+            .map(|line| match line {
+                SweepLine::Trouble(s) | SweepLine::Note(s) | SweepLine::Refused(s) => s.as_str(),
+            })
+            .collect()
+    }
+
+    /// The one obstacle behind several refusals, with how many it accounts
+    /// for — `None` when every refusal is its own.
+    ///
+    /// A single planted link or locked key at `SystemFileAssociations` refuses
+    /// all twelve verb keys below it, in the same words every time, because the
+    /// walk stops at that segment before it ever reaches the leaf. Whoever
+    /// reads the uninstall output needs the one key that has to be dealt with,
+    /// said once and loudly, not twelve lines that repeat it.
+    pub(super) fn shared_obstacle(&self) -> Option<(&str, usize)> {
+        let mut counted: Vec<(&str, usize)> = Vec::new();
+        for why in self.refusals() {
+            match counted.iter_mut().find(|(seen, _)| *seen == why) {
+                Some((_, n)) => *n += 1,
+                None => counted.push((why, 1)),
+            }
+        }
+        // First past the post on a tie, so the reason stays put between runs.
+        counted.into_iter().filter(|(_, n)| *n > 1).fold(
+            None,
+            |best: Option<(&str, usize)>, here| match best {
+                Some((_, n)) if n >= here.1 => best,
+                _ => Some(here),
+            },
+        )
+    }
+}
+
+/// Delete every Kuvatin verb key under an already-open classes root — the one
+/// loop the per-user unregister and the all-users uninstall both run, so the
+/// two can never drift in what they delete or in what they make of the answer.
+///
+/// Works relative to the handle it is given and never walks a path down to it:
+/// `HKCU\Software\Classes` is a registry symbolic link and `regutil` refuses to
+/// step through one, so a path-walking delete would refuse every verb key and
+/// leave the whole menu in place. The handle needs no more than
+/// `regutil::TRAVERSE_ACCESS`.
+///
+/// Reports rather than prints. `windows.rs` logs the lines as they were
+/// gathered; the all-users path must not log at all — running as SYSTEM, a log
+/// call would create a brand-new leftover under the system profile — so it
+/// carries the result back to whoever prints.
+pub(super) fn remove_verbs_under(classes_root: HKEY) -> VerbSweep {
+    let mut sweep = VerbSweep::default();
+    let (keys, trouble) = subkeys_to_delete(classes_root);
+    if let Some(why) = trouble {
+        sweep.lines.push(SweepLine::Trouble(why));
+    }
+    for sub in keys {
+        let outcome = super::regutil::delete_tree_under(classes_root, &sub);
+        for note in outcome.notes() {
+            sweep.lines.push(SweepLine::Note(note.clone()));
+        }
+        match outcome {
+            super::regutil::DeleteOutcome::Deleted { .. } => sweep.removed += 1,
+            super::regutil::DeleteOutcome::Absent => sweep.absent += 1,
+            super::regutil::DeleteOutcome::Refused { why, .. } => {
+                sweep.refused += 1;
+                sweep.lines.push(SweepLine::Refused(why));
+            }
+        }
+    }
+    sweep
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::regutil::{
@@ -248,6 +379,34 @@ mod tests {
             .filter(|k| k.eq_ignore_ascii_case(r"SystemFileAssociations\.png\shell\Kuvatin"))
             .count();
         assert_eq!(png, 1, "one .png entry, whatever its case: {keys:?}");
+    }
+
+    /// The one deletion loop both callers run, counted. Keys removed and keys
+    /// that were never there are told apart because they mean different things:
+    /// the first is the menu coming off, the second an ordinary second
+    /// uninstall.
+    #[test]
+    fn the_shared_loop_counts_what_it_did() {
+        let scratch = Scratch::new();
+        create(&scratch.at(r"SystemFileAssociations\.png\shell\Kuvatin\command"));
+        create(&scratch.at("Kuvatin.CommandStore"));
+
+        let sweep = remove_verbs_under(scratch.root.get());
+        assert_eq!(sweep.trouble(), None);
+        assert_eq!(sweep.removed, 2, "{:?}", sweep.lines);
+        assert_eq!(sweep.refused, 0, "{:?}", sweep.lines);
+        assert_eq!(
+            sweep.absent,
+            classes_subkeys().len() - 2,
+            "everything else on the list was already gone"
+        );
+        assert!(sweep.notes().is_empty(), "{:?}", sweep.lines);
+        assert!(sweep.shared_obstacle().is_none(), "nothing was refused");
+
+        // Run again and it is all absence — nothing is counted twice.
+        let again = remove_verbs_under(scratch.root.get());
+        assert_eq!(again.removed, 0);
+        assert_eq!(again.absent, classes_subkeys().len());
     }
 
     #[test]

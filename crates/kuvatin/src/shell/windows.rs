@@ -516,10 +516,12 @@ fn user_classes_root() -> Option<super::regutil::OwnedKey> {
 /// `super::verbs` — so the keys an uninstall removes can never drift from the
 /// keys a registration writes.
 ///
-/// Reports what happened to the log rather than to the user: `--unregister`
-/// runs from the installer, where a line about one key that would not go is
-/// for whoever reads the log afterwards, and there is nothing the person
-/// uninstalling could do with it anyway.
+/// The deleting itself is `verbs::remove_verbs_under`, which the all-users
+/// uninstall runs too against a mounted hive; all that differs here is where
+/// the answer goes. Reports it to the log rather than to the user:
+/// `--unregister` runs from the installer, where a line about one key that
+/// would not go is for whoever reads the log afterwards, and there is nothing
+/// the person uninstalling could do with it anyway.
 fn remove_classic_verbs() {
     let Some(classes) = user_classes_root() else {
         crate::applog::log(&format!(
@@ -527,29 +529,23 @@ fn remove_classic_verbs() {
         ));
         return;
     };
-    let (keys, trouble) = super::verbs::subkeys_to_delete(classes.get());
-    if let Some(why) = trouble {
-        crate::applog::log(&format!("Context menu: {why}"));
-    }
-    let (mut removed, mut absent, mut refused) = (0usize, 0usize, 0usize);
-    for sub in keys {
-        let outcome = super::regutil::delete_tree_under(classes.get(), &sub);
-        for note in outcome.notes() {
-            crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{note}"));
-        }
-        match outcome {
-            super::regutil::DeleteOutcome::Deleted { .. } => removed += 1,
-            super::regutil::DeleteOutcome::Absent => absent += 1,
-            super::regutil::DeleteOutcome::Refused { why, .. } => {
-                refused += 1;
-                crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{why}"));
+    let sweep = super::verbs::remove_verbs_under(classes.get());
+    for line in &sweep.lines {
+        crate::applog::log(&match line {
+            super::verbs::SweepLine::Trouble(why) => format!("Context menu: {why}"),
+            super::verbs::SweepLine::Note(note) => {
+                format!(r"Context menu: HKCU\{CLASSES_ROOT}\{note}")
             }
-        }
+            super::verbs::SweepLine::Refused(why) => {
+                format!(r"Context menu: HKCU\{CLASSES_ROOT}\{why}")
+            }
+        });
     }
     // Told apart, because they mean different things: keys already gone is an
     // ordinary second uninstall, keys refused is the menu still on the machine.
     crate::applog::log(&format!(
-        "Context menu: {removed} key trees removed, {absent} already gone, {refused} would not go"
+        "Context menu: {} key trees removed, {} already gone, {} would not go",
+        sweep.removed, sweep.absent, sweep.refused
     ));
 }
 
