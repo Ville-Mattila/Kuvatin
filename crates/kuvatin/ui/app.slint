@@ -756,19 +756,21 @@ export component AppWindow inherits Window {
                         }
                         HorizontalLayout {
                             spacing: 10px;
-                            SecondaryButton {
+                            undo-btn := SecondaryButton {
                                 text: "Undo";
                                 min-width: 72px;
                                 hint: root.image-undo-hint;
                                 enabled: root.image-can-undo && !root.running && !root.modal-open();
-                                clicked => { root.image-undo(); }
+                                focus-on-click: false;
+                                clicked => { root.image-undo(); if (!undo-btn.has-focus) { kbd.focus(); } }
                             }
-                            SecondaryButton {
+                            redo-btn := SecondaryButton {
                                 text: "Redo";
                                 min-width: 72px;
                                 hint: root.image-redo-hint;
                                 enabled: root.image-can-redo && !root.running && !root.modal-open();
-                                clicked => { root.image-redo(); }
+                                focus-on-click: false;
+                                clicked => { root.image-redo(); if (!redo-btn.has-focus) { kbd.focus(); } }
                             }
                             Rectangle { horizontal-stretch: 1; }
                         }
