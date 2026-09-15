@@ -3,6 +3,8 @@ mod package;
 #[cfg(windows)]
 mod regutil;
 #[cfg(windows)]
+mod verbs;
+#[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
