@@ -74,20 +74,22 @@ pub(super) fn subkeys_to_delete(classes_root: HKEY) -> (Vec<String>, Option<Stri
         };
     for child in children {
         let candidate = format!(r"SystemFileAssociations\{child}\shell\Kuvatin");
-        if let Some(found) = super::regutil::open_subkey(classes_root, &candidate) {
-            super::regutil::close(found);
-            if !keys.iter().any(|k| k.eq_ignore_ascii_case(&candidate)) {
-                keys.push(candidate);
-            }
+        // Opened only to ask whether it is there at all; the handle closes
+        // itself on the way out of the condition.
+        if super::regutil::open_owned(classes_root, &candidate).is_some()
+            && !keys.iter().any(|k| k.eq_ignore_ascii_case(&candidate))
+        {
+            keys.push(candidate);
         }
     }
     (keys, trouble)
 }
 
 /// One line the sweep produced, kept apart by what it means rather than by how
-/// it happens to read: the per-user unregister prefixes each kind differently
-/// on its way to the log, and the all-users uninstall reports the enumeration
-/// trouble and the refusals in different places entirely.
+/// it happens to read. Every kind names a key relative to the classes root, so
+/// a caller that just logs them puts the same hive in front of all three; what
+/// telling them apart is for is the all-users uninstall, which reports the
+/// enumeration trouble and the refusals in quite different places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SweepLine {
     /// The list of keys may be short: the `SystemFileAssociations` enumeration
@@ -220,6 +222,7 @@ mod tests {
     use super::super::regutil::{
         close, delete_tree_under, open_owned, wide, DeleteOutcome, OwnedKey,
     };
+    use super::super::test_support::Denied;
     use super::super::windows::{
         extension_roots, BACKGROUND_ROOT, CLASSES_ROOT, FOLDER_ROOT, LEGACY_ROOT, STORE_BACKGROUND,
         STORE_FRAMES, STORE_ITEM,
@@ -230,7 +233,7 @@ mod tests {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
-        RegCreateKeyExW, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+        RegCreateKeyExW, HKEY_CURRENT_USER, KEY_NOTIFY, KEY_WRITE, REG_OPTION_NON_VOLATILE,
     };
 
     fn create(path: &str) {
@@ -362,6 +365,42 @@ mod tests {
         let (keys, trouble) = subkeys_to_delete(scratch.root.get());
         assert_eq!(trouble, None, "an absent key is not a read failure");
         assert_eq!(keys, classes_subkeys());
+    }
+
+    /// The whole reason this returns a list *and* a reason rather than one or
+    /// the other: a hive whose owner has denied us the read is exactly the one
+    /// we must still delete the keys we already know about from. Giving up
+    /// would leave the menu on that account for good.
+    #[test]
+    fn a_hive_we_cannot_read_still_lists_the_keys_we_know() {
+        let scratch = Scratch::new();
+        create(&scratch.at(r"SystemFileAssociations\.qoi\shell\Kuvatin"));
+        let gate = scratch.at("SystemFileAssociations");
+
+        // Setting a DACL from the test process may not be possible everywhere;
+        // say so rather than quietly proving nothing.
+        let denied = match Denied::on(&gate, KEY_NOTIFY) {
+            Ok(guard) => guard,
+            Err(why) => {
+                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                return;
+            }
+        };
+
+        let (keys, trouble) = subkeys_to_delete(scratch.root.get());
+        assert_eq!(
+            keys,
+            classes_subkeys(),
+            "the static list must survive a hive we cannot enumerate"
+        );
+        let why = trouble.expect("a hive we cannot read must say so");
+        assert!(why.contains("not allowed"), "vague reason: {why}");
+        assert!(
+            why.contains("SystemFileAssociations"),
+            "a log line needs the key, got: {why}"
+        );
+        // Before the scratch cleanup, so it can delete the key again.
+        drop(denied);
     }
 
     #[test]

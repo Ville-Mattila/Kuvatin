@@ -211,6 +211,27 @@ fn write_store(store: &str, exe: &str, token: &str, items: &[MenuItem]) -> Resul
     Ok(())
 }
 
+/// Every command store registration writes, with the token its command lines
+/// substitute and the items its submenu lists.
+///
+/// The other half of `classic_roots_with_stores`: that names the stores the
+/// verbs point *at*, this names the stores actually written, and
+/// `every_root_points_at_a_store_the_uninstall_removes` holds both equal to
+/// `STORES`. A store written here and listed nowhere else would be created on
+/// every machine and uninstalled from none.
+fn command_stores<'a>(
+    items: &'a [MenuItem],
+    frames: &'a [MenuItem],
+) -> [(&'static str, &'static str, &'a [MenuItem]); 3] {
+    [
+        // `%1` is the selected file or folder; a background verb is invoked on
+        // no item at all, so its commands take `%V`, the folder it happened in.
+        (STORE_ITEM, "%1", items),
+        (STORE_BACKGROUND, "%V", items),
+        (STORE_FRAMES, "%1", frames),
+    ]
+}
+
 /// Write the whole registration for the running exe, silently.
 fn register_quiet() -> Result<()> {
     let exe = exe_path()?;
@@ -232,9 +253,10 @@ fn register_quiet() -> Result<()> {
         close_key(k);
     }
 
-    write_store(STORE_ITEM, &exe, "%1", &items)?;
-    write_store(STORE_BACKGROUND, &exe, "%V", &items)?;
-    write_store(STORE_FRAMES, &exe, "%1", &frame_items(&items))?;
+    let frames = frame_items(&items);
+    for (store, token, listed) in command_stores(&items, &frames) {
+        write_store(store, &exe, token, listed)?;
+    }
     Ok(())
 }
 
@@ -531,15 +553,15 @@ fn remove_classic_verbs() {
     };
     let sweep = super::verbs::remove_verbs_under(classes.get());
     for line in &sweep.lines {
-        crate::applog::log(&match line {
-            super::verbs::SweepLine::Trouble(why) => format!("Context menu: {why}"),
-            super::verbs::SweepLine::Note(note) => {
-                format!(r"Context menu: HKCU\{CLASSES_ROOT}\{note}")
-            }
-            super::verbs::SweepLine::Refused(why) => {
-                format!(r"Context menu: HKCU\{CLASSES_ROOT}\{why}")
-            }
-        });
+        // Every kind of line names a key relative to the hive it swept — the
+        // enumeration trouble as much as a note or a refusal — so every kind
+        // is logged with that hive in front of it.
+        let text = match line {
+            super::verbs::SweepLine::Trouble(text)
+            | super::verbs::SweepLine::Note(text)
+            | super::verbs::SweepLine::Refused(text) => text,
+        };
+        crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{text}"));
     }
     // Told apart, because they mean different things: keys already gone is an
     // ordinary second uninstall, keys refused is the menu still on the machine.
@@ -690,21 +712,32 @@ mod tests {
         assert_eq!(listed, menu_extensions(), "update build-msix.ps1");
     }
 
-    /// Registration points every verb root at a command store, and the
-    /// uninstall deletes the stores in `STORES`. A fourth store written and
-    /// pointed at, but never added to that list, would be registered on every
-    /// machine and removed from none.
+    /// Registration points every verb root at a command store and writes every
+    /// store, and the uninstall deletes the stores in `STORES`. A fourth store
+    /// written or pointed at, but never added to that list, would be created on
+    /// every machine and removed from none.
     #[test]
     fn every_root_points_at_a_store_the_uninstall_removes() {
+        let mut listed: Vec<&str> = STORES.to_vec();
+        listed.sort_unstable();
+
         let mut referenced: Vec<&str> = classic_roots_with_stores()
             .into_iter()
             .map(|(_, store)| store)
             .collect();
         referenced.sort_unstable();
         referenced.dedup();
-        let mut listed: Vec<&str> = STORES.to_vec();
-        listed.sort_unstable();
-        assert_eq!(referenced, listed);
+        assert_eq!(referenced, listed, "a verb points at an unlisted store");
+
+        // The same on the writing side: the submenus are empty here because
+        // only the names are under test.
+        let mut written: Vec<&str> = command_stores(&[], &[])
+            .iter()
+            .map(|(store, _, _)| *store)
+            .collect();
+        written.sort_unstable();
+        written.dedup();
+        assert_eq!(written, listed, "a store is written but never removed");
     }
 
     /// Per-extension roots: the aliases Windows' perceived-type group carried

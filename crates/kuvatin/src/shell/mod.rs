@@ -6,6 +6,8 @@ mod package;
 mod profiles;
 #[cfg(windows)]
 mod regutil;
+#[cfg(all(windows, test))]
+mod test_support;
 #[cfg(windows)]
 mod verbs;
 #[cfg(windows)]
