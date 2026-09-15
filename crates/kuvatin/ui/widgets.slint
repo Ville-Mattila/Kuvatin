@@ -134,8 +134,15 @@ export component SecondaryButton inherits Rectangle {
     }
     fs := FocusScope {
         enabled: root.enabled;
+        // Only plain Space/Return click the button; Ctrl+Enter and the like
+        // (a window shortcut) pass through to `kbd` instead. Shift does not
+        // change that: Shift+Space still clicks.
         key-pressed(e) => {
-            if (e.text == Key.Return || e.text == " ") { if (root.enabled) { root.clicked(); } return accept; }
+            if ((e.text == Key.Return || e.text == " ")
+                && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta) {
+                if (root.enabled) { root.clicked(); }
+                return accept;
+            }
             return reject;
         }
     }
@@ -680,8 +687,15 @@ export component TimelineChip inherits Rectangle {
     }
     fs := FocusScope {
         enabled: root.enabled;
+        // Only plain Space/Return click the chip; Ctrl+Enter and the like
+        // (a window shortcut) pass through to `kbd` instead. Shift does not
+        // change that: Shift+Space still clicks.
         key-pressed(e) => {
-            if (e.text == Key.Return || e.text == " ") { if (root.enabled) { root.clicked(); } return accept; }
+            if ((e.text == Key.Return || e.text == " ")
+                && !e.modifiers.control && !e.modifiers.alt && !e.modifiers.meta) {
+                if (root.enabled) { root.clicked(); }
+                return accept;
+            }
             return reject;
         }
     }
