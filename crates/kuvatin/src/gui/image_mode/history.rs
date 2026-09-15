@@ -79,7 +79,7 @@ impl Step for ImageStep {
             ImageStep::ClearList { paths, .. } => {
                 format!("clearing the list ({})", files_phrase(paths.len()))
             }
-            ImageStep::ApplyCrop { path, .. } => format!("crop of {}", file_name(path)),
+            ImageStep::ApplyCrop { path, .. } => format!("cropping {}", file_name(path)),
         }
     }
 
@@ -264,7 +264,7 @@ mod tests {
             before: None,
             after: (0, 0, 5, 5),
         };
-        assert_eq!(crop.describe(), "crop of a.jpg");
+        assert_eq!(crop.describe(), "cropping a.jpg");
     }
 
     #[test]

@@ -187,7 +187,7 @@ export component AppWindow inherits Window {
     callback import-cancel();                  // abort an in-flight media import
     callback add-track();                      // click "+ New track" → new empty row
     // Undo and redo, one history per mode (gui/history.rs). The hints name the
-    // step ("Undo trim of intro.mp4") and show on hover over the buttons.
+    // step ("Undo trimming intro.mp4") and show on hover over the buttons.
     in property <bool> video-can-undo: false;
     in property <bool> video-can-redo: false;
     in property <string> video-undo-hint: "Nothing to undo";

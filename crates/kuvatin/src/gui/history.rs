@@ -16,7 +16,7 @@ pub(super) const MERGE_WINDOW: Duration = Duration::from_secs(1);
 
 /// What a history needs from a step.
 pub(super) trait Step {
-    /// A noun phrase for the buttons: "trim of intro.mp4", "adding 3 files".
+    /// A gerund phrase for the buttons: "trimming intro.mp4", "adding 3 files".
     fn describe(&self) -> String;
     /// Whether `newer`, recorded straight after this step, continues the same
     /// gesture. The history adds the timing condition itself.
@@ -128,7 +128,7 @@ impl<S: Step> History<S> {
         !self.redo.is_empty()
     }
 
-    /// "Undo trim of intro.mp4", or "Nothing to undo".
+    /// "Undo trimming intro.mp4", or "Nothing to undo".
     pub(super) fn undo_hint(&self) -> String {
         match self.peek_undo() {
             Some(step) => format!("Undo {}", step.describe()),
@@ -136,7 +136,7 @@ impl<S: Step> History<S> {
         }
     }
 
-    /// "Redo trim of intro.mp4", or "Nothing to redo".
+    /// "Redo trimming intro.mp4", or "Nothing to redo".
     pub(super) fn redo_hint(&self) -> String {
         match self.peek_redo() {
             Some(step) => format!("Redo {}", step.describe()),
