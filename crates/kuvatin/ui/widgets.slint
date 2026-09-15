@@ -104,7 +104,10 @@ export component SecondaryButton inherits Rectangle {
     min-width: 96px;
     border-radius: 8px;
     border-width: 1px;
-    border-color: fs.has-focus ? Theme.accent : Theme.line;
+    // No ring once the button is disabled: it may still be focused (nothing
+    // takes focus away just because a control becomes unusable) but showing
+    // the ring then would look like a control the user could still act on.
+    border-color: fs.has-focus && root.enabled ? Theme.accent : Theme.line;
     background: !root.enabled
         ? Theme.disabled
         : (ta.pressed ? Theme.line : (ta.has-hover ? #262b34 : Theme.card));
@@ -647,7 +650,10 @@ export component TimelineChip inherits Rectangle {
     height: 22px;
     border-radius: 5px;
     background: root.enabled && ta.has-hover ? Theme.hover : #1b1f27;
-    border-width: fs.has-focus ? 1px : 0px;
+    // No ring once the chip is disabled: it may still be focused (nothing
+    // takes focus away just because a control becomes unusable) but showing
+    // the ring then would look like a control the user could still act on.
+    border-width: fs.has-focus && root.enabled ? 1px : 0px;
     border-color: Theme.accent;
     animate background { duration: 120ms; }
     accessible-role: button;
