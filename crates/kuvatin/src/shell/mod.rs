@@ -1,6 +1,8 @@
 #[cfg(windows)]
 mod package;
 #[cfg(windows)]
+mod profiles;
+#[cfg(windows)]
 mod regutil;
 #[cfg(windows)]
 mod verbs;
