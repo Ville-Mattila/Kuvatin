@@ -435,6 +435,7 @@ fn explain(doing: &str, e: &std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::skip_or_fail_on_ci;
     use super::*;
     use std::path::PathBuf;
 
@@ -461,16 +462,12 @@ mod tests {
                     link: link.to_path_buf(),
                 });
             }
-            if std::env::var_os("CI").is_some() {
-                panic!(
-                    "junction tests must run on CI, but no junction could be made at {} ({made:?})",
-                    link.display()
-                );
-            }
-            println!(
-                "skipping: could not create a junction at {} ({made:?})",
+            // One rule for every self-skipping test in the crate, and it lives
+            // in `test_support`.
+            skip_or_fail_on_ci(&format!(
+                "could not create a junction at {} ({made:?})",
                 link.display()
-            );
+            ));
             None
         }
     }
@@ -814,12 +811,19 @@ mod tests {
     }
 
     impl DeniedFile {
+        /// `None` when the ACE could not be set — no `icacls`, or no name to
+        /// deny — which is a shortcoming of the machine and so a failure on CI.
+        ///
+        /// Unlike the hive walk, what this test then does is `remove_file`,
+        /// which does not open with `FILE_FLAG_BACKUP_SEMANTICS`, so
+        /// `SeBackupPrivilege` does not lift the deny and there is no second
+        /// "the ACE cannot bite" case to tell apart here.
         fn new(path: &Path) -> Option<Self> {
             let who = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
                 (Ok(domain), Ok(user)) => format!(r"{domain}\{user}"),
                 (_, Ok(user)) => user,
                 _ => {
-                    println!("skipping: no USERNAME to deny");
+                    skip_or_fail_on_ci("no USERNAME to deny");
                     return None;
                 }
             };
@@ -834,7 +838,7 @@ mod tests {
                     who,
                 }),
                 other => {
-                    println!("skipping: could not deny access to {path:?}: {other:?}");
+                    skip_or_fail_on_ci(&format!("could not deny access to {path:?}: {other:?}"));
                     None
                 }
             }
@@ -843,6 +847,9 @@ mod tests {
 
     impl Drop for DeniedFile {
         fn drop(&mut self) {
+            // `/remove:d` takes off *every* deny entry this principal has on
+            // the file, not only the one we added — right for a file we made in
+            // a temp directory moments ago, wrong for anything we did not.
             let out = std::process::Command::new("icacls")
                 .arg(&self.path)
                 .arg("/remove:d")

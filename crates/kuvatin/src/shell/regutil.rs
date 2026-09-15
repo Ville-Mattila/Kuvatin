@@ -27,6 +27,12 @@
 //! longer than…` from reading as a key called "SystemFileAssociations subkey
 //! 12".
 //!
+//! Exactly one reason breaks that rule, and has to: `an empty path names no
+//! key` answers a call that named none, so there is nothing to put in front of
+//! it. A caller that prefixes every line with its hive still reads correctly —
+//! `HKEY_USERS\S-1-5-21-…_Classes\an empty path names no key` is clumsy, but it
+//! is also a bug in the caller, and the only way to reach it.
+//!
 //! The per-user unregister in `windows.rs` deletes through this module, so
 //! most of it is live. What is not called outside `#[cfg(test)]` yet is
 //! `is_reg_link`, because the path that needs it is the offline one: a later
@@ -68,11 +74,15 @@ const RETRY_BUDGET: u32 = 32;
 /// What removing a key actually needs: `DELETE` for `NtDeleteKey`, plus the
 /// two read rights that let us list a key's children and see a link value on
 /// it. `KEY_ALL_ACCESS` would also demand `WRITE_DAC` and `WRITE_OWNER`, which
-/// a hive's owner can deny us purely to block the uninstall. The `DELETE` bit
-/// is spelled out because the `windows` crate exports it only from the
-/// file-system namespace, which this crate does not otherwise need.
+/// a hive's owner can deny us purely to block the uninstall.
 const DELETE_ACCESS: REG_SAM_FLAGS =
-    REG_SAM_FLAGS(0x0001_0000 | KEY_ENUMERATE_SUB_KEYS.0 | KEY_QUERY_VALUE.0);
+    REG_SAM_FLAGS(DELETE_RIGHT.0 | KEY_ENUMERATE_SUB_KEYS.0 | KEY_QUERY_VALUE.0);
+
+/// The standard `DELETE` right, spelled out because the `windows` crate exports
+/// it only from the file-system namespace, which this crate does not otherwise
+/// need. Shared so a test that means to deny exactly what a delete asks for can
+/// name the same bit rather than repeat the number.
+pub(super) const DELETE_RIGHT: REG_SAM_FLAGS = REG_SAM_FLAGS(0x0001_0000);
 
 /// What a segment we merely pass *through* needs: enough to read
 /// `SymbolicLinkValue` on it, and not one right more. Opening a child needs no
@@ -453,7 +463,9 @@ fn walk_no_links(
 ) -> Result<OwnedKey, PathFailure> {
     let segments: Vec<&str> = subpath.split('\\').filter(|s| !s.is_empty()).collect();
     let Some((leaf_name, above)) = segments.split_last() else {
-        // An empty path would name the root itself; never hand that out.
+        // An empty path would name the root itself; never hand that out. The
+        // one reason in this module with no key in front of it, because the
+        // call named none — see the note at the top of the file.
         return Err(PathFailure::Refused(
             "an empty path names no key".to_string(),
         ));
@@ -513,7 +525,7 @@ pub(super) fn open_owned_no_links(
 ) -> Result<OwnedKey, String> {
     match walk_no_links(root, subpath, access) {
         Ok(key) => Ok(key),
-        Err(PathFailure::Absent) => Err(format!("{}: is not there", normalised(subpath))),
+        Err(PathFailure::Absent) => Err(format!("{}: no such key", normalised(subpath))),
         Err(PathFailure::Refused(why)) => Err(why),
     }
 }
@@ -707,7 +719,7 @@ mod tests {
         KEY_WRITE, REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
     };
 
-    use super::super::test_support::Denied;
+    use super::super::test_support::{skip_or_fail_on_ci, Denied};
 
     fn create(path: &str) {
         let w = wide(path);
@@ -1147,7 +1159,7 @@ mod tests {
         let denied = match Denied::on(&gate, KEY_NOTIFY) {
             Ok(guard) => guard,
             Err(why) => {
-                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                skip_or_fail_on_ci(&format!("could not set a Deny ACE on {gate}: {why}"));
                 return;
             }
         };
@@ -1206,7 +1218,7 @@ mod tests {
         let denied = match Denied::on(&gate, KEY_QUERY_VALUE) {
             Ok(guard) => guard,
             Err(why) => {
-                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                skip_or_fail_on_ci(&format!("could not set a Deny ACE on {gate}: {why}"));
                 return;
             }
         };
@@ -1249,7 +1261,7 @@ mod tests {
         let denied = match Denied::on(&gate, KEY_ENUMERATE_SUB_KEYS) {
             Ok(guard) => guard,
             Err(why) => {
-                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                skip_or_fail_on_ci(&format!("could not set a Deny ACE on {gate}: {why}"));
                 return;
             }
         };
@@ -1303,7 +1315,7 @@ mod tests {
 
         let why = open_owned_no_links(HKEY_CURRENT_USER, &scratch.at("nowhere"), READ_ACCESS)
             .expect_err("absent");
-        assert!(why.contains("is not there"), "{why}");
+        assert!(why.contains("no such key"), "{why}");
 
         let target_nt = format!(r"{}\{}", hive_nt_path(&scratch), scratch.at("Kuvatin"));
         create_link(&scratch.at("a-link"), &target_nt);

@@ -586,6 +586,7 @@ mod tests {
     };
 
     use super::super::regutil::{delete_tree_under, open_owned, DeleteOutcome, OwnedKey};
+    use super::super::test_support::{skip_even_on_ci, skip_or_fail_on_ci};
     use super::super::verbs::{classes_subkeys, remove_verbs_under};
     use super::super::windows::menu_extensions;
 
@@ -808,10 +809,11 @@ mod tests {
     #[test]
     fn offline_cleanup_removes_only_kuvatin_verbs() {
         if !is_elevated() {
-            if std::env::var_os("CI").is_some() {
-                panic!("offline hive test must run elevated on CI");
-            }
-            println!("skipping: not elevated");
+            // Locally this prints exactly `skipping: not elevated`, which is
+            // what the release workflow's gate looks for; on CI it fails,
+            // because a runner that is elevated and skipped anyway means the
+            // gate ran nothing.
+            skip_or_fail_on_ci("not elevated");
             return;
         }
         enable_backup_restore().expect("enable SeBackup/SeRestore");
@@ -979,7 +981,7 @@ mod tests {
     fn a_hive_that_is_not_mounted_is_reported_not_swept() {
         let why = clean_loaded("S-1-5-21-0-0-0-4242").expect_err("no such account is signed in");
         assert!(why.contains("S-1-5-21-0-0-0-4242_Classes"), "{why}");
-        assert!(why.contains("is not there"), "{why}");
+        assert!(why.contains("no such key"), "{why}");
     }
 
     /// An account whose profile container is not mounted — no hive under
@@ -1030,7 +1032,9 @@ mod tests {
                     link: link.to_path_buf(),
                 }),
                 other => {
-                    println!("skipping: could not create a junction at {link:?}: {other:?}");
+                    skip_or_fail_on_ci(&format!(
+                        "could not create a junction at {link:?}: {other:?}"
+                    ));
                     None
                 }
             }
@@ -1165,14 +1169,20 @@ mod tests {
 
     impl DeniedFile {
         /// Deny this user everything on `path`. `None` when the ACE could not be
-        /// set, with a printed reason — a test that cannot deny itself access
-        /// proves nothing either way.
+        /// set — an environment without `icacls` or without a name to deny,
+        /// which is a shortcoming of the machine and so a failure on CI.
+        ///
+        /// Whether the ACE then *bites* is a separate question this cannot
+        /// answer, and the caller must: `SeBackupPrivilege` lifts a file DACL
+        /// for any handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, which is
+        /// how Rust's own `symlink_metadata` and `canonicalize` open. See
+        /// `a_hive_file_we_may_not_read_is_refused_by_name`.
         fn new(path: &Path) -> Option<Self> {
             let who = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
                 (Ok(domain), Ok(user)) => format!(r"{domain}\{user}"),
                 (_, Ok(user)) => user,
                 _ => {
-                    println!("skipping: no USERNAME to deny");
+                    skip_or_fail_on_ci("no USERNAME to deny");
                     return None;
                 }
             };
@@ -1187,7 +1197,7 @@ mod tests {
                     who,
                 }),
                 other => {
-                    println!("skipping: could not deny access to {path:?}: {other:?}");
+                    skip_or_fail_on_ci(&format!("could not deny access to {path:?}: {other:?}"));
                     None
                 }
             }
@@ -1197,6 +1207,10 @@ mod tests {
     impl Drop for DeniedFile {
         fn drop(&mut self) {
             // Off again before the temp directory tries to remove the file.
+            // `/remove:d` takes off *every* deny entry this principal has on the
+            // file, not only the one we added — which is exactly right on a file
+            // we created in a temp directory moments ago, and would not be on
+            // anything we did not.
             let out = std::process::Command::new("icacls")
                 .arg(&self.path)
                 .arg("/remove:d")
@@ -1213,6 +1227,15 @@ mod tests {
     /// it is Windows' business — a deny-all ACE can stop the `symlink_metadata`
     /// or the resolve — so what this pins down is the property that matters:
     /// `Err`, naming the file.
+    ///
+    /// It can also find that the ACE does not bite at all, and then it says so
+    /// and stops rather than failing. `offline_cleanup_removes_only_kuvatin_verbs`
+    /// enables `SeBackupPrivilege` for the whole process and by design leaves it
+    /// on, and `canonicalize` opens with `FILE_FLAG_BACKUP_SEMANTICS`, which
+    /// that privilege lets straight past a DACL. So on an elevated runner
+    /// whether the deny bites depends on which test ran first — which is why
+    /// this asks instead of assuming, and why its skip is the one kind that is
+    /// honest on CI as well.
     #[test]
     fn a_hive_file_we_may_not_read_is_refused_by_name() {
         let dir = tempfile::tempdir().expect("a temp directory");
@@ -1230,6 +1253,22 @@ mod tests {
         let Some(_denied) = DeniedFile::new(&hive) else {
             return;
         };
+        // Does the ACE actually bite in this process? Under SeBackupPrivilege
+        // it does not, and there is nothing wrong with the machine when it
+        // does not — so measure, then say so and stop.
+        // Does the ACE actually bite in this process? Ask the call that does
+        // the refusing, which measurement says is `canonicalize` and not the
+        // `symlink_metadata` above it: the walk's stat opens with no desired
+        // access at all, and an access check for no rights is one nothing can
+        // fail, so a deny-all ACE sails past it (measured here: attributes
+        // Ok, `is_file` true, resolve error 5). `canonicalize` is also the one
+        // `SeBackupPrivilege` would carry through, which is what makes this
+        // worth asking rather than assuming.
+        if std::fs::canonicalize(&hive).is_ok() {
+            skip_even_on_ci("SeBackupPrivilege overrides the deny in this process");
+            return;
+        }
+
         let why = checked_usrclass_path(&profile)
             .expect_err("a hive file we may not read is not one to mount");
         assert!(

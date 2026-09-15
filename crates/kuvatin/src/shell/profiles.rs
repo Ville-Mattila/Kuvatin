@@ -271,6 +271,7 @@ pub(super) fn all() -> (Vec<Profile>, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::skip_or_fail_on_ci;
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -368,18 +369,13 @@ mod tests {
             .arg(&target)
             .output();
         if made.is_err() || !link.exists() {
-            // On CI a skip would mean the gate is not running the thing it
-            // gates — the same rule the offline hive test follows.
-            if std::env::var_os("CI").is_some() {
-                panic!(
-                    "junction test must run on CI, but no junction could be made at {} ({made:?})",
-                    link.display()
-                );
-            }
-            eprintln!(
-                "skipping: could not create a junction at {} ({made:?})",
+            // One rule for every self-skipping test in the crate, and it lives
+            // in `test_support`: locally a line, on CI a failure, because a
+            // gate that ran none of these would be green and worth nothing.
+            skip_or_fail_on_ci(&format!(
+                "could not create a junction at {} ({made:?})",
                 link.display()
-            );
+            ));
             return;
         }
 

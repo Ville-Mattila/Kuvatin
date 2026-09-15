@@ -88,12 +88,51 @@ fn set_dacl(path: &str, denied: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Say that a test is skipping, and make that a failure where skipping would
+/// be a lie.
+///
+/// A test that cannot build the thing it is testing — no junction to be made,
+/// no Deny ACE to be set — proves nothing either way, and on a developer's
+/// machine saying so and moving on is the right answer. On CI it is not: those
+/// gates exist to run exactly these, and a run that quietly ran none of them
+/// would be green and worth nothing. `CI` is set by every hosted runner,
+/// GitHub Actions included.
+///
+/// Every self-skipping test in this crate goes through here or through
+/// [`skip_even_on_ci`], so the rule is one rule and lives in one place. The
+/// line itself stays `skipping: <reason>` on stdout, which is what the release
+/// workflow greps for.
+pub(super) fn skip_or_fail_on_ci(reason: &str) {
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "this test must not skip on CI: {reason}"
+    );
+    println!("skipping: {reason}");
+}
+
+/// The same line, for the one kind of skip that is honest everywhere: the
+/// setup worked, and what the test then found is that the condition it needs
+/// cannot hold *in this process*.
+///
+/// That is a fact about the process, not a shortcoming of the machine, so no
+/// runner could do anything about it and failing there would be noise. Use this
+/// only where the test has *measured* that the condition does not hold — never
+/// where it merely failed to arrange it.
+pub(super) fn skip_even_on_ci(reason: &str) {
+    println!("skipping: {reason}");
+}
+
 /// Holds a Deny ACE on an `HKEY_CURRENT_USER` key and takes it off again, so a
 /// scratch cleanup can still delete that key however the test ends.
 ///
 /// `Err` when the DACL could not be set at all: a test that cannot deny itself
-/// access proves nothing either way and should say it is skipping rather than
-/// pass in silence.
+/// access proves nothing either way and should say it is skipping — through
+/// [`skip_or_fail_on_ci`], since not being able to set a DACL is a shortcoming
+/// of the environment — rather than pass in silence.
+///
+/// There is no second failure mode here, the one files have: a registry ACE
+/// that is set always bites. `SeBackupPrivilege` lifts a DACL only for a handle
+/// that asks for it, and nothing in this crate passes `REG_OPTION_BACKUP_RESTORE`.
 pub(super) struct Denied {
     path: String,
 }

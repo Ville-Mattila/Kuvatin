@@ -248,8 +248,10 @@ pub(super) fn remove_verbs_under(classes_root: HKEY) -> VerbSweep {
 
 #[cfg(test)]
 mod tests {
-    use super::super::regutil::{delete_tree_under, open_owned, wide, DeleteOutcome, OwnedKey};
-    use super::super::test_support::Denied;
+    use super::super::regutil::{
+        delete_tree_under, open_owned, wide, DeleteOutcome, OwnedKey, DELETE_RIGHT,
+    };
+    use super::super::test_support::{skip_or_fail_on_ci, Denied};
     use super::super::windows::{
         extension_roots, BACKGROUND_ROOT, CLASSES_ROOT, FOLDER_ROOT, LEGACY_ROOT, STORE_BACKGROUND,
         STORE_FRAMES, STORE_ITEM,
@@ -412,7 +414,7 @@ mod tests {
         let denied = match Denied::on(&gate, KEY_ENUMERATE_SUB_KEYS) {
             Ok(guard) => guard,
             Err(why) => {
-                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                skip_or_fail_on_ci(&format!("could not set a Deny ACE on {gate}: {why}"));
                 return;
             }
         };
@@ -448,7 +450,7 @@ mod tests {
         let denied = match Denied::on(&gate, KEY_QUERY_VALUE) {
             Ok(guard) => guard,
             Err(why) => {
-                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                skip_or_fail_on_ci(&format!("could not set a Deny ACE on {gate}: {why}"));
                 return;
             }
         };
@@ -466,11 +468,6 @@ mod tests {
         // Before the scratch cleanup, so it can delete the key again.
         drop(denied);
     }
-
-    /// `DELETE`, spelled out the way `regutil::DELETE_ACCESS` has to spell it:
-    /// the `windows` crate exports the bit only from a file-system namespace
-    /// this crate does not otherwise need.
-    const DELETE_RIGHT: REG_SAM_FLAGS = REG_SAM_FLAGS(0x0001_0000);
 
     /// The same stray verb, all the way through the sweep, with the delete
     /// refused as well as the read. What it must not come out as is `absent`:
@@ -493,7 +490,7 @@ mod tests {
         ) {
             Ok(guard) => guard,
             Err(why) => {
-                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                skip_or_fail_on_ci(&format!("could not set a Deny ACE on {gate}: {why}"));
                 return;
             }
         };
