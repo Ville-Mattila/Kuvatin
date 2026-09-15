@@ -16,12 +16,26 @@
 //! can aim `AppData\Local\Microsoft\Windows` at another account's folder or at
 //! a system one and wait for SYSTEM to come along. Worse, `RegLoadKeyW`
 //! *creates* the hive file when it is missing, so a wrong path is not merely
-//! read but written. `checked_usrclass_path` is what stands in the way: every
-//! component from `AppData` down is refused if it is a reparse point, the file
-//! is confirmed to resolve back inside the profile, and `clean_offline` looks
-//! once more, as late as it can, that the file is still a file.
+//! read but written. `checked_usrclass_path` is what stands in the way: the
+//! profile directory and every component from `AppData` down are refused if
+//! they are reparse points, the file is confirmed to resolve back inside the
+//! profile, and `clean_offline` looks once more, as late as it can, that the
+//! file is still a file.
 //!
-//! That leaves a window neither can close: between the last check and
+//! Two things that guard does *not* cover, said plainly so nobody reads more
+//! into it than it promises:
+//!
+//! * A reparse point **above** the profile — a junction at `C:\Users`, say —
+//!   would redirect everything below it and is not checked, because creating
+//!   one there needs administrator rights. An attacker who has those does not
+//!   need this.
+//! * A **hard link** (`mklink /H`) at `UsrClass.dat` carries no reparse point
+//!   and resolves to its in-profile name, so it passes both checks and would
+//!   have us mount whatever file it shares. It needs write access to the target
+//!   file and the same volume, which is a much narrower opening than a
+//!   junction's, but it is an opening and the checks below do not close it.
+//!
+//! And a window neither check can close: between the last look and
 //! `RegLoadKeyW` the owner can still swap the path. It cannot be closed from
 //! here — holding the file open ourselves is exactly what makes `RegLoadKeyW`
 //! fail — so what is left is to make the window as small as possible and say
@@ -90,8 +104,8 @@ pub(super) fn usrclass_path(profile_dir: &Path) -> PathBuf {
     path
 }
 
-/// The profile's classes hive file, but only when every step down to it is an
-/// ordinary directory inside that profile.
+/// The profile's classes hive file, but only when the profile directory and
+/// every step down to the file are ordinary, unredirected entries.
 ///
 /// Two checks, because either alone has a hole. Walking the components with
 /// `symlink_metadata` names the offending directory, which is what an operator
@@ -99,21 +113,27 @@ pub(super) fn usrclass_path(profile_dir: &Path) -> PathBuf {
 /// the file catches everything the walk could have missed, including a junction
 /// planted between two of its steps, because it asks Windows where the file
 /// really is rather than where its name says it is.
+///
+/// The walk starts at `profile_dir` itself, and that step is not a formality:
+/// `canonicalize` follows a junction *at* the profile directory on both sides
+/// of the containment test, so a hive under `linked-profile\AppData\…` resolves
+/// to `real-target\AppData\…` while `linked-profile` resolves to `real-target`,
+/// and `under` says yes to a path that is not in the profile at all. Only
+/// stopping at the reparse point catches that. `profiles::vet_dir` refuses one
+/// there too, before this is ever reached — this does not lean on it, because a
+/// guard that is only correct when read together with another module's is not a
+/// guard.
+///
+/// What it does not cover is a reparse point *above* the profile (a junction at
+/// `C:\Users`) — creating one there needs administrator rights, and an attacker
+/// who has those has no need of this — or a hard link at the file itself; see
+/// the residual risks in this module's own documentation.
 pub(super) fn checked_usrclass_path(profile_dir: &Path) -> Result<PathBuf, String> {
     let mut here = profile_dir.to_path_buf();
+    vet_step(&here)?;
     for step in USRCLASS_UNDER_PROFILE {
         here.push(step);
-        // symlink_metadata, so a reparse point is reported as itself rather
-        // than as whatever it points at.
-        let meta = std::fs::symlink_metadata(&here)
-            .map_err(|e| format!("{} would not open ({e})", here.display()))?;
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(format!(
-                "{} is a reparse point; refusing to mount a hive through it, \
-                 because its owner can aim it anywhere and this runs as SYSTEM",
-                here.display()
-            ));
-        }
+        vet_step(&here)?;
     }
     if !here.is_file() {
         return Err(format!("{} is not a file", here.display()));
@@ -136,10 +156,36 @@ pub(super) fn checked_usrclass_path(profile_dir: &Path) -> Result<PathBuf, Strin
     Ok(here)
 }
 
+/// One step of the walk down to the hive file: it is there, and it is not a
+/// reparse point.
+fn vet_step(here: &Path) -> Result<(), String> {
+    // symlink_metadata, so a reparse point is reported as itself rather than as
+    // whatever it points at. Do not simplify this to `is_dir`/`is_file`: those
+    // follow a junction and answer about its target.
+    let meta = std::fs::symlink_metadata(here)
+        .map_err(|e| format!("{} would not open ({e})", here.display()))?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(format!(
+            "{} is a reparse point; refusing to mount a hive through it, \
+             because its owner can aim it anywhere and this runs as SYSTEM",
+            here.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `child` is `parent` or lies below it, compared component by
 /// component and case-insensitively, the way Windows compares names. A string
 /// prefix would not do: `C:\Users\al` is a prefix of `C:\Users\alice` and names
 /// a different account.
+///
+/// Both paths must have come from the same place — here, from
+/// `std::fs::canonicalize` — because a path's *spelling* is part of its
+/// components. A canonical `\\?\C:\Users\alice\x` is not under a plain
+/// `C:\Users\alice`: the verbatim prefix is a component of its own and nothing
+/// in the parent matches it. That is the safe way round, since the answer is
+/// `false` and `false` refuses, but it makes this the wrong tool for comparing
+/// a path a caller typed against one Windows resolved.
 fn under(child: &Path, parent: &Path) -> bool {
     let mut walk = child.components();
     parent.components().all(|want| {
@@ -950,12 +996,54 @@ mod tests {
         assert_eq!(outcome.sid, profile.sid);
         assert_eq!(outcome.access, HiveAccess::None);
         assert_eq!(outcome.sweep, VerbSweep::default(), "nothing was deleted");
+        // Named at the first step that is not there, which for a profile
+        // directory that has gone is the directory itself.
         assert!(
-            outcome.trouble.iter().any(|t| t.contains("AppData")),
+            outcome
+                .trouble
+                .iter()
+                .any(|t| t.contains("NoSuchKuvatinProfile")),
             "the path we could not reach should be named: {:?}",
             outcome.trouble
         );
         assert_eq!(outcome.access.wording(), "not reached; nothing was removed");
+    }
+
+    /// A junction that removes itself, so a failed assertion cannot leave the
+    /// temp directory with a link in it for the recursive cleanup to follow.
+    struct Junction {
+        link: PathBuf,
+    }
+
+    impl Junction {
+        /// `None` when this environment will not make one. Junctions need no
+        /// privilege, so that should not happen — but a test that cannot build
+        /// its attack should say so rather than pass in silence.
+        fn new(link: &Path, target: &Path) -> Option<Self> {
+            let made = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output();
+            match made {
+                Ok(_) if link.exists() => Some(Junction {
+                    link: link.to_path_buf(),
+                }),
+                other => {
+                    println!("skipping: could not create a junction at {link:?}: {other:?}");
+                    None
+                }
+            }
+        }
+    }
+
+    impl Drop for Junction {
+        fn drop(&mut self) {
+            // remove_dir on a junction removes the link, never its target.
+            if let Err(e) = std::fs::remove_dir(&self.link) {
+                eprintln!("could not remove the junction {:?}: {e}", self.link);
+            }
+        }
     }
 
     /// A junction anywhere between the profile root and `UsrClass.dat` is the
@@ -975,19 +1063,8 @@ mod tests {
         std::fs::write(elsewhere.join("UsrClass.dat"), b"not really a hive").expect("bait");
 
         let link = profile.join(r"AppData\Local\Microsoft\Windows");
-        let made = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(&link)
-            .arg(&elsewhere)
-            .output();
-        match made {
-            Ok(out) if link.exists() => out,
-            other => {
-                // Junctions need no privilege, but say so rather than pass in
-                // silence if this environment will not make one.
-                eprintln!("skipping: could not create a junction at {link:?}: {other:?}");
-                return;
-            }
+        let Some(_junction) = Junction::new(&link, &elsewhere) else {
+            return;
         };
 
         let why = checked_usrclass_path(&profile).expect_err("a junction must be refused");
@@ -1018,9 +1095,147 @@ mod tests {
             std::fs::read(elsewhere.join("UsrClass.dat")).expect("bait survives"),
             b"not really a hive",
         );
-        // Junctions confuse recursive removal, so take this one out first and
-        // leave the temp directory nothing to trip over.
-        std::fs::remove_dir(&link).expect("remove the junction");
+    }
+
+    /// A junction where the *profile directory itself* should be — the one the
+    /// containment check cannot catch on its own. `canonicalize` follows the
+    /// junction on both sides, so the file resolves under the target and the
+    /// profile resolves to the target, `under` says yes, and SYSTEM would mount
+    /// a hive belonging to whoever owns that target. Stopping at the reparse
+    /// point is the whole of the defence, and this proves both halves: that the
+    /// containment check really would have waved it through, and that the walk
+    /// does not.
+    #[test]
+    fn a_junction_where_the_profile_directory_should_be_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let real = dir.path().join("somebody-elses-profile");
+        let hive = usrclass_path(&real);
+        std::fs::create_dir_all(hive.parent().expect("a parent")).expect("the target tree");
+        std::fs::write(&hive, b"not really a hive").expect("bait");
+
+        let linked = dir.path().join("linked-profile");
+        let Some(_junction) = Junction::new(&linked, &real) else {
+            return;
+        };
+
+        // The containment check on its own is happy: both sides resolve through
+        // the junction, so the file looks like it is inside the profile.
+        let through_the_link = usrclass_path(&linked);
+        let resolved = std::fs::canonicalize(&through_the_link).expect("resolve the file");
+        let root = std::fs::canonicalize(&linked).expect("resolve the profile");
+        assert!(
+            under(&resolved, &root),
+            "if this ever fails, the reparse check is no longer the only thing \
+             standing between SYSTEM and {}",
+            real.display()
+        );
+
+        // The walk is not.
+        let why = checked_usrclass_path(&linked).expect_err("a linked profile must be refused");
+        assert!(why.contains("reparse point"), "{why}");
+        assert!(
+            why.contains("linked-profile"),
+            "the reason should name the profile directory, got: {why}"
+        );
+
+        let outcome = clean_profile(&Profile {
+            sid: "S-1-5-21-0-0-0-4245".to_string(),
+            dir: linked.clone(),
+        });
+        assert_eq!(outcome.access, HiveAccess::None);
+        assert_eq!(outcome.sweep, VerbSweep::default());
+        assert!(
+            outcome.trouble.iter().any(|t| t.contains("reparse point")),
+            "{:?}",
+            outcome.trouble
+        );
+        assert_eq!(
+            std::fs::read(&hive).expect("bait survives"),
+            b"not really a hive"
+        );
+    }
+
+    /// A Deny ACE on a FILE, put on with `icacls` and taken off again. The
+    /// registry recipe in `test_support` cannot do files, and the two APIs that
+    /// could need a `windows` crate feature this build does not otherwise want.
+    struct DeniedFile {
+        path: PathBuf,
+        who: String,
+    }
+
+    impl DeniedFile {
+        /// Deny this user everything on `path`. `None` when the ACE could not be
+        /// set, with a printed reason — a test that cannot deny itself access
+        /// proves nothing either way.
+        fn new(path: &Path) -> Option<Self> {
+            let who = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+                (Ok(domain), Ok(user)) => format!(r"{domain}\{user}"),
+                (_, Ok(user)) => user,
+                _ => {
+                    println!("skipping: no USERNAME to deny");
+                    return None;
+                }
+            };
+            let out = std::process::Command::new("icacls")
+                .arg(path)
+                .arg("/deny")
+                .arg(format!("{who}:(F)"))
+                .output();
+            match out {
+                Ok(out) if out.status.success() => Some(DeniedFile {
+                    path: path.to_path_buf(),
+                    who,
+                }),
+                other => {
+                    println!("skipping: could not deny access to {path:?}: {other:?}");
+                    None
+                }
+            }
+        }
+    }
+
+    impl Drop for DeniedFile {
+        fn drop(&mut self) {
+            // Off again before the temp directory tries to remove the file.
+            let out = std::process::Command::new("icacls")
+                .arg(&self.path)
+                .arg("/remove:d")
+                .arg(&self.who)
+                .output();
+            if !matches!(&out, Ok(o) if o.status.success()) {
+                eprintln!("could not restore access to {:?}: {out:?}", self.path);
+            }
+        }
+    }
+
+    /// A `UsrClass.dat` we are not allowed to read is skipped with a reason, not
+    /// mounted and not passed over in silence. Which of the two checks refuses
+    /// it is Windows' business — a deny-all ACE can stop the `symlink_metadata`
+    /// or the resolve — so what this pins down is the property that matters:
+    /// `Err`, naming the file.
+    #[test]
+    fn a_hive_file_we_may_not_read_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let profile = dir.path().join("profile");
+        let hive = usrclass_path(&profile);
+        std::fs::create_dir_all(hive.parent().expect("a parent")).expect("profile tree");
+        std::fs::write(&hive, b"not really a hive").expect("the hive file");
+        // It passes before the ACE goes on, so the ACE is what makes the
+        // difference below.
+        assert_eq!(
+            checked_usrclass_path(&profile).expect("a readable tree passes"),
+            hive
+        );
+
+        let Some(_denied) = DeniedFile::new(&hive) else {
+            return;
+        };
+        let why = checked_usrclass_path(&profile)
+            .expect_err("a hive file we may not read is not one to mount");
+        assert!(
+            why.contains("UsrClass.dat"),
+            "the file we could not vet should be named, got: {why}"
+        );
     }
 
     /// The guard is not so strict that it refuses an ordinary profile: a plain
@@ -1063,5 +1278,20 @@ mod tests {
             Path::new(r"C:\Users\al")
         ));
         assert!(!under(Path::new(r"C:\Users"), Path::new(r"C:\Users\alice")));
+
+        // Two canonical paths agree, because `canonicalize` spells both the
+        // same way…
+        assert!(under(
+            Path::new(r"\\?\C:\Users\alice\AppData"),
+            Path::new(r"\\?\C:\Users\alice")
+        ));
+        // …and one of each does not, because the verbatim prefix is a component
+        // and the plain path has nothing to match it with. That is the safe way
+        // round — `false` refuses — but it is why both sides here come from
+        // `canonicalize` and neither is a path someone typed.
+        assert!(!under(
+            Path::new(r"\\?\C:\Users\alice\AppData"),
+            Path::new(r"C:\Users\alice")
+        ));
     }
 }

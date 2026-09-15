@@ -664,7 +664,10 @@ mod tests {
         // Why the relative form is not a style choice. Conditional because it
         // is Windows' behaviour being reported, not ours: where the classes
         // root is not a link there is nothing to refuse.
-        if is_reg_link(HKEY_CURRENT_USER, CLASSES_ROOT) {
+        // `Ok(true)` and not `unwrap_or(false)`: a classes root we could not
+        // read tells us nothing, and a test that quietly passes on "nothing"
+        // proves nothing either.
+        if is_reg_link(HKEY_CURRENT_USER, CLASSES_ROOT) == Ok(true) {
             let why = open_owned_no_links(
                 HKEY_CURRENT_USER,
                 &scratch.absolute(r"shell\Kuvatin"),

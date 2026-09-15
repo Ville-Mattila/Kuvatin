@@ -35,7 +35,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, KEY_ENUMERATE_SUB_KEYS,
-    KEY_QUERY_VALUE, KEY_READ, REG_LINK, REG_OPTION_OPEN_LINK, REG_SAM_FLAGS, REG_VALUE_TYPE,
+    KEY_QUERY_VALUE, REG_LINK, REG_OPTION_OPEN_LINK, REG_SAM_FLAGS, REG_VALUE_TYPE,
 };
 
 /// Keys nested deeper than this inside a subtree we are deleting are treated
@@ -291,29 +291,41 @@ fn is_link_handle(h: HKEY) -> bool {
     status == ERROR_SUCCESS && kind == REG_LINK
 }
 
-/// True when `root\subpath` carries a `REG_LINK` `SymbolicLinkValue`. Carries
-/// the same caveat as `is_link_handle`: a plain key can be dressed up to look
-/// like this, so treat a `true` as "do not walk through it", not as "this key
-/// is not mine to delete".
-pub(super) fn is_reg_link(root: HKEY, subpath: &str) -> bool {
-    let w = wide(subpath);
-    let mut h = HKEY::default();
-    // REG_OPTION_OPEN_LINK opens the link itself rather than its target.
-    let status = unsafe {
-        RegOpenKeyExW(
-            root,
-            PCWSTR(w.as_ptr()),
-            REG_OPTION_OPEN_LINK.0,
-            KEY_READ,
-            &mut h,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return false;
+/// Whether `root\subpath` carries a `REG_LINK` `SymbolicLinkValue`: `Ok(true)`
+/// if it does, `Ok(false)` if it is a plain key or is not there at all, and
+/// `Err` when it is there and would not open, so we could not tell.
+///
+/// That third answer is the reason this is not a `bool`. A key whose owner has
+/// denied us the read is exactly the key most likely to be a link, and folding
+/// it into `false` would have this fail *open*: the one call that exists to say
+/// "do not walk through that" would say "go ahead" under the one condition that
+/// should stop it. Callers must decide what to do about not knowing; none of
+/// them may read it as "not a link".
+///
+/// It asks for [`TRAVERSE_ACCESS`] and no more — reading one value is all it
+/// does — so there is only `KEY_QUERY_VALUE` for an owner to deny in the first
+/// place.
+///
+/// Carries the same caveat as `is_link_handle`: a plain key can be dressed up
+/// to look like this, so treat a `true` as "do not walk through it", not as
+/// "this key is not mine to delete".
+pub(super) fn is_reg_link(root: HKEY, subpath: &str) -> Result<bool, String> {
+    // `open_component` passes REG_OPTION_OPEN_LINK, which opens the link itself
+    // rather than its target — and, as ever, protects only the last segment,
+    // which is the one being asked about.
+    match open_component(root, subpath, TRAVERSE_ACCESS) {
+        Ok(h) => {
+            let link = is_link_handle(h);
+            close(h);
+            Ok(link)
+        }
+        Err(OpenFailure::Absent) => Ok(false),
+        Err(OpenFailure::Failed(e)) => Err(format!(
+            "{}: {}, so whether it is a symbolic link is not knowable",
+            normalised(subpath),
+            explain_error(e)
+        )),
     }
-    let link = is_link_handle(h);
-    close(h);
-    link
 }
 
 /// Say what a Win32 error means in words a log reader can act on, keeping the
@@ -685,8 +697,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows::Win32::System::Registry::{
         RegCreateKeyExW, RegDeleteKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY_CURRENT_USER,
-        HKEY_USERS, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_NOTIFY, KEY_SET_VALUE, KEY_WRITE,
-        REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
+        HKEY_USERS, KEY_ALL_ACCESS, KEY_CREATE_LINK, KEY_NOTIFY, KEY_READ, KEY_SET_VALUE,
+        KEY_WRITE, REG_OPTION_CREATE_LINK, REG_OPTION_NON_VOLATILE,
     };
 
     use super::super::test_support::Denied;
@@ -922,7 +934,10 @@ mod tests {
         // The root itself is never the target.
         assert!(refusal(delete_tree_under(HKEY_CURRENT_USER, "")).contains("empty path"));
 
-        assert!(!is_reg_link(HKEY_CURRENT_USER, &scratch.at("beta")));
+        assert_eq!(
+            is_reg_link(HKEY_CURRENT_USER, &scratch.at("beta")),
+            Ok(false)
+        );
         assert_eq!(kids(&scratch.path), vec!["beta"]);
     }
 
@@ -957,8 +972,11 @@ mod tests {
         create_link(&link, &target_nt);
 
         // The link is real: it reads as a link, and it resolves to the target.
-        assert!(is_reg_link(HKEY_CURRENT_USER, &link));
-        assert!(!is_reg_link(HKEY_CURRENT_USER, &scratch.at("target")));
+        assert_eq!(is_reg_link(HKEY_CURRENT_USER, &link), Ok(true));
+        assert_eq!(
+            is_reg_link(HKEY_CURRENT_USER, &scratch.at("target")),
+            Ok(false)
+        );
         assert_eq!(
             kids(&link),
             vec!["keep", "shell"],
@@ -991,7 +1009,11 @@ mod tests {
             "removing a link should be noted, got {:?}",
             outcome.notes()
         );
-        assert!(!is_reg_link(HKEY_CURRENT_USER, &link));
+        assert_eq!(
+            is_reg_link(HKEY_CURRENT_USER, &link),
+            Ok(false),
+            "a key that has gone is not a link"
+        );
         assert!(open_owned(HKEY_CURRENT_USER, &link).is_none());
 
         // …and what it pointed at is untouched.
@@ -1018,7 +1040,7 @@ mod tests {
         let nested = scratch.at(r"Kuvatin\shell\nested-link");
         let target_nt = format!(r"{}\{}", hive_nt_path(&scratch), scratch.at("victim"));
         create_link(&nested, &target_nt);
-        assert!(is_reg_link(HKEY_CURRENT_USER, &nested));
+        assert_eq!(is_reg_link(HKEY_CURRENT_USER, &nested), Ok(true));
 
         let outcome = delete_tree_under(HKEY_CURRENT_USER, &scratch.at("Kuvatin"));
         assert!(
@@ -1090,8 +1112,9 @@ mod tests {
         // An ordinary key with children, wearing a link value as camouflage.
         let target_nt = format!(r"{}\{}", hive_nt_path(&scratch), scratch.at("victim"));
         fake_link_value(&scratch.at(r"Kuvatin\shell"), &target_nt);
-        assert!(
+        assert_eq!(
             is_reg_link(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")),
+            Ok(true),
             "the value should make a plain key read as a link"
         );
 
@@ -1154,6 +1177,49 @@ mod tests {
         );
         assert!(open_owned(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")).is_none());
         drop(denied);
+    }
+
+    /// The one answer `is_reg_link` must never give: "not a link" about a key
+    /// it could not read. A key whose owner has denied us the read is exactly
+    /// the key most likely to be one, so folding that into `false` would have
+    /// the call that exists to stop a walk wave it through.
+    #[test]
+    fn a_key_we_may_not_read_is_not_reported_as_not_a_link() {
+        let scratch = Scratch::new();
+        create(&scratch.at("quiet"));
+        let gate = scratch.at("quiet");
+        assert_eq!(
+            is_reg_link(HKEY_CURRENT_USER, &gate),
+            Ok(false),
+            "a plain key we can read is plainly not a link"
+        );
+
+        // Denying the one right the check asks for. Setting a DACL from the
+        // test process may not be possible everywhere; say so rather than
+        // quietly proving nothing.
+        let denied = match Denied::on(&gate, KEY_QUERY_VALUE) {
+            Ok(guard) => guard,
+            Err(why) => {
+                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                return;
+            }
+        };
+
+        let why = is_reg_link(HKEY_CURRENT_USER, &gate)
+            .expect_err("a key we may not read is not a key we know about");
+        assert!(why.contains("not allowed"), "vague reason: {why}");
+        assert!(
+            why.contains("quiet"),
+            "a log line needs the key, got: {why}"
+        );
+        drop(denied);
+
+        // A key that is not there at all is a different thing, and is `false`:
+        // nothing to walk through means nothing to refuse.
+        assert_eq!(
+            is_reg_link(HKEY_CURRENT_USER, &scratch.at("nowhere")),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -1264,8 +1330,9 @@ mod tests {
             open_owned(HKEY_CURRENT_USER, &scratch.at("empty-target")).is_none(),
             "RegDeleteKeyExW took the link's target"
         );
-        assert!(
+        assert_eq!(
             is_reg_link(HKEY_CURRENT_USER, &link),
+            Ok(true),
             "…and left the link itself standing"
         );
     }
@@ -1294,8 +1361,9 @@ mod tests {
             open_owned(HKEY_CURRENT_USER, &scratch.at("victim")).is_none(),
             "RegDeleteTreeW reached out of the subtree and took the link's target"
         );
-        assert!(
+        assert_eq!(
             is_reg_link(HKEY_CURRENT_USER, &nested),
+            Ok(true),
             "…and left the link itself standing"
         );
     }

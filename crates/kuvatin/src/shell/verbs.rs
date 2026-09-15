@@ -261,7 +261,7 @@ mod tests {
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
         RegCreateKeyExW, HKEY_CURRENT_USER, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_WRITE,
-        REG_OPTION_NON_VOLATILE,
+        REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS,
     };
 
     fn create(path: &str) {
@@ -463,6 +463,68 @@ mod tests {
             .expect("a candidate we may not open must say so");
         assert!(why.contains("not allowed"), "vague reason: {why}");
         assert!(why.contains(".qoi"), "a log line needs the key, got: {why}");
+        // Before the scratch cleanup, so it can delete the key again.
+        drop(denied);
+    }
+
+    /// `DELETE`, spelled out the way `regutil::DELETE_ACCESS` has to spell it:
+    /// the `windows` crate exports the bit only from a file-system namespace
+    /// this crate does not otherwise need.
+    const DELETE_RIGHT: REG_SAM_FLAGS = REG_SAM_FLAGS(0x0001_0000);
+
+    /// The same stray verb, all the way through the sweep, with the delete
+    /// refused as well as the read. What it must not come out as is `absent`:
+    /// that is the count an operator reads as "there was nothing there", and a
+    /// key still sitting in someone's menu must be `refused` instead, named, so
+    /// somebody goes and deals with it.
+    #[test]
+    fn a_candidate_refused_at_both_ends_is_counted_refused_not_absent() {
+        let scratch = Scratch::new();
+        let stray = r"SystemFileAssociations\.qoi\shell\Kuvatin";
+        create(&scratch.at(stray));
+        let gate = scratch.at(stray);
+
+        // Both rights the two halves need: the read asks for
+        // KEY_ENUMERATE_SUB_KEYS, the delete for that and DELETE. Denying both
+        // keeps this honest if either access constant is ever narrowed.
+        let denied = match Denied::on(
+            &gate,
+            REG_SAM_FLAGS(KEY_ENUMERATE_SUB_KEYS.0 | DELETE_RIGHT.0),
+        ) {
+            Ok(guard) => guard,
+            Err(why) => {
+                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                return;
+            }
+        };
+
+        let sweep = remove_verbs_under(scratch.root.get());
+        assert_eq!(
+            sweep.refused, 1,
+            "the one key still there should be counted as still there: {:?}",
+            sweep.lines
+        );
+        assert_eq!(sweep.removed, 0, "{:?}", sweep.lines);
+        assert_eq!(
+            sweep.absent,
+            classes_subkeys().len(),
+            "only the keys that really are not there: {:?}",
+            sweep.lines
+        );
+        let read = sweep
+            .troubles()
+            .first()
+            .copied()
+            .expect("the refused read should be reported");
+        assert!(read.contains(".qoi"), "{read}");
+        let refusal = sweep
+            .refusals()
+            .first()
+            .copied()
+            .expect("the refused delete should be reported");
+        assert!(refusal.contains(".qoi"), "{refusal}");
+        assert!(refusal.contains("not allowed"), "vague reason: {refusal}");
+
         // Before the scratch cleanup, so it can delete the key again.
         drop(denied);
     }
