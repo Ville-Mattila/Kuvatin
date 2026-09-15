@@ -16,9 +16,13 @@
 //! write or delete) and `open_subkey` / `enum_subkeys` (which *do* follow
 //! links, and so are for reading only).
 //!
-//! Nothing outside `#[cfg(test)]` calls into this module yet: later tasks in
-//! the all-users-uninstall plan wire `windows.rs` and the new all-users path
-//! to it. Until then, allow the otherwise-unused helpers.
+//! The per-user unregister in `windows.rs` deletes through this module, so
+//! most of it is live. What is not called outside `#[cfg(test)]` yet is
+//! `open_path_no_links` (and `OwnedKey::into_raw`, which exists to hand it its
+//! handle) and `is_reg_link`, because the path that needs them is the offline
+//! one: a later task in the all-users-uninstall plan mounts each profile's
+//! hive and has to open keys for writing in a hive whose owner may have
+//! planted links. Until then, allow those.
 #![allow(dead_code)]
 
 use windows::core::{PCWSTR, PWSTR};
@@ -86,11 +90,12 @@ pub(super) fn close(h: HKEY) {
 }
 
 /// An open key that closes itself, so a walk can give up at any point without
-/// leaking the handles it opened on the way down.
-struct OwnedKey(HKEY);
+/// leaking the handles it opened on the way down — and so can a caller holding
+/// a root it works relative to (see `open_owned`).
+pub(super) struct OwnedKey(HKEY);
 
 impl OwnedKey {
-    fn get(&self) -> HKEY {
+    pub(super) fn get(&self) -> HKEY {
         self.0
     }
 
@@ -106,28 +111,56 @@ impl Drop for OwnedKey {
     }
 }
 
-/// Open `root\subpath` for read, **following any symbolic link on the way**.
-/// `None` when the key does not exist or cannot be opened.
+/// Open `root\subpath` for read, **following any symbolic link on the way**,
+/// keeping apart the two ways that can fail: the key is not there, or it is
+/// there and would not open.
 ///
 /// Reading is all this is for. Anything that will write or delete wants
 /// `open_path_no_links`, which refuses to be redirected.
-pub(super) fn open_subkey(root: HKEY, subpath: &str) -> Option<HKEY> {
+fn open_subkey_reporting(root: HKEY, subpath: &str) -> Result<HKEY, OpenFailure> {
     let w = wide(subpath);
     let mut h = HKEY::default();
     let status = unsafe { RegOpenKeyExW(root, PCWSTR(w.as_ptr()), 0, KEY_READ, &mut h) };
-    (status == ERROR_SUCCESS).then_some(h)
+    if status == ERROR_SUCCESS {
+        Ok(h)
+    } else if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+        Err(OpenFailure::Absent)
+    } else {
+        Err(OpenFailure::Failed(status.0))
+    }
+}
+
+/// Open `root\subpath` for read, **following any symbolic link on the way**.
+/// `None` when the key does not exist or cannot be opened — a caller that
+/// needs to tell those apart wants `open_subkey_reporting`.
+pub(super) fn open_subkey(root: HKEY, subpath: &str) -> Option<HKEY> {
+    open_subkey_reporting(root, subpath).ok()
+}
+
+/// The same, as a handle that closes itself — for a root a caller will work
+/// relative to and would otherwise have to remember to close.
+pub(super) fn open_owned(root: HKEY, subpath: &str) -> Option<OwnedKey> {
+    open_subkey(root, subpath).map(OwnedKey)
 }
 
 /// The immediate subkey names of `root\subpath`, or `Err` with a reason when
 /// the list could not be read in full — never a short list passed off as a
 /// complete one, which would let an uninstall conclude a hive was already
-/// clean. A key that is simply absent has no children, so that is `Ok(empty)`.
+/// clean and move on leaving the keys behind.
+///
+/// Only a key that is genuinely *not there* has no children, and that is the
+/// one `Ok(empty)`. A key that is there and refuses to open — the hive's owner
+/// can deny us the read — is a failure and says so.
 ///
 /// Like `open_subkey`, this follows a symbolic link at any segment, so it is
 /// for reading only.
 pub(super) fn enum_subkeys(root: HKEY, subpath: &str) -> Result<Vec<String>, String> {
-    let Some(key) = open_subkey(root, subpath) else {
-        return Ok(Vec::new());
+    let key = match open_subkey_reporting(root, subpath) {
+        Ok(h) => h,
+        Err(OpenFailure::Absent) => return Ok(Vec::new()),
+        Err(OpenFailure::Failed(e)) => {
+            return Err(format!("{} {}", normalised(subpath), explain_error(e)))
+        }
     };
     let out = enum_children(key);
     close(key);
@@ -595,6 +628,7 @@ pub(super) fn delete_tree_under(root: HKEY, subpath: &str) -> DeleteOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Security::{
@@ -682,10 +716,14 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
+            // The clock ticks every 100 ns here, which two tests starting
+            // together can share; the counter is what actually keeps them apart.
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let me = Scratch {
                 path: format!(
-                    r"Software\Kuvatin-regutil-test-{}-{nanos}",
-                    std::process::id()
+                    r"Software\Kuvatin-regutil-test-{}-{nanos}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
                 ),
             };
             create(&me.path);
@@ -1157,6 +1195,47 @@ mod tests {
         );
         assert!(open_subkey(HKEY_CURRENT_USER, &scratch.at(r"Kuvatin\shell")).is_none());
         drop(denied);
+    }
+
+    #[test]
+    fn a_key_we_may_not_open_is_not_reported_as_empty() {
+        let scratch = Scratch::new();
+        create(&scratch.at(r"assoc\.png\shell\Kuvatin"));
+        let gate = scratch.at("assoc");
+
+        // A key that is simply not there has no children, and says so.
+        assert_eq!(
+            enum_subkeys(HKEY_CURRENT_USER, &scratch.at("nowhere")),
+            Ok(Vec::new()),
+            "an absent key is not a read failure"
+        );
+
+        // Setting a DACL from the test process may not be possible everywhere;
+        // say so rather than quietly proving nothing.
+        let denied = match Denied::on(&gate, KEY_NOTIFY) {
+            Ok(guard) => guard,
+            Err(why) => {
+                eprintln!("skipping: could not set a Deny ACE on {gate}: {why}");
+                return;
+            }
+        };
+
+        // Reading this one back as "no children" would tell an uninstall the
+        // hive was already clean, and it would move on and leave the keys.
+        let why = enum_subkeys(HKEY_CURRENT_USER, &gate)
+            .expect_err("a key we may not open is not an empty key");
+        assert!(why.contains("not allowed"), "vague reason: {why}");
+        assert!(
+            why.contains("assoc"),
+            "a log line needs the path, got: {why}"
+        );
+        drop(denied);
+
+        // With the ACE gone the same call reads it.
+        assert_eq!(
+            enum_subkeys(HKEY_CURRENT_USER, &gate).expect("readable again"),
+            vec![".png"]
+        );
     }
 
     #[test]

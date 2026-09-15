@@ -55,8 +55,9 @@ pub(super) const STORE_BACKGROUND: &str = "Kuvatin.CommandStore.Background";
 /// Sequence-only frame formats (`.exr`): the image presets can't read them,
 /// so their submenu holds just the sequence render.
 pub(super) const STORE_FRAMES: &str = "Kuvatin.CommandStore.Frames";
-/// All three as one list, so a store added above is added to the shared
-/// delete list in `super::verbs` by editing the line beneath it.
+/// The stores as one list: what `super::verbs` deletes, and what
+/// `every_root_points_at_a_store_the_uninstall_removes` holds equal to the
+/// stores the registered verb roots actually point at.
 pub(super) const STORES: &[&str] = &[STORE_ITEM, STORE_BACKGROUND, STORE_FRAMES];
 
 /// Bump when the registered keys or the command lines they hold change, so
@@ -217,11 +218,8 @@ fn register_quiet() -> Result<()> {
 
     delete_tree(LEGACY_ROOT);
     // The cascading "Kuvatin" verb: per extension, on folders, on backgrounds.
-    let mut roots = extension_roots();
-    roots.push((FOLDER_ROOT.to_string(), STORE_ITEM));
-    roots.push((BACKGROUND_ROOT.to_string(), STORE_BACKGROUND));
-    for (root, store) in &roots {
-        let k = create_key(root)?;
+    for (root, store) in classic_roots_with_stores() {
+        let k = create_key(&root)?;
         set_string(k, Some("MUIVerb"), "Kuvatin")?;
         set_string(k, Some("ExtendedSubCommandsKey"), store)?;
         set_string(k, Some("Icon"), &exe)?;
@@ -249,12 +247,28 @@ pub fn register() -> Result<()> {
     Ok(())
 }
 
-/// Every classic verb root: per extension, folders, folder backgrounds.
-pub(super) fn classic_roots() -> Vec<String> {
-    let mut roots: Vec<String> = extension_roots().into_iter().map(|(r, _)| r).collect();
-    roots.push(FOLDER_ROOT.to_string());
-    roots.push(BACKGROUND_ROOT.to_string());
+/// Every classic verb root — per extension, folders, folder backgrounds — with
+/// the command store its submenu comes from.
+///
+/// The one list of what the classic menu *is*: `register_quiet` writes exactly
+/// these, `set_classic_verbs_hidden` hides exactly these, and `super::verbs`
+/// deletes exactly these. Spelled out twice, a root added to the registration
+/// alone would be written to every machine and then uninstalled from none —
+/// and never hidden behind the Windows 11 menu either, so it would show up as
+/// a second, identical "Kuvatin".
+pub(super) fn classic_roots_with_stores() -> Vec<(String, &'static str)> {
+    let mut roots = extension_roots();
+    roots.push((FOLDER_ROOT.to_string(), STORE_ITEM));
+    roots.push((BACKGROUND_ROOT.to_string(), STORE_BACKGROUND));
     roots
+}
+
+/// The same roots without the stores, for the callers that only need naming.
+pub(super) fn classic_roots() -> Vec<String> {
+    classic_roots_with_stores()
+        .into_iter()
+        .map(|(root, _)| root)
+        .collect()
 }
 
 /// Windows 11 lists a packaged handler in BOTH its new menu and the classic
@@ -494,8 +508,8 @@ pub fn notify_error(title: &str, text: &str) {
 /// and leave the whole menu in place (`a_verb_key_in_the_user_classes_hive_deletes`
 /// pins that down). It is also the shape the all-users uninstall works in,
 /// where the root is a mounted hive instead.
-fn user_classes_root() -> Option<HKEY> {
-    super::regutil::open_subkey(HKEY_CURRENT_USER, CLASSES_ROOT)
+fn user_classes_root() -> Option<super::regutil::OwnedKey> {
+    super::regutil::open_owned(HKEY_CURRENT_USER, CLASSES_ROOT)
 }
 
 /// Delete every classic verb key this user has, from the one shared list in
@@ -513,28 +527,29 @@ fn remove_classic_verbs() {
         ));
         return;
     };
-    let (keys, trouble) = super::verbs::subkeys_to_delete(classes);
+    let (keys, trouble) = super::verbs::subkeys_to_delete(classes.get());
     if let Some(why) = trouble {
         crate::applog::log(&format!("Context menu: {why}"));
     }
-    let total = keys.len();
-    let mut gone = 0usize;
+    let (mut removed, mut absent, mut refused) = (0usize, 0usize, 0usize);
     for sub in keys {
-        let outcome = super::regutil::delete_tree_under(classes, &sub);
+        let outcome = super::regutil::delete_tree_under(classes.get(), &sub);
         for note in outcome.notes() {
             crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{note}"));
         }
         match outcome {
-            super::regutil::DeleteOutcome::Deleted { .. } => gone += 1,
-            super::regutil::DeleteOutcome::Absent => {}
+            super::regutil::DeleteOutcome::Deleted { .. } => removed += 1,
+            super::regutil::DeleteOutcome::Absent => absent += 1,
             super::regutil::DeleteOutcome::Refused { why, .. } => {
+                refused += 1;
                 crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{why}"));
             }
         }
     }
-    super::regutil::close(classes);
+    // Told apart, because they mean different things: keys already gone is an
+    // ordinary second uninstall, keys refused is the menu still on the machine.
     crate::applog::log(&format!(
-        "Context menu: {gone} of {total} key trees removed"
+        "Context menu: {removed} key trees removed, {absent} already gone, {refused} would not go"
     ));
 }
 
@@ -556,6 +571,7 @@ mod tests {
     use super::super::regutil::{
         delete_tree_under, is_reg_link, open_path_no_links, DeleteOutcome,
     };
+    use std::sync::atomic::AtomicU64;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     /// A scratch key in the user's real classes hive — the same place the verb
@@ -571,8 +587,15 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
+            // The clock ticks every 100 ns here, which two tests starting
+            // together can share; the counter is what keeps them apart.
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let me = ClassesScratch {
-                name: format!("Kuvatin-classes-test-{}-{nanos}", std::process::id()),
+                name: format!(
+                    "Kuvatin-classes-test-{}-{nanos}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ),
             };
             // Shaped like a real verb root: values on the key, a subkey under
             // it. An empty key would prove less than the ones we delete.
@@ -600,14 +623,13 @@ mod tests {
                 return;
             };
             // Say so loudly rather than leaving a key in the live classes hive.
-            match delete_tree_under(classes, &self.name) {
+            match delete_tree_under(classes.get(), &self.name) {
                 DeleteOutcome::Deleted { .. } | DeleteOutcome::Absent => {}
                 DeleteOutcome::Refused { why, .. } => eprintln!(
                     "scratch key HKCU\\{}\\{} survived cleanup ({why}); remove it by hand",
                     CLASSES_ROOT, self.name
                 ),
             }
-            super::super::regutil::close(classes);
         }
     }
 
@@ -635,8 +657,7 @@ mod tests {
         }
 
         let classes = user_classes_root().expect("open the user's classes root");
-        let outcome = delete_tree_under(classes, &verb);
-        super::super::regutil::close(classes);
+        let outcome = delete_tree_under(classes.get(), &verb);
         assert!(
             matches!(outcome, DeleteOutcome::Deleted { .. }),
             "a verb key in the live classes hive should go: {outcome:?}"
@@ -671,6 +692,23 @@ mod tests {
             .map(|s| s.trim_start_matches('.').to_string())
             .collect();
         assert_eq!(listed, menu_extensions(), "update build-msix.ps1");
+    }
+
+    /// Registration points every verb root at a command store, and the
+    /// uninstall deletes the stores in `STORES`. A fourth store written and
+    /// pointed at, but never added to that list, would be registered on every
+    /// machine and removed from none.
+    #[test]
+    fn every_root_points_at_a_store_the_uninstall_removes() {
+        let mut referenced: Vec<&str> = classic_roots_with_stores()
+            .into_iter()
+            .map(|(_, store)| store)
+            .collect();
+        referenced.sort_unstable();
+        referenced.dedup();
+        let mut listed: Vec<&str> = STORES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(referenced, listed);
     }
 
     /// Per-extension roots: the aliases Windows' perceived-type group carried

@@ -15,18 +15,26 @@ use windows::Win32::System::Registry::HKEY;
 
 /// The same key one hive down: `Software\Classes\Directory\shell\Kuvatin`
 /// becomes `Directory\shell\Kuvatin`, which is how it is named inside a
-/// mounted `HKEY_USERS\<SID>_Classes`.
+/// mounted `HKEY_USERS\<SID>_Classes`. `None` for a path that is not under the
+/// classes root at all.
 ///
-/// A constant that does not live under the classes root is a mistake in
-/// `super::windows` rather than anything a hive could cause, so it stops the
-/// build's tests here instead of quietly dropping a key from the uninstall.
-fn under_classes(absolute: &str) -> String {
+/// That can only be a mistake in `super::windows`, and it is caught where
+/// mistakes should be: a `debug_assert` for whoever made it, and the drift
+/// test, which counts the list exactly and so fails on a key silently
+/// dropped. What it must not do is panic in a release build — this runs from
+/// `unregister()`, which the installer calls from a custom action marked
+/// `Return='ignore'`, so a panic there would take the whole menu removal down
+/// without a word to anyone.
+fn under_classes(absolute: &str) -> Option<String> {
     let root = super::windows::CLASSES_ROOT;
-    absolute
+    let relative = absolute
         .strip_prefix(root)
-        .and_then(|rest| rest.strip_prefix('\\'))
-        .unwrap_or_else(|| panic!("{absolute} is not a key under {root}"))
-        .to_string()
+        .and_then(|rest| rest.strip_prefix('\\'));
+    debug_assert!(
+        relative.is_some(),
+        "{absolute} is not a key under {root}; it will not be uninstalled"
+    );
+    relative.map(str::to_string)
 }
 
 /// The verb subkeys, relative to a classes root, that today's build writes.
@@ -36,9 +44,9 @@ fn under_classes(absolute: &str) -> String {
 pub(super) fn classes_subkeys() -> Vec<String> {
     let mut keys: Vec<String> = super::windows::classic_roots()
         .iter()
-        .map(|root| under_classes(root))
+        .filter_map(|root| under_classes(root))
         .collect();
-    keys.push(under_classes(super::windows::LEGACY_ROOT));
+    keys.extend(under_classes(super::windows::LEGACY_ROOT));
     keys.extend(super::windows::STORES.iter().map(|s| s.to_string()));
     keys
 }
@@ -47,7 +55,9 @@ pub(super) fn classes_subkeys() -> Vec<String> {
 /// set, PLUS any `SystemFileAssociations\<assoc>\shell\Kuvatin` found by
 /// enumeration (so a verb from an older schema, or an extension later dropped
 /// from the list, is still cleaned). Deterministic order, de-duplicated
-/// case-insensitively, as registry names are.
+/// ASCII-case-insensitively — registry names are compared case-insensitively,
+/// and every name we put in the list is ASCII, so a `.PNG` someone else
+/// created is our own `.png` key and is deleted once.
 ///
 /// The static list comes back whatever happens; the `Option` says why the
 /// enumeration beside it could not be read in full. Dropping the list on such
@@ -77,18 +87,19 @@ pub(super) fn subkeys_to_delete(classes_root: HKEY) -> (Vec<String>, Option<Stri
 #[cfg(test)]
 mod tests {
     use super::super::regutil::{
-        close, delete_tree_under, open_path_no_links, wide, DeleteOutcome,
+        close, delete_tree_under, open_owned, wide, DeleteOutcome, OwnedKey,
     };
     use super::super::windows::{
         extension_roots, BACKGROUND_ROOT, CLASSES_ROOT, FOLDER_ROOT, LEGACY_ROOT, STORE_BACKGROUND,
         STORE_FRAMES, STORE_ITEM,
     };
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
-        RegCreateKeyExW, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+        RegCreateKeyExW, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE,
     };
 
     fn create(path: &str) {
@@ -117,7 +128,7 @@ mod tests {
     /// test run out of the developer's own Explorer menu.
     struct Scratch {
         path: String,
-        root: HKEY,
+        root: OwnedKey,
     }
 
     impl Scratch {
@@ -126,13 +137,18 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
+            // The clock ticks every 100 ns here, which two tests starting
+            // together can share; the counter is what keeps them apart.
+            static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = format!(
-                r"Software\Kuvatin-verbs-test-{}-{nanos}",
-                std::process::id()
+                r"Software\Kuvatin-verbs-test-{}-{nanos}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
             );
             create(&path);
-            let root = open_path_no_links(HKEY_CURRENT_USER, &path, KEY_READ)
-                .unwrap_or_else(|why| panic!("open {path}: {why}"));
+            // Opened the way `windows.rs` opens the real classes root.
+            let root =
+                open_owned(HKEY_CURRENT_USER, &path).unwrap_or_else(|| panic!("open {path}"));
             Scratch { path, root }
         }
 
@@ -144,7 +160,6 @@ mod tests {
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            close(self.root);
             // Say so loudly rather than leaving a key behind in silence: the
             // next run would not reuse this name, so nobody would notice.
             match delete_tree_under(HKEY_CURRENT_USER, &self.path) {
@@ -193,7 +208,7 @@ mod tests {
         // Another app's verb on another extension is not ours to delete.
         create(&scratch.at(r"SystemFileAssociations\.tga\shell\OtherApp"));
 
-        let (keys, trouble) = subkeys_to_delete(scratch.root);
+        let (keys, trouble) = subkeys_to_delete(scratch.root.get());
         assert_eq!(trouble, None, "a readable hive has nothing to report");
         assert_eq!(
             keys.iter().filter(|k| k.as_str() == stray).count(),
@@ -213,7 +228,7 @@ mod tests {
     fn a_hive_with_no_file_associations_yields_the_static_list() {
         let scratch = Scratch::new();
 
-        let (keys, trouble) = subkeys_to_delete(scratch.root);
+        let (keys, trouble) = subkeys_to_delete(scratch.root.get());
         assert_eq!(trouble, None, "an absent key is not a read failure");
         assert_eq!(keys, classes_subkeys());
     }
@@ -226,7 +241,7 @@ mod tests {
         // have us delete the same key twice.
         create(&scratch.at(r"SystemFileAssociations\.PNG\shell\Kuvatin"));
 
-        let (keys, trouble) = subkeys_to_delete(scratch.root);
+        let (keys, trouble) = subkeys_to_delete(scratch.root.get());
         assert_eq!(trouble, None);
         let png = keys
             .iter()
