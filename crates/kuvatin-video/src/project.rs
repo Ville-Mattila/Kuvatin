@@ -708,14 +708,19 @@ pub struct Project {
     /// The encoder element the current or last render used (see
     /// [`Project::render_encoder`]).
     last_encoder: std::cell::RefCell<Option<String>>,
-    /// Clips taken off the timeline that the preview may still be using,
-    /// each with the timeline's `commited` count when its removal was
-    /// committed (see [`Project::remove_clip`]).
+    /// Clips taken off the timeline that the preview may still be using, each
+    /// with the number of commits the engine had asked for when its removal
+    /// was committed (see [`Project::remove_clip`]).
     removed: std::cell::RefCell<Vec<(ges::Clip, u64)>>,
-    /// How many times the timeline has said `commited`: GES's word that the
-    /// changes committed before it have run in the pipeline. Counted on
-    /// whichever GStreamer thread says it.
-    commits: Arc<AtomicU64>,
+    /// How many commits the engine has asked the timeline for. Every one goes
+    /// through [`Project::commit`], which counts it here; only this thread
+    /// touches it.
+    commits: std::cell::Cell<u64>,
+    /// Per track, how many of those commits its composition has finished,
+    /// counted from the track's `commited`. That signal arrives on the
+    /// composition's own thread, never this one, so the counts are atomics
+    /// and nothing else is shared with the handler.
+    track_commits: Vec<Arc<AtomicU64>>,
 }
 
 impl Project {
@@ -729,13 +734,22 @@ impl Project {
         ensure_discovery_timeout();
 
         let timeline = ges::Timeline::new_audio_video();
-        let commits = Arc::new(AtomicU64::new(0));
-        {
-            let commits = commits.clone();
-            timeline.connect_commited(move |_| {
-                commits.fetch_add(1, Ordering::SeqCst);
-            });
-        }
+        // One counter per track, filled in from the track's own `commited`.
+        // The timeline's `commited` cannot do this job: it fires once per
+        // batch (see `release_removed`). These are the timeline's only
+        // tracks — the engine adds layers later, never tracks.
+        let track_commits: Vec<Arc<AtomicU64>> = timeline
+            .tracks()
+            .iter()
+            .map(|track| {
+                let done = Arc::new(AtomicU64::new(0));
+                let counter = done.clone();
+                track.connect_commited(move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                });
+                done
+            })
+            .collect();
         let layer = timeline.append_layer();
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
@@ -795,7 +809,8 @@ impl Project {
             rendering: std::cell::Cell::new(false),
             last_encoder: std::cell::RefCell::new(None),
             removed: std::cell::RefCell::new(Vec::new()),
-            commits,
+            commits: std::cell::Cell::new(0),
+            track_commits,
         })
     }
 
@@ -830,7 +845,7 @@ impl Project {
                 track.set_restriction_caps(&restriction);
             }
         }
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
     }
 
@@ -840,6 +855,16 @@ impl Project {
             self.layers.push(self.timeline.append_layer());
         }
         self.layers[index].clone()
+    }
+
+    /// Ask the timeline to apply the edits made so far, and count the asking.
+    /// EVERY commit in the engine goes through here: each track's composition
+    /// reports one `commited` per commit, in order, which is how
+    /// [`Self::release_removed`] knows a removal has run. Async, as ever —
+    /// `commit_sync` deadlocks the caller mid state change.
+    fn commit(&self) {
+        self.commits.set(self.commits.get() + 1);
+        self.timeline.commit();
     }
 
     /// Add `path` as a clip on track `track` at timeline position `start`,
@@ -876,7 +901,7 @@ impl Project {
         self.layer(track).add_clip(&clip)?;
         // Async commit (see append_clip): commit_sync() can deadlock during an
         // async pipeline state-change, so never block on the commit here.
-        self.timeline.commit();
+        self.commit();
         // GES auto-names clips; a missing name would silently collide on the
         // "" key and orphan the previous clip — treat it as the error it is.
         let name = clip
@@ -929,7 +954,7 @@ impl Project {
         // Async commit: never block the caller. commit_sync() deadlocks if the
         // pipeline is mid async state-change (e.g. a second clip added right
         // after play()), because the commit ack can't arrive until preroll ends.
-        self.timeline.commit();
+        self.commit();
         let name = clip
             .name()
             .map(|s| s.to_string())
@@ -958,7 +983,7 @@ impl Project {
         let delta = (delta_secs * 1e9) as i128;
         let new_start = slide_within_gap(start, dur, delta, &self.layer_neighbours(id)) as u64;
         clip.set_start(gst::ClockTime::from_nseconds(new_start));
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
         Some(clip_geom(&clip))
     }
@@ -1020,7 +1045,7 @@ impl Project {
             let nd = trim_right_math(inpoint, dur, delta, max_ns);
             clip.set_duration(gst::ClockTime::from_nseconds(nd as u64));
         }
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
         Some(clip_geom(&clip))
     }
@@ -1139,7 +1164,7 @@ impl Project {
             self.set_clip_layout(id, record.layout.into());
         }
         if !found.is_empty() {
-            self.timeline.commit();
+            self.commit();
             self.dirty.set(true);
         }
         failed
@@ -1168,7 +1193,7 @@ impl Project {
         clip.set_inpoint(clock_time(record.inpoint));
         clip.set_duration(clock_time(record.duration));
         self.layer(record.track).add_clip(&clip)?;
-        self.timeline.commit();
+        self.commit();
         self.clips.insert(id.0.clone(), clip.upcast());
         self.set_clip_layout(id, record.layout.into());
         self.dirty.set(true);
@@ -1213,7 +1238,7 @@ impl Project {
             }
         }
         if changed {
-            self.timeline.commit();
+            self.commit();
             self.dirty.set(true);
         }
     }
@@ -1232,7 +1257,7 @@ impl Project {
         let clip = self.clips.get(&id.0)?.clone();
         let target = self.layer(track);
         clip.move_to_layer(&target).ok()?;
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
         Some(track)
     }
@@ -1277,29 +1302,57 @@ impl Project {
             let last = self.layers.pop().unwrap();
             let _ = self.timeline.remove_layer(&last);
         }
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
-        // Stamped after the commit. GES answers commits that overlap with one
-        // `commited`, once the last of them has run, so the first one counted
-        // after this point covers this removal.
-        let stamp = self.commits.load(Ordering::SeqCst);
+        // Stamped with the commits asked for so far, this removal's own
+        // included: the clip goes once every track has finished that many.
+        let stamp = self.commits.get();
         self.removed.borrow_mut().push((clip, stamp));
         self.release_removed();
         true
     }
 
-    /// Let go of the removed clips GES has finished with: those the timeline
-    /// has said `commited` for since their removal was committed. A
-    /// composition runs a removal before the commit queued after it, so by
-    /// then no stack holds the clip's sources and none will again. Never
-    /// blocks; the preview timer calls it every tick. No commit runs before
-    /// the pipeline first leaves NULL, so a clip removed before playback has
-    /// started is kept until it does.
+    /// Let go of the removed clips GES has finished with: those whose
+    /// removal's commit EVERY track has completed.
+    ///
+    /// A track's composition does what it is given in order — the removal,
+    /// then the commit asked for after it — and reports one `commited` per
+    /// commit, so a track that has finished as many commits as a clip's stamp
+    /// has run that clip's removal. The timeline's own `commited` cannot
+    /// answer this: it fires once per batch, as soon as every track has
+    /// reported since the last commit was asked for, which the completion of
+    /// an OLDER commit satisfies while the removal still sits in the queue.
+    /// Reading it as "this removal has run" freed clips the compositions were
+    /// still about to bring up.
+    ///
+    /// Never blocks; the preview timer calls it every tick, and so does every
+    /// removal. At NULL nothing is playing and no commit runs until the
+    /// pipeline starts again, which is also the moment the queue is made good
+    /// from the start, so everything held goes at once: a commit dropped by a
+    /// state change cannot strand a clip for the rest of the session.
     fn release_removed(&self) {
-        let seen = self.commits.load(Ordering::SeqCst);
-        self.removed
-            .borrow_mut()
-            .retain(|(_, stamp)| *stamp >= seen);
+        if self.removed.borrow().is_empty() {
+            return;
+        }
+        if self.pipeline.current_state() == gst::State::Null
+            && self.pipeline.pending_state() == gst::State::VoidPending
+        {
+            self.removed.borrow_mut().clear();
+            return;
+        }
+        let done = self.commits_done();
+        self.removed.borrow_mut().retain(|(_, stamp)| *stamp > done);
+    }
+
+    /// How many commits every track has finished: the lowest of the per-track
+    /// counts, so a clip stamped at or below it has had its removal run
+    /// everywhere.
+    fn commits_done(&self) -> u64 {
+        self.track_commits
+            .iter()
+            .map(|done| done.load(Ordering::SeqCst))
+            .min()
+            .unwrap_or(u64::MAX)
     }
 
     /// Describe the whole timeline in the form that goes in a file: every
@@ -1408,7 +1461,7 @@ impl Project {
                 Err(_) => missing.push(name()),
             }
         }
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
         Ok(missing)
     }
@@ -1426,7 +1479,7 @@ impl Project {
         let _ = self.timeline.move_layer(&layer, to as u32);
         // Resync our layer vec to the new priority order.
         self.layers = self.timeline.layers();
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
     }
 
@@ -1488,7 +1541,7 @@ impl Project {
         let _ = clip.set_child_property("height", &height.to_value());
         let _ = clip.set_child_property("alpha", &l.alpha.to_value());
         let _ = clip.set_child_property("volume", &l.volume.to_value());
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
     }
 
@@ -1528,7 +1581,7 @@ impl Project {
         let _ = clip.set_child_property("posy", &posy.to_value());
         let _ = clip.set_child_property("width", &(fw.round() as i32).to_value());
         let _ = clip.set_child_property("height", &(fh.round() as i32).to_value());
-        self.timeline.commit();
+        self.commit();
         self.dirty.set(true);
     }
 
@@ -2363,6 +2416,20 @@ mod tests {
             "the model loses it at once"
         );
         let _ = project.duration();
+        // The rule itself, under a tight poll: until every track has finished
+        // the commit made with the removal, the clip stays, however hard the
+        // release is asked for.
+        let stamp = project.removed.borrow().last().expect("held").1;
+        let spin = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < spin {
+            project.release_removed();
+            if project.commits_done() < stamp {
+                assert!(
+                    project.removed.borrow().iter().any(|(_, s)| *s == stamp),
+                    "the clip went before every track had finished its removal's commit"
+                );
+            }
+        }
         for tick in 0..50 {
             project.refresh_preview();
             let _ = project.poll_preview_error();
@@ -2411,11 +2478,124 @@ mod tests {
                 .append_clip(&png, 1, Some(Duration::from_secs(5)))
                 .expect("second");
             project.play().expect("play");
+            // Let the clip come up before transforming it. Transforming one
+            // that is still prerolling deadlocks GES itself, with no clip
+            // released and nothing to do with this fix: on the code BEFORE
+            // it, that sequence hung 4 runs in 25 under load. Waiting here
+            // keeps this test on its own subject.
+            let up = std::time::Instant::now() + Duration::from_secs(10);
+            while settled(&project.pipeline) == Step::Pending && std::time::Instant::now() < up {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // The inspector's transform, as a slider drag leaves behind: more
+            // commits still in flight when the removal lands, so an older
+            // one's `commited` must not be read as this removal's.
+            for i in 0..3 {
+                project.set_clip_layout(
+                    &added.id,
+                    Layout {
+                        posx: i * 4,
+                        posy: 0,
+                        scale: 0.5,
+                        alpha: 1.0,
+                        volume: 1.0,
+                    },
+                );
+            }
             removed.push(project.clips[&added.id.0].downgrade());
             assert!(project.remove_clip(&added.id));
+            // Tight poll, with older commits still in flight: the clip stays
+            // until every track has finished the removal's own commit.
+            let stamp = project.removed.borrow().last().expect("held").1;
+            let spin = std::time::Instant::now() + Duration::from_millis(100);
+            while std::time::Instant::now() < spin {
+                project.release_removed();
+                if project.commits_done() < stamp {
+                    assert!(
+                        project.removed.borrow().iter().any(|(_, s)| *s == stamp),
+                        "the clip went before every track had finished its removal's commit"
+                    );
+                }
+            }
             for _ in 0..3 {
                 project.refresh_preview();
                 let _ = project.poll_preview_error();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let records = project.clip_records();
+        assert_eq!(records.len(), 1, "only the first clip is left");
+        assert_eq!(records[0].0, first);
+        for _ in 0..50 {
+            if removed.iter().all(|c| c.upgrade().is_none()) {
+                break;
+            }
+            project.refresh_preview();
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            removed.iter().all(|c| c.upgrade().is_none()),
+            "the engine lets every removed clip go once the pipeline has"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undo takes a whole step back at once: `apply_step` loops over its
+    /// removals, and two quick Deletes do the same. The second removal is
+    /// what freed the first clip, because `remove_clip` releases as it goes
+    /// and nothing waited for the timeline in between. Two clips added under
+    /// a playing one and both taken away back to back, with only the
+    /// interface's 100 ms tick afterwards.
+    #[test]
+    fn removing_two_clips_back_to_back_while_playing_does_not_crash() {
+        let dir = scratch("remove-two-at-once");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(120, 90, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("write still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let first = project
+            .append_clip(&png, 0, Some(Duration::from_secs(5)))
+            .expect("first")
+            .id;
+        project.play().expect("play");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while settled(&project.pipeline) == Step::Pending && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut removed = Vec::new();
+        for _ in 0..3 {
+            // Two adds, each playing as add_to_timeline does.
+            let a = project
+                .append_clip(&png, 1, Some(Duration::from_secs(5)))
+                .expect("a");
+            project.play().expect("play");
+            let b = project
+                .append_clip(&png, 2, Some(Duration::from_secs(5)))
+                .expect("b");
+            project.play().expect("play");
+            removed.push(project.clips[&a.id.0].downgrade());
+            removed.push(project.clips[&b.id.0].downgrade());
+            // Back to back, as one undo step: no tick in between.
+            assert!(project.remove_clip(&a.id));
+            assert!(project.remove_clip(&b.id));
+            // The second removal must not take the first clip with it: both
+            // stay until every track has finished the later removal's commit.
+            let stamp = project.removed.borrow().last().expect("held").1;
+            let spin = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < spin {
+                project.release_removed();
+                if project.commits_done() < stamp {
+                    assert!(
+                        project.removed.borrow().iter().any(|(_, s)| *s == stamp),
+                        "a clip went before every track had finished its removal's commit"
+                    );
+                }
+            }
+            for _ in 0..5 {
+                project.refresh_preview();
+                let _ = project.poll_preview_error();
+                let _ = project.position();
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
