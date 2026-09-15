@@ -25,6 +25,15 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_TOPMOST};
 
+/// Every key below hangs off this one classes root. `super::verbs` strips it
+/// back off to name the same keys inside another user's hive, so the absolute
+/// paths here stay the only spelling of them.
+///
+/// `HKCU\Software\Classes` is itself a registry symbolic link to the user's
+/// `HKEY_USERS\<SID>_Classes` — see `user_classes_root`, which is the one
+/// place that follows it.
+pub(super) const CLASSES_ROOT: &str = r"Software\Classes";
+
 /// The verb root that carries the registration sentinels (`Icon` = exe path,
 /// `Schema`) — the `.png` entry, which every install has.
 const ROOT: &str = r"Software\Classes\SystemFileAssociations\.png\shell\Kuvatin";
@@ -32,20 +41,23 @@ const ROOT: &str = r"Software\Classes\SystemFileAssociations\.png\shell\Kuvatin"
 /// That group includes `.jfif/.jpe/.dib/.ico/.wmf/.emf` (which the engine
 /// rejected → "no image files") and excludes `.exr` (no perceived type → no
 /// sequence item on a frame). Removed on every (un)register.
-const LEGACY_ROOT: &str = r"Software\Classes\SystemFileAssociations\image\shell\Kuvatin";
+pub(super) const LEGACY_ROOT: &str = r"Software\Classes\SystemFileAssociations\image\shell\Kuvatin";
 /// The same verb on folders (right-click a folder → converts its images).
-const FOLDER_ROOT: &str = r"Software\Classes\Directory\shell\Kuvatin";
+pub(super) const FOLDER_ROOT: &str = r"Software\Classes\Directory\shell\Kuvatin";
 /// …and on a folder's background (right-click inside an open folder).
-const BACKGROUND_ROOT: &str = r"Software\Classes\Directory\Background\shell\Kuvatin";
+pub(super) const BACKGROUND_ROOT: &str = r"Software\Classes\Directory\Background\shell\Kuvatin";
 
 /// Command stores the cascading verbs point at (`ExtendedSubCommandsKey`).
 /// Two stores because the item token differs: `%1` is the selected file or
 /// folder, while a background verb only has `%V`, the folder itself.
-const STORE_ITEM: &str = "Kuvatin.CommandStore";
-const STORE_BACKGROUND: &str = "Kuvatin.CommandStore.Background";
+pub(super) const STORE_ITEM: &str = "Kuvatin.CommandStore";
+pub(super) const STORE_BACKGROUND: &str = "Kuvatin.CommandStore.Background";
 /// Sequence-only frame formats (`.exr`): the image presets can't read them,
 /// so their submenu holds just the sequence render.
-const STORE_FRAMES: &str = "Kuvatin.CommandStore.Frames";
+pub(super) const STORE_FRAMES: &str = "Kuvatin.CommandStore.Frames";
+/// All three as one list, so a store added above is added to the shared
+/// delete list in `super::verbs` by editing the line beneath it.
+pub(super) const STORES: &[&str] = &[STORE_ITEM, STORE_BACKGROUND, STORE_FRAMES];
 
 /// Bump when the registered keys or the command lines they hold change, so
 /// existing installs (whose `Icon` sentinel already matches the exe)
@@ -70,8 +82,8 @@ pub fn menu_extensions() -> Vec<&'static str> {
 }
 
 /// Every extension that carries the verb, with the store its submenu shows.
-fn extension_roots() -> Vec<(String, &'static str)> {
-    let root = |e: &str| format!(r"Software\Classes\SystemFileAssociations\.{e}\shell\Kuvatin");
+pub(super) fn extension_roots() -> Vec<(String, &'static str)> {
+    let root = |e: &str| format!(r"{CLASSES_ROOT}\SystemFileAssociations\.{e}\shell\Kuvatin");
     INPUT_EXTENSIONS
         .iter()
         .map(|e| (root(e), STORE_ITEM))
@@ -178,7 +190,7 @@ fn exe_path() -> Result<String> {
 /// The old item tree is deleted first so presets removed in the GUI vanish
 /// from the menu instead of lingering as "unknown preset" entries.
 fn write_store(store: &str, exe: &str, token: &str, items: &[MenuItem]) -> Result<()> {
-    let class_key = format!(r"Software\Classes\{store}");
+    let class_key = format!(r"{CLASSES_ROOT}\{store}");
     delete_tree(&format!(r"{class_key}\shell"));
     close_key(create_key(&class_key)?);
     for item in items {
@@ -238,7 +250,7 @@ pub fn register() -> Result<()> {
 }
 
 /// Every classic verb root: per extension, folders, folder backgrounds.
-fn classic_roots() -> Vec<String> {
+pub(super) fn classic_roots() -> Vec<String> {
     let mut roots: Vec<String> = extension_roots().into_iter().map(|(r, _)| r).collect();
     roots.push(FOLDER_ROOT.to_string());
     roots.push(BACKGROUND_ROOT.to_string());
@@ -471,16 +483,63 @@ pub fn notify_error(title: &str, text: &str) {
     }
 }
 
+/// This user's classes hive, open and ready to be worked relative to.
+///
+/// `HKCU\Software\Classes` is a registry symbolic link to the user's
+/// `HKEY_USERS\<SID>_Classes`, and this is the one place that deliberately
+/// follows it: the link is Windows' own and its target is exactly the hive we
+/// came for. Every deletion then happens *below* the handle it returns, never
+/// by walking that path again — `regutil` refuses to pass through a link, so a
+/// path-walking delete named `Software\Classes\…` would refuse every verb key
+/// and leave the whole menu in place (`a_verb_key_in_the_user_classes_hive_deletes`
+/// pins that down). It is also the shape the all-users uninstall works in,
+/// where the root is a mounted hive instead.
+fn user_classes_root() -> Option<HKEY> {
+    super::regutil::open_subkey(HKEY_CURRENT_USER, CLASSES_ROOT)
+}
+
+/// Delete every classic verb key this user has, from the one shared list in
+/// `super::verbs` — so the keys an uninstall removes can never drift from the
+/// keys a registration writes.
+///
+/// Reports what happened to the log rather than to the user: `--unregister`
+/// runs from the installer, where a line about one key that would not go is
+/// for whoever reads the log afterwards, and there is nothing the person
+/// uninstalling could do with it anyway.
+fn remove_classic_verbs() {
+    let Some(classes) = user_classes_root() else {
+        crate::applog::log(&format!(
+            r"Context menu: HKCU\{CLASSES_ROOT} would not open; no keys removed"
+        ));
+        return;
+    };
+    let (keys, trouble) = super::verbs::subkeys_to_delete(classes);
+    if let Some(why) = trouble {
+        crate::applog::log(&format!("Context menu: {why}"));
+    }
+    let total = keys.len();
+    let mut gone = 0usize;
+    for sub in keys {
+        let outcome = super::regutil::delete_tree_under(classes, &sub);
+        for note in outcome.notes() {
+            crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{note}"));
+        }
+        match outcome {
+            super::regutil::DeleteOutcome::Deleted { .. } => gone += 1,
+            super::regutil::DeleteOutcome::Absent => {}
+            super::regutil::DeleteOutcome::Refused { why, .. } => {
+                crate::applog::log(&format!(r"Context menu: HKCU\{CLASSES_ROOT}\{why}"));
+            }
+        }
+    }
+    super::regutil::close(classes);
+    crate::applog::log(&format!(
+        "Context menu: {gone} of {total} key trees removed"
+    ));
+}
+
 pub fn unregister() -> Result<()> {
-    for (root, _) in extension_roots() {
-        delete_tree(&root);
-    }
-    for path in [LEGACY_ROOT, FOLDER_ROOT, BACKGROUND_ROOT] {
-        delete_tree(path);
-    }
-    for store in [STORE_ITEM, STORE_BACKGROUND, STORE_FRAMES] {
-        delete_tree(&format!(r"Software\Classes\{store}"));
-    }
+    remove_classic_verbs();
     match super::package::unregister() {
         Ok(true) => crate::applog::log("Windows 11 menu: package removed"),
         Ok(false) => {}
@@ -493,6 +552,105 @@ pub fn unregister() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::super::regutil::{
+        delete_tree_under, is_reg_link, open_path_no_links, DeleteOutcome,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A scratch key in the user's real classes hive — the same place the verb
+    /// keys live, because that is the hive under test — removed when the test
+    /// ends, pass, fail or panic.
+    struct ClassesScratch {
+        name: String,
+    }
+
+    impl ClassesScratch {
+        fn new() -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let me = ClassesScratch {
+                name: format!("Kuvatin-classes-test-{}-{nanos}", std::process::id()),
+            };
+            // Shaped like a real verb root: values on the key, a subkey under
+            // it. An empty key would prove less than the ones we delete.
+            let verb = create_key(&me.absolute(r"shell\Kuvatin")).expect("create a scratch verb");
+            set_string(verb, Some("MUIVerb"), "Kuvatin").expect("MUIVerb");
+            set_string(verb, Some("Icon"), "kuvatin.exe").expect("Icon");
+            close_key(verb);
+            let command =
+                create_key(&me.absolute(r"shell\Kuvatin\command")).expect("create the command key");
+            set_string(command, None, "kuvatin.exe --convert").expect("command line");
+            close_key(command);
+            me
+        }
+
+        /// `Software\Classes\Kuvatin-classes-test-…\<rest>`.
+        fn absolute(&self, rest: &str) -> String {
+            format!(r"{CLASSES_ROOT}\{}\{rest}", self.name)
+        }
+    }
+
+    impl Drop for ClassesScratch {
+        fn drop(&mut self) {
+            let Some(classes) = user_classes_root() else {
+                eprintln!("could not open the classes root to clean up {}", self.name);
+                return;
+            };
+            // Say so loudly rather than leaving a key in the live classes hive.
+            match delete_tree_under(classes, &self.name) {
+                DeleteOutcome::Deleted { .. } | DeleteOutcome::Absent => {}
+                DeleteOutcome::Refused { why, .. } => eprintln!(
+                    "scratch key HKCU\\{}\\{} survived cleanup ({why}); remove it by hand",
+                    CLASSES_ROOT, self.name
+                ),
+            }
+            super::super::regutil::close(classes);
+        }
+    }
+
+    /// The per-user unregister works *below* an open classes root, never by
+    /// walking `HKCU\Software\Classes\…` as a path. It has to: that key is a
+    /// registry symbolic link, and `regutil` refuses to step through one, so a
+    /// path-walking delete would refuse all seventeen verb keys and silently
+    /// leave the menu behind.
+    #[test]
+    fn a_verb_key_in_the_user_classes_hive_deletes() {
+        let scratch = ClassesScratch::new();
+        let verb = format!(r"{}\shell\Kuvatin", scratch.name);
+
+        // Why the relative form is not a style choice. Conditional because it
+        // is Windows' behaviour being reported, not ours: where the classes
+        // root is not a link there is nothing to refuse.
+        if is_reg_link(HKEY_CURRENT_USER, CLASSES_ROOT) {
+            let why = open_path_no_links(
+                HKEY_CURRENT_USER,
+                &scratch.absolute(r"shell\Kuvatin"),
+                KEY_WRITE,
+            )
+            .expect_err("a path through the classes link should be refused");
+            assert!(why.contains("SymbolicLinkValue"), "{why}");
+        }
+
+        let classes = user_classes_root().expect("open the user's classes root");
+        let outcome = delete_tree_under(classes, &verb);
+        super::super::regutil::close(classes);
+        assert!(
+            matches!(outcome, DeleteOutcome::Deleted { .. }),
+            "a verb key in the live classes hive should go: {outcome:?}"
+        );
+        // Reading may follow the link; only deleting must not.
+        assert!(
+            super::super::regutil::open_subkey(
+                HKEY_CURRENT_USER,
+                &scratch.absolute(r"shell\Kuvatin")
+            )
+            .is_none(),
+            "the verb key should be gone"
+        );
+    }
 
     /// The sparse-package build script carries a static copy of the extension
     /// list (it cannot run the exe on CI); this keeps it equal to the engine's.
