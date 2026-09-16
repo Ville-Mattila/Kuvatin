@@ -864,6 +864,13 @@ impl Project {
         self.rendering.get()
     }
 
+    /// Whether anything has changed since the last save. The flag is already
+    /// kept for the project file; this lets the window ask before it closes
+    /// itself for an update.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
+
     /// Current composited canvas ("viewport") size in px.
     pub fn canvas_size(&self) -> (i32, i32) {
         (self.canvas_w, self.canvas_h)
@@ -2120,6 +2127,14 @@ mod tests {
         project.play().expect("play after restore");
         project.pause().expect("pause after restore");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_says_whether_it_has_unsaved_changes() {
+        let mut project = Project::new(|_f| {}).expect("project");
+        assert!(!project.is_dirty(), "a new project has nothing to lose");
+        project.set_canvas_size(1280, 720);
+        assert!(project.is_dirty(), "an edit is an unsaved change");
     }
 
     /// A saved project has to come back as the same timeline: same sources, on
