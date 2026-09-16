@@ -2115,3 +2115,148 @@ Under `## [Unreleased]`, in `### Fixed`:
 git add -A
 git commit -m "The window opens large enough for its contents"
 ```
+
+---
+
+### Task 17: Give the project a real unsaved-work flag
+
+Added during execution. Tasks 10 and 12 were built on a misreading in the spec:
+`Project::dirty` is documented at `crates/kuvatin-video/src/project.rs:741` as
+"Set by edits, cleared by `refresh_preview` — coalesces repaints", and
+`refresh_preview` does `self.dirty.replace(false)` on a UI timer. It is a
+repaint-pending flag. `is_dirty()` therefore reads `false` within a tick of
+every edit, so the dialog's unsaved warning would almost never appear. A
+warning that never fires is worse than none: it implies a check that is not
+happening.
+
+**Files:**
+- Modify: `crates/kuvatin-video/src/project.rs`
+- Modify: `crates/kuvatin/src/gui/video/mod.rs`
+- Modify: `crates/kuvatin/src/gui/video/project_file.rs`
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the `tests` module in `crates/kuvatin-video/src/project.rs`:
+
+```rust
+    #[test]
+    fn unsaved_work_survives_a_repaint_unlike_the_repaint_flag() {
+        let mut project = Project::new(|_f| {}).expect("project");
+        assert!(!project.has_unsaved_work(), "a new project has nothing to lose");
+
+        project.set_canvas_size(1280, 720);
+        assert!(project.has_unsaved_work(), "an edit is unsaved work");
+
+        // The repaint flag clears on a timer. Unsaved work must not.
+        project.refresh_preview();
+        assert!(
+            project.has_unsaved_work(),
+            "a repaint is not a save: this is the bug this flag exists to fix"
+        );
+    }
+
+    #[test]
+    fn saving_and_loading_both_clear_unsaved_work() {
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.set_canvas_size(1600, 900);
+        assert!(project.has_unsaved_work());
+
+        let doc = project.to_document();
+        project.mark_saved();
+        assert!(!project.has_unsaved_work(), "saving clears it");
+
+        project.set_canvas_size(1280, 720);
+        assert!(project.has_unsaved_work());
+        project.apply_document(&doc).expect("apply");
+        assert!(
+            !project.has_unsaved_work(),
+            "a project just loaded from a file matches that file"
+        );
+    }
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run (GStreamer on PATH): `cargo test -p kuvatin-video -- unsaved`
+Expected: FAIL to compile, "no method named `has_unsaved_work`".
+
+- [ ] **Step 3: Add the flag and one place that sets it**
+
+In `crates/kuvatin-video/src/project.rs`, beside the `dirty` field:
+
+```rust
+    /// Set by edits, cleared only by saving or loading. Unlike `dirty`, which
+    /// is a repaint-pending flag the preview timer clears, this answers "would
+    /// closing now lose work".
+    unsaved: std::cell::Cell<bool>,
+```
+
+Initialise it `false` next to `dirty` in `Project::new`, and add:
+
+```rust
+    /// An edit happened: repaint, and remember that the file on disk is behind.
+    fn touched(&self) {
+        self.dirty.set(true);
+        self.unsaved.set(true);
+    }
+
+    /// Would closing now lose work?
+    pub fn has_unsaved_work(&self) -> bool {
+        self.unsaved.get()
+    }
+
+    /// The project now matches a file on disk.
+    pub fn mark_saved(&self) {
+        self.unsaved.set(false);
+    }
+```
+
+- [ ] **Step 4: Route every edit through it**
+
+Replace every `self.dirty.set(true);` in this file with `self.touched();`. There
+are fourteen, and `grep -n "dirty.set(true)" crates/kuvatin-video/src/project.rs`
+lists them. Leave `self.dirty.replace(false)` in `refresh_preview` alone: that is
+the repaint flag doing its own job.
+
+Then, at the **end** of `apply_document`, after the edits it performs have set
+the flag, clear it:
+
+```rust
+        // Just loaded: this is exactly what is on disk.
+        self.unsaved.set(false);
+```
+
+- [ ] **Step 5: Run them and watch them pass**
+
+Run: `cargo test -p kuvatin-video -- unsaved`
+Expected: 2 passed.
+
+- [ ] **Step 6: Replace the accessor the dialog uses**
+
+Task 10 added `is_dirty()` and Task 12 built `has_unsaved_changes` on it. Delete
+`is_dirty()` and its test `a_project_says_whether_it_has_unsaved_changes`, which
+asserted the wrong thing, and point `has_unsaved_changes` in
+`crates/kuvatin/src/gui/video/mod.rs` at `has_unsaved_work()` instead. Keeping a
+public accessor for the repaint flag would invite the same mistake again.
+
+- [ ] **Step 7: Clear it where the app saves**
+
+In `crates/kuvatin/src/gui/video/project_file.rs`, find where a save completes
+successfully (the path that writes the document to the chosen file) and call
+`project.mark_saved()` there. Do not call it where the save failed or was
+cancelled from the file dialog.
+
+- [ ] **Step 8: Run the suites**
+
+```bash
+cargo test -p kuvatin-video -- unsaved
+cargo test -p kuvatin
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add -A
+git commit -m "The project knows what is unsaved, not just what needs repainting"
+```
