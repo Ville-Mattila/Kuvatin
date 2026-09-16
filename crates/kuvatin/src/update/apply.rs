@@ -5,6 +5,7 @@ use super::{asset_name, asset_urls, fetch, verify};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 /// Where a download waits to be installed. Under `%TEMP%\kuvatin`, which the
 /// every-account uninstall deletes, so a machine that never runs Kuvatin
@@ -36,7 +37,6 @@ pub fn sweep_stage() {
 }
 
 /// What a finished download left behind.
-#[allow(dead_code)] // Nothing reads these yet; wiring the dialog (Task 12) is next.
 #[derive(Debug, Clone)]
 pub struct Staged {
     pub msi: PathBuf,
@@ -104,7 +104,6 @@ pub fn stage(
 }
 
 /// What `msiexec` exiting with a given code means for us.
-#[allow(dead_code)] // Only the tests call this so far; the helper (Task 8) is next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Installed {
     Yes,
@@ -115,7 +114,6 @@ pub enum Installed {
 
 /// 3010 is "installed, reboot when you like", which is still installed. 1602
 /// is "user cancelled" and 1223 is "the elevation prompt was refused".
-#[allow(dead_code)] // Only the tests call this so far; the helper (Task 8) is next.
 pub fn install_outcome(code: u32) -> Installed {
     match code {
         0 | 3010 => Installed::Yes,
@@ -125,7 +123,6 @@ pub fn install_outcome(code: u32) -> Installed {
 }
 
 /// One ASCII line about an outcome, for the log and the message box.
-#[allow(dead_code)] // Only the tests call this so far; the helper (Task 8) is next.
 pub fn describe(outcome: Installed) -> String {
     match outcome {
         Installed::Yes => "the update installed".to_string(),
@@ -140,6 +137,131 @@ pub fn describe(outcome: Installed) -> String {
             crate::update::RELEASES_URL
         ),
     }
+}
+
+/// How long the helper waits for the app to go before installing anyway.
+const WAIT_FOR_APP: Duration = Duration::from_secs(30);
+
+/// Wait for a process to exit. `true` when it has gone (including when it was
+/// already gone), `false` when the deadline passed first.
+#[cfg(windows)]
+pub fn wait_for_exit(pid: u32, limit: Duration) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, BOOL, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, BOOL::from(false), pid) else {
+            // Not openable: it has exited, or it never existed. Either way
+            // there is nothing left holding the files we are replacing.
+            return true;
+        };
+        let waited =
+            WaitForSingleObject(handle, limit.as_millis().min(u128::from(u32::MAX)) as u32);
+        let _ = CloseHandle(handle);
+        waited == WAIT_OBJECT_0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wait_for_exit(_pid: u32, _limit: Duration) -> bool {
+    true
+}
+
+/// `/qb` shows a small progress window, so an elevation prompt and a slow
+/// install are not a silent freeze.
+fn msiexec_args(msi: &Path) -> Vec<String> {
+    vec![
+        "/i".to_string(),
+        msi.display().to_string(),
+        "/qb".to_string(),
+        "/norestart".to_string(),
+    ]
+}
+
+/// Start the staged copy as the updater, then the caller quits. `relaunch` is
+/// the executable to start afterwards, normally this one's own path.
+#[allow(dead_code)] // Nothing calls this yet; wiring the dialog (Task 12) is next.
+pub fn hand_off(staged: &Staged, relaunch: &Path) -> Result<()> {
+    std::process::Command::new(&staged.helper)
+        .arg("--apply-update")
+        .arg(&staged.msi)
+        .arg("--after")
+        .arg(std::process::id().to_string())
+        .arg("--relaunch")
+        .arg(relaunch)
+        .spawn()
+        .with_context(|| format!("could not start {}", staged.helper.display()))?;
+    Ok(())
+}
+
+/// The `--apply-update` mode. Returns the process exit code: 0 when the
+/// update installed, 1 when it did not.
+#[allow(dead_code)] // Nothing runs this yet; the --apply-update mode (Task 9) is next.
+pub fn run_helper(msi: &Path, after: u32, relaunch: Option<&Path>) -> i32 {
+    crate::applog::log(&format!(
+        "update: waiting for process {after}, then installing {}",
+        msi.display()
+    ));
+    if !wait_for_exit(after, WAIT_FOR_APP) {
+        crate::applog::log("update: gave up waiting; installing anyway");
+    }
+
+    let status = std::process::Command::new("msiexec")
+        .args(msiexec_args(msi))
+        .status();
+    let outcome = match status {
+        Ok(s) => install_outcome(s.code().unwrap_or(-1) as u32),
+        Err(e) => {
+            let said = format!("could not start the installer: {e}");
+            crate::applog::log(&format!("update: {said}"));
+            report_failure(&said);
+            return 1;
+        }
+    };
+    crate::applog::log(&format!("update: {}", describe(outcome)));
+
+    if outcome != Installed::Yes {
+        report_failure(&describe(outcome));
+        // The app is gone, so put it back the way it was.
+        if let Some(exe) = relaunch {
+            let _ = std::process::Command::new(exe).spawn();
+        }
+        return 1;
+    }
+
+    let _ = std::fs::remove_file(msi);
+    if let Some(exe) = relaunch {
+        if let Err(e) = std::process::Command::new(exe).spawn() {
+            let said = format!(
+                "the update installed, but Kuvatin did not start again: {e}. \
+                 Start it from the Start menu."
+            );
+            crate::applog::log(&format!("update: {said}"));
+            report_failure(&said);
+            return 1;
+        }
+    }
+    0
+}
+
+/// No window is left by this point, so failures go to a message box as well
+/// as the log.
+#[cfg(windows)]
+fn report_failure(text: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+    let body = HSTRING::from(text);
+    let title = HSTRING::from("Kuvatin update");
+    unsafe {
+        MessageBoxW(None, &body, &title, MB_OK | MB_ICONWARNING);
+    }
+}
+
+#[cfg(not(windows))]
+fn report_failure(text: &str) {
+    eprintln!("{text}");
 }
 
 #[cfg(test)]
@@ -195,6 +317,40 @@ mod tests {
             let said = describe(install_outcome(code));
             assert!(said.is_ascii(), "{said:?}");
         }
+    }
+
+    #[test]
+    fn waiting_on_a_process_that_has_already_gone_is_success_not_failure() {
+        // A pid that cannot be opened has exited (or never existed), which is
+        // exactly the state the helper is waiting for.
+        assert!(wait_for_exit(
+            0xFFFF_FFF0,
+            std::time::Duration::from_millis(50)
+        ));
+    }
+
+    #[test]
+    fn waiting_on_ourselves_gives_up_at_the_deadline() {
+        let started = std::time::Instant::now();
+        let waited = wait_for_exit(std::process::id(), std::time::Duration::from_millis(200));
+        assert!(!waited, "we are still running, so the wait must time out");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+    }
+
+    #[test]
+    fn the_command_line_it_runs_names_the_installer_and_nothing_else() {
+        let msi = Path::new(r"C:\Users\x\AppData\Local\Temp\kuvatin\update\k.msi");
+        let args = msiexec_args(msi);
+        assert_eq!(args[0], "/i");
+        assert_eq!(Path::new(&args[1]), msi);
+        assert!(args.contains(&"/qb".to_string()), "{args:?}");
+        assert!(args.contains(&"/norestart".to_string()), "{args:?}");
+        // No REINSTALLMODE: the package's MajorUpgrade handles an upgrade, and
+        // forcing a reinstall mode here would fight it.
+        assert!(
+            !args.iter().any(|a| a.starts_with("REINSTALLMODE")),
+            "{args:?}"
+        );
     }
 
     /// The rule that decides whether a downloaded file may be run, separated
