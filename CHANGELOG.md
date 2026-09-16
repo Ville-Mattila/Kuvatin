@@ -15,6 +15,7 @@ something is fixed.
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-09-16
 Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and
 the Undo button names the step it is about to undo. On the video timeline
 that is every edit, with a slider drag counted as one step rather than
@@ -289,7 +290,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.12.0
 [2.11.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.10.0
 [2.9.2]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.9.2
