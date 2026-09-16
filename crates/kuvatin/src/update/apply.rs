@@ -315,6 +315,32 @@ mod tests {
         }
     }
 
+    /// Same guard as the uninstall report, for the same reason: these lines
+    /// reach a log and a message box through Windows tooling that does not
+    /// always read UTF-8.
+    ///
+    /// This deliberately does not check `stage_dir()`'s path: it runs
+    /// through `std::env::temp_dir()`, which echoes the OS-supplied user
+    /// profile name, so it is data Windows hands us rather than a message
+    /// this module composes. There is nothing for this guard to check there.
+    #[test]
+    fn every_message_this_module_can_produce_is_ascii() {
+        let dir = std::env::temp_dir().join("kuvatin-ascii-check");
+        let msi = dir.join("kuvatin-9.9.9-x86_64.msi");
+        let mut said: Vec<String> = Vec::new();
+        for code in [0u32, 3010, 1602, 1223, 1603] {
+            said.push(describe(install_outcome(code)));
+        }
+        said.push(
+            accept(&msi, "", "kuvatin-9.9.9-x86_64.msi")
+                .expect_err("no checksum")
+                .to_string(),
+        );
+        for line in &said {
+            assert!(line.is_ascii(), "{line:?}");
+        }
+    }
+
     #[test]
     fn waiting_on_a_process_that_has_already_gone_is_success_not_failure() {
         // A pid that cannot be opened has exited (or never existed), which is
