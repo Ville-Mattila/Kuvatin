@@ -589,7 +589,7 @@ fn footer_lines(run: &Run, out: &mut Lines) -> i32 {
         worth_going_back_to(run)
     ));
     out.say(format!(
-        "exiting {EXIT_DONE}: the run finished. A refusal above does not stop the uninstall — the \
+        "exiting {EXIT_DONE}: the run finished. A refusal above does not stop the uninstall. The \
          detail is in this log."
     ));
     EXIT_DONE
@@ -1392,6 +1392,65 @@ mod tests {
         assert!(
             footer.contains("the package had something to report"),
             "{footer}"
+        );
+    }
+
+    /// A regression guard, not a behavior test: a non-ASCII character written
+    /// as UTF-8 (an em dash, say) does not survive the path from this
+    /// process's stdout through the MSI log unchanged — CI proved as much,
+    /// though exactly which link decodes it wrong is not pinned down. Every
+    /// line this prints must stick to ASCII, so nobody has to find that link
+    /// before the log reads right again.
+    #[test]
+    fn every_line_of_a_full_report_is_ascii() {
+        let mut run = ordinary_run();
+        run.privileges = Some("SeBackupPrivilege would not enable (error 1300)".to_string());
+        run.trouble = vec![format!(
+            "{BOB}: is not a SID this machine's ProfileList knows"
+        )];
+        run.skipped = 1;
+        run.package = Some(swept(1, 1));
+
+        run.accounts[0].hive.sweep = VerbSweep {
+            removed: 16,
+            absent: 0,
+            refused: 2,
+            lines: vec![
+                SweepLine::Trouble(
+                    r"SystemFileAssociations\.qoi\shell\Kuvatin: we are not allowed to open it (error 5)"
+                        .to_string(),
+                ),
+                SweepLine::Note(
+                    r"Directory\shell\Kuvatin: took a REG_LINK's entry without following it"
+                        .to_string(),
+                ),
+                SweepLine::Refused(
+                    r"image\shell\Kuvatin: we are not allowed to delete it (status 0xc0000022)"
+                        .to_string(),
+                ),
+            ],
+        };
+        run.accounts[0].hive.trouble = vec![format!(
+            r"HKEY_USERS\{ALICE}_Classes: we are not allowed to open it (error 5)"
+        )];
+        let (dirs, file_sweep) = done_of(&mut run.accounts[0]);
+        *dirs = vec!["zzz-broken: we are not allowed to read it (error 5)".to_string()];
+        file_sweep.trouble = vec![
+            r"C:\Users\alice\AppData\Local\Kuvatin: it is a reparse point, so C:\Users\alice\AppData\Local\Kuvatin is not being deleted through it. A junction there needs no privilege to make, and this runs as SYSTEM"
+                .to_string(),
+        ];
+
+        run.accounts[1].hive.access = HiveAccess::None;
+        run.accounts[1].hive.trouble = vec![format!(
+            r"HKEY_USERS\{BOB}_Classes: is not mounted and UsrClass.dat is not there"
+        )];
+        run.accounts[1].files = FileWork::OutOfTime;
+
+        let lines = full(&run).lines;
+        let not_ascii: Vec<&String> = lines.iter().filter(|line| !line.is_ascii()).collect();
+        assert!(
+            not_ascii.is_empty(),
+            "non-ASCII report line(s): {not_ascii:#?}"
         );
     }
 }

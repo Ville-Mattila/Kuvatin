@@ -638,7 +638,7 @@ fn reach(profile: &Path, target: &Path) -> Reached {
         match handle.metadata() {
             Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
                 return Reached::Refused(format!(
-                    "{}: it became a reparse point while we were walking down to {} — nothing \
+                    "{}: it became a reparse point while we were walking down to {}, so nothing \
                      was deleted",
                     path.display(),
                     target.display()
@@ -671,8 +671,8 @@ fn reach(profile: &Path, target: &Path) -> Reached {
 /// Why a component we met on the way down stops the whole path.
 fn reparse_on_the_way(here: &Path, target: &Path) -> String {
     format!(
-        "{}: it is a reparse point, so {} is not being deleted through it — a junction there \
-         needs no privilege to make and this runs as SYSTEM",
+        "{}: it is a reparse point, so {} is not being deleted through it. A junction there \
+         needs no privilege to make, and this runs as SYSTEM",
         here.display(),
         target.display()
     )

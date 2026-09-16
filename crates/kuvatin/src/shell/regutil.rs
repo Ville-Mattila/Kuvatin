@@ -625,7 +625,7 @@ impl Sweep {
             None => Ok(()),
             Some(why) if failed == 1 => Err(why),
             Some(why) => Err(format!(
-                "{why} — and {} more under {trail} would not go either",
+                "{why}, and {} more under {trail} would not go either",
                 failed - 1
             )),
         }
