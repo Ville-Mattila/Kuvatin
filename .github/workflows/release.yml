@@ -89,8 +89,10 @@ jobs:
       # built on a tag and nowhere else, so a mistake in any of them surfaced
       # only after the tag was pushed — three consecutive releases broke that
       # way. A pull request touching them now packages too. Secrets are not
-      # exposed to pull requests, so that package is unsigned; the install test
-      # already treats signing as optional and skips the registration check.
+      # exposed to pull requests, so the release key is out of reach there; the
+      # package is signed with a throwaway key made and destroyed inside the
+      # run instead, so registration and its removal are proven on the pull
+      # request rather than first on a tag.
       - name: Package on pull requests that touch the installer
         if: github.event_name == 'pull_request'
         shell: pwsh
@@ -211,6 +213,20 @@ jobs:
       # exit code is the step's exit code.
       - name: Test (core + gui — gates the release)
         run: cargo test -p kuvatin-core -p kuvatin --release
+
+      # The all-users uninstall's signed-out path cannot be exercised by an
+      # account that is signed in (its hive stays mounted), so it is proven by a
+      # test that builds a throwaway UsrClass.dat and cleans it. That test needs
+      # SeBackup/SeRestore: locally, unelevated, it prints a reason and skips,
+      # but under CI it panics instead of skipping (GitHub sets CI=true, and the
+      # hosted runner IS elevated), so a skip here is a failed step. The exit
+      # code is the whole gate — nothing greps the output; --nocapture is only
+      # so the reason is readable when it does fail.
+      - name: Test (offline hive cleanup — gates the release)
+        shell: pwsh
+        run: |
+          cargo test -p kuvatin --release -- --exact shell::hive::tests::offline_cleanup_removes_only_kuvatin_verbs --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "the offline hive test exited $LASTEXITCODE, so the signed-out cleanup path is unproven" }
 
       # Self-contained video tests: they generate their own frames under the
       # workspace's target dir and drive real GES/GStreamer pipelines (encode,
@@ -364,11 +380,13 @@ jobs:
           "KUVATIN_VERSION=$ver" | Out-File $env:GITHUB_ENV -Append
           $msix = "$env:GITHUB_WORKSPACE\target\msix\Kuvatin.msix"
           # Windows refuses an unsigned package that hosts a COM server, so the
-          # package is signed when the run has the key (a tag run); its Publisher
-          # must equal the certificate's Subject. The public certificate rides
-          # along in the MSI, which trusts it machine-wide before registering.
-          # Without a key the package is built unsigned: the exe logs that it
-          # could not register and the classic menu is unaffected.
+          # package is always signed; its Publisher must equal the certificate's
+          # Subject. The public certificate rides along in the MSI, which trusts
+          # it machine-wide before registering. A tag run signs with the release
+          # key from the release-signing environment; every other packaging run
+          # (installer pull requests, manual dispatch) signs with a throwaway
+          # key made and destroyed inside this step, so those runs exercise the
+          # signed-package paths too.
           $cer = ''
           if ($env:SIGN_PFX_BASE64) {
             $pfx = "$env:RUNNER_TEMP\kuvatin-sign.pfx"
@@ -396,14 +414,49 @@ jobs:
             # A tag publishes, and an unsigned package there is a release whose
             # Windows 11 entry never registers. A missing key on a tag means the
             # environment's secrets are missing, so the release stops here
-            # rather than shipping that. Manual and pull-request runs never have
-            # the key and carry on unsigned.
+            # rather than shipping that.
             if ($env:GITHUB_REF -like 'refs/tags/*') {
               throw 'No signing key on a tag run: set KUVATIN_SIGN_PFX_BASE64 and KUVATIN_SIGN_PFX_PASSWORD in the release-signing environment (README, "Signing the menu package").'
             }
-            & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix
-            Write-Host '::warning::No signing key (KUVATIN_SIGN_PFX_BASE64): Kuvatin.msix ships unsigned, so the Windows 11 top-level menu will not register.'
-            'SIGNED=false' | Out-File $env:GITHUB_ENV -Append
+            # Every other packaging run (installer pull requests, manual
+            # dispatch) signs with a THROWAWAY self-signed key, made here and
+            # destroyed before the step ends, so those runs prove what an
+            # unsigned package cannot: that the package registers, and that
+            # uninstall removes it again for every account. The subject must
+            # equal the manifest Publisher exactly, so the package family name
+            # is the same one a release produces.
+            $throwaway = New-SelfSignedCertificate -Type Custom -Subject 'CN=Ville Mattila' `
+              -KeyUsage DigitalSignature -FriendlyName 'Kuvatin CI throwaway' `
+              -CertStoreLocation 'Cert:\CurrentUser\My' `
+              -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
+            $pfx = "$env:RUNNER_TEMP\kuvatin-ci-sign.pfx"
+            $pw = [Guid]::NewGuid().ToString('N')
+            Write-Host "::add-mask::$pw"
+            $store = "Cert:\CurrentUser\My\$($throwaway.Thumbprint)"
+            Export-PfxCertificate -Cert $store -FilePath $pfx -Password (ConvertTo-SecureString $pw -AsPlainText -Force) | Out-Null
+            try {
+              & crates\kuvatin\msix\build-msix.ps1 -Version $ver -Out $msix -Publisher $throwaway.Subject
+              $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object { [version]($_.Directory.Parent.Name) } | Select-Object -Last 1
+              # No /tr: this signature is not meant to outlive the run, and a
+              # timestamp server is one more thing that can be down.
+              & $signtool.FullName sign /fd SHA256 /f $pfx /p $pw $msix
+              if ($LASTEXITCODE -ne 0) { throw "signtool (throwaway key) exited $LASTEXITCODE" }
+              # Same path the real branch uses, so the `if ($cer)` block below
+              # passes SignCerPath/SignCerThumbprint to WiX unchanged: the
+              # installer trusts this certificate and KuvatinUntrustCert
+              # removes it again by thumbprint.
+              $cer = "$env:GITHUB_WORKSPACE\target\msix\kuvatin-signing.cer"
+              Export-Certificate -Cert $store -FilePath $cer | Out-Null
+              $thumb = $throwaway.Thumbprint
+              Write-Host "package signed with a THROWAWAY key ($($throwaway.Subject) $thumb)"
+              'SIGNED=true' | Out-File $env:GITHUB_ENV -Append
+            } finally {
+              # Never leave the private key behind, not even when signing threw.
+              # The exported .cer stays: the WiX build and the install test
+              # both need it.
+              Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+              Remove-Item $store -Force -ErrorAction SilentlyContinue
+            }
           }
           cd crates\kuvatin
           # Two explicit command lines: splatting an argument array into a
@@ -499,13 +552,217 @@ jobs:
           $mp4 = "$work\frames\frame.mp4"
           if (-not (Test-Path $mp4) -or (Get-Item $mp4).Length -lt 10KB) { throw "installed exe produced no usable MP4" }
           Write-Host "installed exe OK: $($webp.Name) ($($webp.Length) B), frame.mp4 ($((Get-Item $mp4).Length) B)"
-          $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/norestart" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
-          if (Test-Path $exe) { throw "uninstall left $exe behind" }
-          if (Test-Path $verb) { throw "uninstall left the Explorer verb behind" }
-          if (Test-Path $startMenu) { throw "uninstall left the Start menu folder behind" }
-          if ($build -ge 22000 -and (Get-AppxPackage VilleMattila.Kuvatin)) { throw "uninstall left the sparse package registered" }
-          if ($env:SIGNED -eq 'true' -and (Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Subject -like 'CN=Ville Mattila*' })) { throw "uninstall left the signing certificate in Trusted People" }
+          # Kuvatin stays installed: the next step uninstalls it, after two more
+          # accounts have registered it, and checks what every account keeps.
+
+      # Uninstall must clean EVERY account, not just the uninstalling one
+      # (backlog pk-uninst). Two extra local accounts register Kuvatin the way a
+      # real first launch would: a password-logon scheduled task loads the
+      # user's profile, so HKCU is their own classes hive and the sparse package
+      # registers in their context (proven by the pk-uninst probe). A fresh
+      # account has no "Log on as a batch job" right, so secedit grants it first
+      # — without that the tasks never start (0x41303). kvon stays signed in
+      # across the uninstall while kvoff signs out, so the loaded hive and the
+      # offline UsrClass.dat are both exercised. Then uninstall as the runner
+      # and assert that all three accounts are clean.
+      - name: Uninstall test (every account)
+        if: env.PACKAGE == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # reg query on a missing key exits 1, and net user, secedit and
+          # wevtutil are chatty: native exit codes must not abort this step.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $exe = 'C:\Program Files\kuvatin\bin\kuvatin.exe'
+          $msi = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
+          # The install test's $build went with its step.
+          $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+          $log = "$env:TEMP\kuvatin-uninstall.log"
+          New-Item -ItemType Directory -Force C:\kvtest\users, C:\kvtest\out | Out-Null
+          # The tasks run as ordinary users and write their transcript here.
+          icacls C:\kvtest\out /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+          # A task that never started says why only if this log is on.
+          wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
+          $png1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+          # What each account runs: register, one right-click conversion, and a
+          # stand-in cache entry (a real one needs EXR frames).
+          @'
+          param([Parameter(Mandatory)][string]$User)
+          Start-Transcript -Path "C:\kvtest\out\$User.txt" -Force | Out-Null
+          $exe = 'C:\Program Files\kuvatin\bin\kuvatin.exe'
+          "$(whoami): USERPROFILE=$env:USERPROFILE TEMP=$env:TEMP"
+          $p = Start-Process $exe -ArgumentList '--register','--quiet' -Wait -PassThru
+          "--register exited $($p.ExitCode)"
+          # Start-Process joins the list with spaces and does NOT quote, so the
+          # preset name carries its own quotes.
+          $png = "C:\kvtest\users\$User\photo.png"
+          $p = Start-Process $exe -ArgumentList '--preset','"Convert to WebP"','--quiet',"`"$png`"" -Wait -PassThru
+          "--preset exited $($p.ExitCode)"
+          New-Item -ItemType Directory -Force "$env:TEMP\kuvatin\seq-cache\probe" | Out-Null
+          Set-Content "$env:TEMP\kuvatin\seq-cache\probe\.complete" 'x'
+          Stop-Transcript | Out-Null
+          '@ | Set-Content C:\kvtest\as-user.ps1
+
+          function Sid([string]$u) { ([Security.Principal.NTAccount]::new($u)).Translate([Security.Principal.SecurityIdentifier]).Value }
+          function ProfDir([string]$sid) { (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath }
+
+          # Whatever fails, these two answer "did the SYSTEM action run, and did
+          # the accounts do their half?" — WixQuietExec64 copies the action's
+          # stdout (every line prefixed `Kuvatin: `) into the MSI log.
+          function Show-Diagnostics {
+            if ($log -and (Test-Path $log)) {
+              Write-Host '--- uninstall log: the all-users action and its report'
+              Get-Content $log | Select-String 'KuvatinUnregisterAllUsers|Kuvatin: ' | ForEach-Object { $_.Line }
+            }
+            Write-Host '--- Task Scheduler events for the account tasks'
+            Get-WinEvent -LogName Microsoft-Windows-TaskScheduler/Operational -MaxEvents 200 -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'kv-kvoff|kv-kvon|kv-hold' } |
+              ForEach-Object { '  event {0} {1:HH:mm:ss}: {2}' -f $_.Id, $_.TimeCreated, ($_.Message -replace '\s+', ' ') }
+          }
+
+          function Register-As([string]$User, [string]$Password) {
+            $arg = "-NoProfile -ExecutionPolicy Bypass -File C:\kvtest\as-user.ps1 -User $User"
+            $a = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $arg
+            $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName "kv-$User" -Action $a -Settings $s -User "$env:COMPUTERNAME\$User" -Password $Password -RunLevel Limited -Force | Out-Null
+            Start-ScheduledTask -TaskName "kv-$User"
+            $deadline = (Get-Date).AddMinutes(4)
+            do { Start-Sleep -Seconds 3; $state = (Get-ScheduledTask -TaskName "kv-$User").State } while ($state -in 'Queued','Running' -and (Get-Date) -lt $deadline)
+            $rc = (Get-ScheduledTaskInfo -TaskName "kv-$User").LastTaskResult
+            Write-Host ('kv-{0}: state {1}, last result 0x{2:X8}' -f $User, $state, $rc)
+            $out = "C:\kvtest\out\$User.txt"
+            if (Test-Path $out) { Get-Content $out | ForEach-Object { "  $_" } }
+            if ($rc -ne 0) { throw "registration task kv-$User failed (0x$('{0:X8}' -f $rc))" }
+          }
+
+          # How many of the 17 classic keys an account still has. reg.exe only:
+          # a PowerShell provider handle would block the hive unload.
+          function Count-Keys([string]$sid) {
+            $exts = '.png','.jpg','.jpeg','.jpe','.jfif','.webp','.bmp','.tiff','.tif','.gif','.exr'
+            $rel = @($exts | ForEach-Object { "SystemFileAssociations\$_\shell\Kuvatin" }) + @(
+              'SystemFileAssociations\image\shell\Kuvatin','Directory\shell\Kuvatin','Directory\Background\shell\Kuvatin',
+              'Kuvatin.CommandStore','Kuvatin.CommandStore.Background','Kuvatin.CommandStore.Frames')
+            $root = "HKU\$($sid)_Classes"
+            $mounted = $false
+            if (-not (Test-Path "Registry::HKEY_USERS\$($sid)_Classes")) {
+              $root = "HKU\kv-check-$sid"
+              reg load $root (Join-Path (ProfDir $sid) 'AppData\Local\Microsoft\Windows\UsrClass.dat') *> $null
+              if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; return -1 }
+              $mounted = $true
+            }
+            $n = @($rel | Where-Object { reg query "$root\$_" *> $null; $LASTEXITCODE -eq 0 }).Count
+            if ($mounted) { [GC]::Collect(); [GC]::WaitForPendingFinalizers(); reg unload $root *> $null }
+            $global:LASTEXITCODE = 0
+            return $n
+          }
+
+          try {
+            $sids = @()
+            foreach ($u in 'kvoff','kvon') {
+              # 14 characters: net user stops to ask a Y/N question for longer ones.
+              $pw = 'Kv1!' + [guid]::NewGuid().ToString('N').Substring(0,10)
+              Write-Host "::add-mask::$pw"
+              net user $u $pw /add /passwordchg:no /expires:never | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "net user $u exited $LASTEXITCODE" }
+              New-Item -ItemType Directory -Force "C:\kvtest\users\$u" | Out-Null
+              [IO.File]::WriteAllBytes("C:\kvtest\users\$u\photo.png", [Convert]::FromBase64String($png1x1))
+              icacls "C:\kvtest\users\$u" /grant "${u}:(OI)(CI)M" | Out-Null
+              Set-Variable "PW_$u" $pw
+              $sids += '*' + (Sid $u)
+            }
+            # Grant both accounts the batch logon right, adding to whatever the
+            # runner image already lists rather than replacing it.
+            secedit /export /cfg C:\kvtest\rights.inf /areas USER_RIGHTS | Out-Null
+            $inf = Get-Content C:\kvtest\rights.inf
+            if ($inf -match '^SeBatchLogonRight') {
+              $inf = $inf -replace '^(SeBatchLogonRight\s*=.*)$', ('$1,' + ($sids -join ','))
+            } else {
+              $inf = $inf -replace '^(\[Privilege Rights\])$', ("`$1`r`nSeBatchLogonRight = " + ($sids -join ','))
+            }
+            # secedit reads Unicode only.
+            $inf | Set-Content -Encoding Unicode C:\kvtest\rights-new.inf
+            secedit /configure /db C:\kvtest\rights.sdb /cfg C:\kvtest\rights-new.inf /areas USER_RIGHTS | Out-Null
+            secedit /export /cfg C:\kvtest\after.inf /areas USER_RIGHTS | Out-Null
+            Write-Host "SeBatchLogonRight now: $((Get-Content C:\kvtest\after.inf) -match '^SeBatchLogonRight')"
+
+            Register-As kvoff (Get-Variable PW_kvoff -ValueOnly)
+            Register-As kvon (Get-Variable PW_kvon -ValueOnly)
+            # kvon stays signed in: hold its hive mounted across the uninstall.
+            $ha = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument '-NoProfile -Command Start-Sleep -Seconds 900'
+            $hs = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+            Register-ScheduledTask -TaskName kv-hold -Action $ha -Settings $hs -User "$env:COMPUTERNAME\kvon" -Password (Get-Variable PW_kvon -ValueOnly) -RunLevel Limited -Force | Out-Null
+            Start-ScheduledTask -TaskName kv-hold
+            Start-Sleep -Seconds 5
+            # kvoff signs out when its task ends, but the profile service takes
+            # its time; waiting is what makes kvoff the offline-hive case.
+            $offSid = Sid kvoff
+            $t0 = Get-Date
+            while ((Test-Path "Registry::HKEY_USERS\$offSid") -and ((Get-Date) - $t0).TotalSeconds -lt 180) { Start-Sleep -Seconds 3 }
+            Write-Host "kvoff signed out: $(-not (Test-Path "Registry::HKEY_USERS\$offSid")) after $([int]((Get-Date) - $t0).TotalSeconds) s"
+            Write-Host "kvon still signed in: $(Test-Path "Registry::HKEY_USERS\$(Sid kvon)_Classes")"
+
+            # Preconditions, so the test cannot pass vacuously.
+            foreach ($u in 'kvoff','kvon') {
+              $sid = Sid $u
+              $dir = ProfDir $sid
+              # 16 of 17: the legacy 'image' root is absent on a fresh install.
+              $have = Count-Keys $sid
+              if ($have -lt 16) { throw "$u registered only $have verb key(s) before uninstall" }
+              if ($env:SIGNED -eq 'true' -and $build -ge 22000) {
+                $forUser = Get-AppxPackage -AllUsers VilleMattila.Kuvatin | Where-Object { $_.PackageUserInformation.UserSecurityId.Sid -contains $sid }
+                if (-not $forUser) { throw "$u did not register the sparse package before uninstall" }
+              }
+              if (-not (Test-Path (Join-Path $dir 'AppData\Local\Kuvatin\kuvatin.log'))) { throw "$u has no log before uninstall" }
+              if (-not (Test-Path (Join-Path $dir 'AppData\Local\Temp\kuvatin\seq-cache'))) { throw "$u has no cache before uninstall" }
+              if (-not (Test-Path (Join-Path $dir 'AppData\Roaming\Kuvatin\presets.toml'))) { throw "$u has no presets before uninstall" }
+              Write-Host "$u is registered: $have verb key(s), log, cache and presets in $dir"
+            }
+
+            # Uninstall as the runner, verbosely: WixQuietExec64 copies the
+            # SYSTEM action's stdout into this log.
+            $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/norestart","/l*v","`"$log`"" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
+            Get-Content $log | Select-String 'KuvatinUnregisterAllUsers|Kuvatin: ' | Select-Object -Last 30 | ForEach-Object { $_.Line }
+
+            # The uninstalling account (what the install test used to check).
+            if (Test-Path $exe) { throw "uninstall left $exe behind" }
+            if (Test-Path 'HKCU:\Software\Classes\SystemFileAssociations\.png\shell\Kuvatin') { throw "uninstall left the runner's Explorer verb behind" }
+            $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
+            if (Test-Path $startMenu) { throw "uninstall left the Start menu folder behind" }
+
+            # Every other account.
+            foreach ($u in 'kvoff','kvon') {
+              $sid = Sid $u
+              $dir = ProfDir $sid
+              $left = Count-Keys $sid
+              if ($left -ne 0) { throw "${u}: uninstall left $left verb key(s) behind" }
+              if (Test-Path (Join-Path $dir 'AppData\Local\Kuvatin\kuvatin.log')) { throw "${u}: uninstall left the log behind" }
+              if (Test-Path (Join-Path $dir 'AppData\Local\Temp\kuvatin')) { throw "${u}: uninstall left %TEMP%\kuvatin behind" }
+              $pkgLeft = Get-ChildItem (Join-Path $dir 'AppData\Local\Packages') -Filter 'VilleMattila.Kuvatin_*' -ErrorAction SilentlyContinue
+              if ($pkgLeft) { throw "${u}: uninstall left $($pkgLeft.Name) behind" }
+              if (-not (Test-Path (Join-Path $dir 'AppData\Roaming\Kuvatin\presets.toml'))) { throw "${u}: uninstall deleted the presets, which must be kept" }
+              Write-Host "${u}: no verb keys, no log, no cache, no package data, presets kept"
+            }
+            if ($env:SIGNED -eq 'true' -and $build -ge 22000) {
+              $stillThere = Get-AppxPackage -AllUsers VilleMattila.Kuvatin -ErrorAction SilentlyContinue
+              if ($stillThere) { throw "uninstall left the sparse package registered for $($stillThere.PackageUserInformation.UserSecurityId.Sid -join ', ')" }
+            }
+            if ($env:SIGNED -eq 'true' -and (Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object { $_.Subject -like 'CN=Ville Mattila*' })) {
+              throw "uninstall left the signing certificate in Trusted People"
+            }
+            # The SYSTEM pass must not have written into the system profile.
+            if (Test-Path 'C:\Windows\System32\config\systemprofile\AppData\Local\Kuvatin') {
+              throw "the SYSTEM cleanup seeded a Kuvatin folder in the system profile"
+            }
+            # reg.exe's last exit code (1 for a missing key) is what GitHub
+            # would exit pwsh with otherwise.
+            $global:LASTEXITCODE = 0
+            Write-Host 'every account is clean after uninstall'
+          } catch {
+            Show-Diagnostics
+            throw
+          }
 
       # Software bill of materials for the release (CycloneDX). The scan knows
       # the Rust crates; the step after it adds the bundled GStreamer runtime.

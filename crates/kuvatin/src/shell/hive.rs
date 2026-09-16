@@ -808,8 +808,9 @@ mod tests {
     #[test]
     fn offline_cleanup_removes_only_kuvatin_verbs() {
         if !is_elevated() {
-            // Locally this prints exactly `skipping: not elevated`, which is
-            // what the release workflow's gate looks for; on CI it fails,
+            // Locally this prints `skipping: not elevated` and returns; under
+            // CI it panics instead, which is what the release workflow's gate
+            // relies on — that step reads the exit code and greps nothing,
             // because a runner that is elevated and skipped anyway means the
             // gate ran nothing.
             skip_or_fail_on_ci("not elevated");
