@@ -61,6 +61,14 @@ a message that says what happened and offers the download page instead.
 
 ## Architecture
 
+> **Superseded during implementation.** The section below assumed the updater
+> could be a copy of `kuvatin.exe`. It cannot: the app statically imports seven
+> GStreamer and GLib libraries that the installer puts beside it, so a lone copy
+> in the staging folder will not start. Pointing it at the install folder for
+> them is worse, because it would hold open the files the installer must
+> replace. The updater is a separate small program instead; see Tasks 18 and 19
+> of the plan. Everything else here stands.
+
 ### Why a copy of the executable
 
 `msiexec` cannot replace `kuvatin.exe` while that file is running, and the
