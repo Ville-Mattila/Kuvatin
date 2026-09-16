@@ -15,6 +15,14 @@ something is fixed.
 
 ## [Unreleased]
 
+Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and
+the Undo button names the step it is about to undo. On the video timeline
+that is every edit, with a slider drag counted as one step rather than
+forty, and a deleted clip coming back where it was, transform and all.
+Uninstalling is honest now too: it takes the right-click menu, the menu
+package and the leftover logs off every account on the PC, not only the one
+running the uninstaller, and leaves your presets alone.
+
 ### Added
 - **Undo and redo.** Ctrl+Z takes back the last change and Ctrl+Y or
   Ctrl+Shift+Z puts it back, and both modes have Undo and Redo buttons that
@@ -43,6 +51,12 @@ something is fixed.
 - Uninstalling now removes Kuvatin's right-click menu, its Windows 11 menu
   package and its leftover logs and cache for every account on the PC, not just
   the account that runs the uninstaller. Your saved presets are kept.
+
+Checksum: see `kuvatin-2.12.0-x86_64.msi.sha256` (and
+`kuvatin-x86_64.msi.sha256` for the fixed-name copy the site links). The
+installer itself is unsigned, so SmartScreen will ask once — More info, then
+Run anyway. The Windows 11 menu package inside it *is* signed, which is what
+puts "Kuvatin" in the top-level right-click menu.
 
 ## [2.11.0] - 2026-09-13
 A smaller release, mostly about images. WebP can now be lossless, for the
