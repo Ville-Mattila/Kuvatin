@@ -198,7 +198,6 @@ pub fn hand_off(staged: &Staged, relaunch: &Path) -> Result<()> {
 
 /// The `--apply-update` mode. Returns the process exit code: 0 when the
 /// update installed, 1 when it did not.
-#[allow(dead_code)] // Nothing runs this yet; the --apply-update mode (Task 9) is next.
 pub fn run_helper(msi: &Path, after: u32, relaunch: Option<&Path>) -> i32 {
     crate::applog::log(&format!(
         "update: waiting for process {after}, then installing {}",

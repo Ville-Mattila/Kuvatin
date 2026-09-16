@@ -197,6 +197,11 @@ fn main() {
                 println!(".{ext}");
             }
         }
+        Mode::ApplyUpdate {
+            msi,
+            after,
+            relaunch,
+        } => std::process::exit(update::apply::run_helper(&msi, after, relaunch.as_deref())),
         Mode::QuickRun { preset, paths } => {
             // One group per preset, so two different presets never merge.
             let Some(paths) = coalesce(&format!("preset:{preset}"), paths) else {
