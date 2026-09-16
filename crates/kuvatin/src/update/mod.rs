@@ -12,6 +12,22 @@ const PATH: &str = "/Ville-Mattila/Kuvatin/releases/latest";
 pub const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
+const DOWNLOAD_BASE: &str = "https://github.com/Ville-Mattila/Kuvatin/releases/download";
+
+/// The installer file a release publishes for `version`.
+#[allow(dead_code)] // Only the tests call this so far; the downloader is next.
+pub fn asset_name(version: &str) -> String {
+    format!("kuvatin-{version}-x86_64.msi")
+}
+
+/// The installer and its checksum file, in that order.
+#[allow(dead_code)] // Only the tests call this so far; the downloader is next.
+pub fn asset_urls(version: &str) -> (String, String) {
+    let msi = format!("{DOWNLOAD_BASE}/v{version}/{}", asset_name(version));
+    let sha = format!("{msi}.sha256");
+    (msi, sha)
+}
+
 /// The latest published version, e.g. `"2.9.0"`. Blocking (network); call
 /// from a worker thread.
 pub fn latest_version() -> Result<String> {
@@ -216,5 +232,19 @@ mod tests {
         );
         assert!(!is_newer("nightly", "2.8.1"));
         assert!(triple(CURRENT).is_some(), "CARGO_PKG_VERSION is x.y.z");
+    }
+
+    #[test]
+    fn asset_addresses_name_the_version_not_the_fixed_name_copy() {
+        let (msi, sha) = asset_urls("2.13.0");
+        assert_eq!(
+            msi,
+            "https://github.com/Ville-Mattila/Kuvatin/releases/download/v2.13.0/kuvatin-2.13.0-x86_64.msi"
+        );
+        assert_eq!(sha, format!("{msi}.sha256"));
+        assert_eq!(asset_name("2.13.0"), "kuvatin-2.13.0-x86_64.msi");
+        // The release also publishes kuvatin-x86_64.msi. We never ask for it:
+        // its checksum file would not say which build it describes.
+        assert!(!msi.contains("/kuvatin-x86_64.msi"));
     }
 }
