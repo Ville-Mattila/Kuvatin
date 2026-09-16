@@ -101,6 +101,7 @@ jobs:
             'crates/kuvatin/wix/',
             'crates/kuvatin/msix/',
             'crates/kuvatin-shellext/',
+            'crates/kuvatin-updater/',
             'crates/kuvatin/src/shell/',
             '.github/workflows/release.yml'
           )
@@ -319,7 +320,9 @@ jobs:
       - name: Smoke render with the release exe (gates the release)
         shell: pwsh
         run: |
-          cargo build --release -p kuvatin -p kuvatin-shellext
+          # kuvatin-updater rides along: the MSI takes it from the same
+          # target\release folder, and `cargo wix` only builds kuvatin itself.
+          cargo build --release -p kuvatin -p kuvatin-shellext -p kuvatin-updater
           $frames = Join-Path $env:GITHUB_WORKSPACE "target\smoke\frames"
           New-Item -ItemType Directory -Force -Path $frames | Out-Null
           # gst-launch unescapes backslashes in property values (C:\x -> C:x), so
@@ -566,8 +569,98 @@ jobs:
           $mp4 = "$work\frames\frame.mp4"
           if (-not (Test-Path $mp4) -or (Get-Item $mp4).Length -lt 10KB) { throw "installed exe produced no usable MP4" }
           Write-Host "installed exe OK: $($webp.Name) ($($webp.Length) B), frame.mp4 ($((Get-Item $mp4).Length) B)"
-          # Kuvatin stays installed: the next step uninstalls it, after two more
-          # accounts have registered it, and checks what every account keeps.
+          # Kuvatin stays installed: the next step updates over it, and the one
+          # after that uninstalls it, after two more accounts have registered
+          # it, and checks what every account keeps.
+
+      # An installer cannot replace a running executable, so the app copies the
+      # updater it ships with into a staging folder and lets that do the
+      # installing. This drives the shipped updater, taken from the install
+      # folder, against the installer built in this run, over the install the
+      # step above just made: same version, so the package's
+      # AllowSameVersionUpgrades is what makes it a legal reinstall.
+      - name: Update test (the staged updater installs over a real install)
+        if: env.PACKAGE == 'true'
+        # An install that fails puts up a message box the helper's own code
+        # waits on, and nothing here can dismiss it: fail in minutes rather
+        # than eat the job's 75.
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $built = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
+          # The install step above checks this exact path; the product
+          # installs into bin\, not straight into the product folder.
+          $installed = "C:\Program Files\kuvatin\bin\kuvatin.exe"
+          if (-not (Test-Path $installed)) { throw "no installed kuvatin.exe: the install step did not run" }
+          # The updater is a shipped file, not something the app makes: if the
+          # installer stopped carrying it, staging an update would fail on a
+          # real machine with "could not find kuvatin-updater.exe beside this
+          # program", and nothing else in this job would notice.
+          $installedUpdater = "C:\Program Files\kuvatin\bin\kuvatin-updater.exe"
+          if (-not (Test-Path $installedUpdater)) { throw "the installer did not ship kuvatin-updater.exe to $installedUpdater" }
+          # Start from an empty staging folder: leftovers from an earlier run
+          # would make the "only these two files" check below lie.
+          $stage = Join-Path $env:TEMP 'kuvatin\update'
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          $helper = Join-Path $stage 'kuvatin-updater.exe'
+          Copy-Item $installedUpdater $helper -Force
+          # The real flow downloads the installer INTO the staging folder and
+          # the helper deletes it once it has installed, so it gets a copy
+          # there. Handing it target\wix\ directly would delete the artifact
+          # the uninstall test and the release upload still need.
+          $msi = Join-Path $stage (Split-Path $built -Leaf)
+          Copy-Item $built $msi -Force
+          # The point of the updater being its own program is that it starts
+          # with nothing beside it. Say so as an assertion: the staging folder
+          # holds the updater and the installer, and no runtime.
+          $staged = @(Get-ChildItem $stage -Force -Recurse | ForEach-Object { $_.Name } | Sort-Object)
+          $expected = @('kuvatin-updater.exe', (Split-Path $built -Leaf)) | Sort-Object
+          if (Compare-Object $staged $expected) {
+            throw "the staging folder holds [$($staged -join ', ')]; expected only [$($expected -join ', ')]"
+          }
+          # ...and the runner's own GStreamer does not get to stand in for it
+          # either. The previous version of this step ran a copy of kuvatin.exe
+          # and passed because GStreamer happened to be on PATH; the updater
+          # imports nothing but Windows, so hiding it costs nothing and turns
+          # that accident into a check.
+          $env:Path = (($env:Path -split ';') | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
+
+          # --after wants a process that has already exited, which is what the
+          # updater will find in the real flow by the time it looks.
+          $dead = Start-Process cmd -ArgumentList '/c','exit' -PassThru -Wait
+          # No --relaunch: nothing should open a window on the runner.
+          $p = Start-Process $helper -ArgumentList '--apply-update',"`"$msi`"",'--after',$dead.Id -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "the staged updater exited $($p.ExitCode)" }
+
+          if (-not (Test-Path $installed)) { throw 'the update removed the app instead of replacing it' }
+          # The upgrade removes the old product before installing the new one,
+          # so the updater has to come back with it: without this, the update
+          # after the next one would have nothing to hand over to.
+          if (-not (Test-Path $installedUpdater)) { throw 'the update left the install without kuvatin-updater.exe' }
+          # Deliberately NOT Win32_Product: enumerating it runs a consistency
+          # check against every installed package and can reconfigure them.
+          # The uninstall registry key answers the same question for nothing.
+          $keys = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $product = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1
+          if (-not $product) { throw 'Kuvatin is no longer registered as installed' }
+          $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
+          if (-not (Test-Path (Join-Path $startMenu 'Kuvatin.lnk'))) {
+            throw 'the update left the all-users Start menu shortcut behind'
+          }
+          Write-Host "updater ran clean; Kuvatin $($product.DisplayVersion) is installed"
+
+          # It deletes the installer it used — best-effort, because the folder
+          # is swept at the next start anyway — and leaves its own copy there
+          # for that sweep.
+          if (Test-Path $msi) { Write-Host 'note: the staged installer is still there; the next start sweeps the folder' }
+          if (-not (Test-Path $built)) { throw 'the built MSI is gone: the uninstall test and the release upload still need it' }
+          Get-Content "$env:LOCALAPPDATA\Kuvatin\kuvatin.log" -ErrorAction SilentlyContinue |
+            Select-String 'update:' | Select-Object -Last 6
 
       # Uninstall must clean EVERY account, not just the uninstalling one
       # (backlog pk-uninst). Two extra local accounts register Kuvatin the way a

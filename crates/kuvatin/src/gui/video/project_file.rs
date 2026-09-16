@@ -71,6 +71,11 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState, im: &super::import::ImportSt
             };
             match doc.save(&path) {
                 Ok(()) => {
+                    // The document reached the file: the timeline and the disk
+                    // agree again, so closing now would lose nothing.
+                    if let Some(p) = project_slot.borrow().as_ref() {
+                        p.mark_saved();
+                    }
                     *current.borrow_mut() = Some(path.clone());
                     ui.set_project_name(file_label(&path));
                     show_info(

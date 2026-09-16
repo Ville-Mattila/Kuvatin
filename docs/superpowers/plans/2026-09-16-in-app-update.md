@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     const NAME: &str = "kuvatin-2.13.0-x86_64.msi";
-    const HEX: &str = "9f2c4a1b8e7d6c5b4a39281706f5e4d3c2b1a09887766554433221100ffeeddcc";
+    const HEX: &str = "9f2c4a1b8e7d6c5b4a39281706f5e4d3c2b1a09887766554433221100ffeeddc";
 
     #[test]
     fn reads_the_hash_for_the_file_it_names() {
@@ -1492,7 +1492,7 @@ Beside the other modals (after the `confirm-open-project` block):
             }
             if root.update-unsaved : Text {
                 text: "The timeline has changes that have not been saved. Closing loses them.";
-                color: Theme.warn; font-size: 12px; wrap: word-wrap;
+                color: Theme.danger; font-size: 12px; wrap: word-wrap;
             }
             HorizontalLayout {
                 spacing: 10px;
@@ -1521,7 +1521,7 @@ Beside the other modals (after the `confirm-open-project` block):
                 wrap: word-wrap; vertical-stretch: 1;
             }
             Rectangle {
-                height: 6px; border-radius: 3px; background: Theme.track;
+                height: 6px; border-radius: 3px; background: Theme.well;
                 Rectangle {
                     x: 0; height: parent.height; border-radius: 3px; background: Theme.accent;
                     width: root.update-progress < 0 ? parent.width : parent.width * root.update-progress;
@@ -1571,16 +1571,21 @@ alongside the other modal cases, and **before** any catch-all:
 Escape is deliberately not wired for phase 2: a download in flight is stopped
 with Cancel, which also stops the worker.
 
-- [ ] **Step 5: Add the two properties the dialog needs**
+- [ ] **Step 5: Add the one property the dialog needs**
 
-If `app-version`, `Theme.warn` or `Theme.track` do not exist, add them:
-`app-version` as `in property <string> app-version;` next to `update-available`
-(set from `update::CURRENT` in Task 12), and any missing theme colour in
-`crates/kuvatin/ui/theme.slint` following the names already there. Check first:
+`app-version` does not exist yet. Add it next to `update-available`:
 
-```bash
-grep -n "app-version\|warn:\|track:" crates/kuvatin/ui/app.slint crates/kuvatin/ui/theme.slint
+```slint
+    in property <string> app-version;
 ```
+
+Task 12 sets it from `update::CURRENT`.
+
+The colours above are ones the palette already has. It carries no amber, so
+the unsaved-changes line uses `Theme.danger`, which is what this palette means
+by "you are about to lose something", and the progress groove uses
+`Theme.well`, the sunken-surface colour. Do not add a colour to
+`crates/kuvatin/ui/theme.slint` for this dialog.
 
 - [ ] **Step 6: Build the interface**
 
@@ -1848,7 +1853,9 @@ the menu registered:
           # built: same version, so MajorUpgrade's AllowSameVersionUpgrades
           # is what makes it a legal reinstall.
           $msi = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
-          $installed = "$env:ProgramFiles\Kuvatin\kuvatin.exe"
+          # The install step above checks this exact path; the product
+          # installs into bin\, not straight into the product folder.
+          $installed = "C:\Program Files\kuvatin\bin\kuvatin.exe"
           if (-not (Test-Path $installed)) { throw "no installed kuvatin.exe to copy: the install step did not run" }
           $stage = Join-Path $env:TEMP 'kuvatin\update'
           New-Item -ItemType Directory -Force $stage | Out-Null
@@ -1863,9 +1870,21 @@ the menu registered:
           if ($p.ExitCode -ne 0) { throw "the staged updater exited $($p.ExitCode)" }
 
           if (-not (Test-Path $installed)) { throw 'the update removed the app instead of replacing it' }
-          $product = Get-CimInstance Win32_Product -Filter "Name='Kuvatin'" -ErrorAction SilentlyContinue
+          # Deliberately NOT Win32_Product: enumerating it runs a consistency
+          # check against every installed package and can reconfigure them.
+          # The uninstall registry key answers the same question for nothing.
+          $keys = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $product = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1
           if (-not $product) { throw 'Kuvatin is no longer registered as installed' }
-          Write-Host "updater ran clean; Kuvatin $($product.Version) is installed"
+          $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
+          if (-not (Test-Path (Join-Path $startMenu 'Kuvatin.lnk'))) {
+            throw 'the update left the all-users Start menu shortcut behind'
+          }
+          Write-Host "updater ran clean; Kuvatin $($product.DisplayVersion) is installed"
 
           # It deletes the installer it used and leaves its own copy for the
           # app to sweep on next start.
@@ -2109,4 +2128,416 @@ Under `## [Unreleased]`, in `### Fixed`:
 ```bash
 git add -A
 git commit -m "The window opens large enough for its contents"
+```
+
+---
+
+### Task 17: Give the project a real unsaved-work flag
+
+Added during execution. Tasks 10 and 12 were built on a misreading in the spec:
+`Project::dirty` is documented at `crates/kuvatin-video/src/project.rs:741` as
+"Set by edits, cleared by `refresh_preview` — coalesces repaints", and
+`refresh_preview` does `self.dirty.replace(false)` on a UI timer. It is a
+repaint-pending flag. `is_dirty()` therefore reads `false` within a tick of
+every edit, so the dialog's unsaved warning would almost never appear. A
+warning that never fires is worse than none: it implies a check that is not
+happening.
+
+**Files:**
+- Modify: `crates/kuvatin-video/src/project.rs`
+- Modify: `crates/kuvatin/src/gui/video/mod.rs`
+- Modify: `crates/kuvatin/src/gui/video/project_file.rs`
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the `tests` module in `crates/kuvatin-video/src/project.rs`:
+
+```rust
+    #[test]
+    fn unsaved_work_survives_a_repaint_unlike_the_repaint_flag() {
+        let mut project = Project::new(|_f| {}).expect("project");
+        assert!(!project.has_unsaved_work(), "a new project has nothing to lose");
+
+        project.set_canvas_size(1280, 720);
+        assert!(project.has_unsaved_work(), "an edit is unsaved work");
+
+        // The repaint flag clears on a timer. Unsaved work must not.
+        project.refresh_preview();
+        assert!(
+            project.has_unsaved_work(),
+            "a repaint is not a save: this is the bug this flag exists to fix"
+        );
+    }
+
+    #[test]
+    fn saving_and_loading_both_clear_unsaved_work() {
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.set_canvas_size(1600, 900);
+        assert!(project.has_unsaved_work());
+
+        let doc = project.to_document();
+        project.mark_saved();
+        assert!(!project.has_unsaved_work(), "saving clears it");
+
+        project.set_canvas_size(1280, 720);
+        assert!(project.has_unsaved_work());
+        project.apply_document(&doc).expect("apply");
+        assert!(
+            !project.has_unsaved_work(),
+            "a project just loaded from a file matches that file"
+        );
+    }
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run (GStreamer on PATH): `cargo test -p kuvatin-video -- unsaved`
+Expected: FAIL to compile, "no method named `has_unsaved_work`".
+
+- [ ] **Step 3: Add the flag and one place that sets it**
+
+In `crates/kuvatin-video/src/project.rs`, beside the `dirty` field:
+
+```rust
+    /// Set by edits, cleared only by saving or loading. Unlike `dirty`, which
+    /// is a repaint-pending flag the preview timer clears, this answers "would
+    /// closing now lose work".
+    unsaved: std::cell::Cell<bool>,
+```
+
+Initialise it `false` next to `dirty` in `Project::new`, and add:
+
+```rust
+    /// An edit happened: repaint, and remember that the file on disk is behind.
+    fn touched(&self) {
+        self.dirty.set(true);
+        self.unsaved.set(true);
+    }
+
+    /// Would closing now lose work?
+    pub fn has_unsaved_work(&self) -> bool {
+        self.unsaved.get()
+    }
+
+    /// The project now matches a file on disk.
+    pub fn mark_saved(&self) {
+        self.unsaved.set(false);
+    }
+```
+
+- [ ] **Step 4: Route every edit through it**
+
+Replace every `self.dirty.set(true);` in this file with `self.touched();`. There
+are fourteen, and `grep -n "dirty.set(true)" crates/kuvatin-video/src/project.rs`
+lists them. Leave `self.dirty.replace(false)` in `refresh_preview` alone: that is
+the repaint flag doing its own job.
+
+Then, at the **end** of `apply_document`, after the edits it performs have set
+the flag, clear it:
+
+```rust
+        // Just loaded: this is exactly what is on disk.
+        self.unsaved.set(false);
+```
+
+- [ ] **Step 5: Run them and watch them pass**
+
+Run: `cargo test -p kuvatin-video -- unsaved`
+Expected: 2 passed.
+
+- [ ] **Step 6: Replace the accessor the dialog uses**
+
+Task 10 added `is_dirty()` and Task 12 built `has_unsaved_changes` on it. Delete
+`is_dirty()` and its test `a_project_says_whether_it_has_unsaved_changes`, which
+asserted the wrong thing, and point `has_unsaved_changes` in
+`crates/kuvatin/src/gui/video/mod.rs` at `has_unsaved_work()` instead. Keeping a
+public accessor for the repaint flag would invite the same mistake again.
+
+- [ ] **Step 7: Clear it where the app saves**
+
+In `crates/kuvatin/src/gui/video/project_file.rs`, find where a save completes
+successfully (the path that writes the document to the chosen file) and call
+`project.mark_saved()` there. Do not call it where the save failed or was
+cancelled from the file dialog.
+
+- [ ] **Step 8: Run the suites**
+
+```bash
+cargo test -p kuvatin-video -- unsaved
+cargo test -p kuvatin
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add -A
+git commit -m "The project knows what is unsaved, not just what needs repainting"
+```
+
+---
+
+### Task 18: The updater is its own small program
+
+Added during execution, and it replaces a decision in the spec.
+
+The design said the updater could be a copy of `kuvatin.exe`, so that nothing
+extra had to be built or shipped. That does not work. `kuvatin.exe` statically
+imports seven libraries that the installer places beside it:
+`glib-2.0-0.dll`, `gobject-2.0-0.dll`, `gstreamer-1.0-0.dll`, `gstapp-1.0-0.dll`,
+`gstbase-1.0-0.dll`, `gstpbutils-1.0-0.dll` and `gstvideo-1.0-0.dll`. A lone
+copy in the staging folder has none of them beside it, so Windows refuses to
+start it before `main` runs.
+
+The obvious repair is worse than the fault. Pointing the copy at the install
+folder for its libraries, by its `PATH` or its working directory, makes the
+updater hold those libraries open **from the directory the installer is about
+to replace**, which is the files-in-use problem this whole design exists to
+avoid. Copying the libraries along with it is not an answer either: the
+runtime staged into the installer is 125 files and 60 MB.
+
+So the updater becomes what it should have been: a small program that depends
+on nothing but Windows, shipped beside the app and copied to the staging
+folder when an update is staged.
+
+**Files:**
+- Create: `crates/kuvatin-updater/Cargo.toml`, `crates/kuvatin-updater/src/main.rs`
+- Modify: `Cargo.toml` (workspace members)
+- Modify: `crates/kuvatin/src/update/apply.rs`
+- Modify: `crates/kuvatin/src/cli.rs`, `crates/kuvatin/src/main.rs`
+
+- [ ] **Step 1: Create the crate**
+
+`crates/kuvatin-updater/Cargo.toml`, following the shape of
+`crates/kuvatin-shellext/Cargo.toml` for version and edition inheritance:
+
+```toml
+[package]
+name = "kuvatin-updater"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kuvatin-updater"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+```
+
+Keep the dependency list to exactly this. The point of the crate is that it
+starts when nothing else is beside it, and every dependency is a chance to
+undo that. In particular do not add `clap`: three flags parse by hand.
+
+Add `"crates/kuvatin-updater"` to the workspace `members` in the root
+`Cargo.toml`.
+
+- [ ] **Step 2: Move the helper's logic across, with its tests**
+
+Move these out of `crates/kuvatin/src/update/apply.rs` into
+`crates/kuvatin-updater/src/main.rs`, unchanged apart from what the move
+requires: `Installed`, `install_outcome`, `describe`, `wait_for_exit`,
+`msiexec_args`, `report_failure`, `run_helper`, and `WAIT_FOR_APP`.
+
+Move their tests too: `reads_what_msiexec_said`,
+`every_word_the_helper_can_print_is_ascii`,
+`waiting_on_a_process_that_has_already_gone_is_success_not_failure`,
+`waiting_on_ourselves_gives_up_at_the_deadline`,
+`the_command_line_it_runs_names_the_installer_and_nothing_else`, and the part
+of `every_message_this_module_can_produce_is_ascii` that covers `describe`.
+The part of that test covering `accept` stays in `kuvatin`, because `accept`
+stays.
+
+`describe` interpolates `crate::update::RELEASES_URL`, which does not exist in
+the new crate. Inline the address as a `const RELEASES_URL` with a comment
+saying it is duplicated from `kuvatin`'s update module on purpose, so this
+program depends on nothing.
+
+`run_helper` logs through `crate::applog`, which also does not exist here.
+Give the new crate a four-line `log` function that appends to the same file
+`applog` writes, `%LOCALAPPDATA%\Kuvatin\kuvatin.log`, so the update's trail
+stays in one place. Read `crates/kuvatin/src/applog.rs` for the exact path and
+line format and match it.
+
+- [ ] **Step 3: Write `main`**
+
+```rust
+/// Usage: kuvatin-updater --apply-update <MSI> --after <PID> [--relaunch <EXE>]
+///
+/// Started by Kuvatin from the staging folder as it closes. Three flags, parsed
+/// by hand: this program exists to start when nothing is beside it, and a
+/// command line parser is a dependency it does not need.
+fn main() {
+    let mut msi: Option<PathBuf> = None;
+    let mut after: Option<u32> = None;
+    let mut relaunch: Option<PathBuf> = None;
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--apply-update" => msi = args.next().map(PathBuf::from),
+            "--after" => after = args.next().and_then(|v| v.to_string_lossy().parse().ok()),
+            "--relaunch" => relaunch = args.next().map(PathBuf::from),
+            other => {
+                eprintln!("kuvatin-updater: unexpected argument {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(msi), Some(after)) = (msi, after) else {
+        eprintln!("kuvatin-updater: --apply-update <MSI> and --after <PID> are both required");
+        std::process::exit(2);
+    };
+    std::process::exit(run_helper(&msi, after, relaunch.as_deref()));
+}
+```
+
+- [ ] **Step 4: Test the parsing**
+
+Hand-rolled parsing needs its own test. Factor the loop above into
+`fn parse(args: impl Iterator<Item = OsString>) -> Result<Parsed, String>` and
+add to the crate's test module:
+
+```rust
+    fn parsed(args: &[&str]) -> Result<Parsed, String> {
+        parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn reads_the_three_flags() {
+        let p = parsed(&["--apply-update", r"C:\t\k.msi", "--after", "42", "--relaunch", r"C:\p\k.exe"])
+            .expect("all three");
+        assert_eq!(p.msi, PathBuf::from(r"C:\t\k.msi"));
+        assert_eq!(p.after, 42);
+        assert_eq!(p.relaunch, Some(PathBuf::from(r"C:\p\k.exe")));
+    }
+
+    #[test]
+    fn relaunch_is_optional_because_the_pipeline_leaves_it_out() {
+        let p = parsed(&["--apply-update", r"C:\t\k.msi", "--after", "42"]).expect("two");
+        assert_eq!(p.relaunch, None);
+    }
+
+    #[test]
+    fn refuses_a_command_line_it_cannot_act_on() {
+        assert!(parsed(&["--apply-update", r"C:\t\k.msi"]).is_err(), "no --after");
+        assert!(parsed(&["--after", "42"]).is_err(), "no installer");
+        assert!(parsed(&["--after", "not-a-pid", "--apply-update", "k.msi"]).is_err());
+        assert!(parsed(&["--wat"]).is_err());
+    }
+```
+
+- [ ] **Step 5: Point the app at it**
+
+In `crates/kuvatin/src/update/apply.rs`:
+
+- `stage` copies `kuvatin-updater.exe` from beside the running executable
+  rather than copying the executable itself:
+
+```rust
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("kuvatin-updater.exe")))
+            .context("could not find kuvatin-updater.exe beside this program")?;
+        let helper = dir.join("kuvatin-updater.exe");
+        std::fs::copy(&beside, &helper).with_context(|| {
+            format!("could not copy {} to {}", beside.display(), helper.display())
+        })?;
+```
+
+- `hand_off` keeps its shape: it already runs `staged.helper` with the three
+  flags, and that is now the updater rather than a copy of the app.
+
+- [ ] **Step 6: Take the mode back out of the app**
+
+Remove `--apply-update`, `--after` and `--relaunch` from
+`crates/kuvatin/src/cli.rs`, the `Mode::ApplyUpdate` variant, its arm in
+`crates/kuvatin/src/main.rs`, and the three tests Task 9 added. The app no
+longer installs anything; it stages and hands over.
+
+- [ ] **Step 7: Run everything**
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p kuvatin -p kuvatin-updater
+```
+
+- [ ] **Step 8: Prove it starts where it will actually run**
+
+The whole point of this task. Build the updater, copy **only** the executable
+into an empty folder, and run it with a command line it will refuse:
+
+```bash
+cargo build -p kuvatin-updater
+mkdir -p /c/Users/ville/AppData/Local/Temp/kuvatin-alone
+cp target/debug/kuvatin-updater.exe /c/Users/ville/AppData/Local/Temp/kuvatin-alone/
+/c/Users/ville/AppData/Local/Temp/kuvatin-alone/kuvatin-updater.exe --wat; echo "exit: $?"
+```
+
+Expected: `exit: 2` and the usage complaint on stderr. An exit of 255, or a
+message about a missing DLL, means it still depends on something that is not
+beside it, and the task is not done. Do the same with `target/debug/kuvatin.exe`
+to see the failure this task exists to fix.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add -A
+git commit -m "The updater is its own program, so it can run with nothing beside it"
+```
+
+---
+
+### Task 19: Ship and exercise the updater
+
+**Files:**
+- Modify: `crates/kuvatin/wix/main.wxs`
+- Modify: `.github/workflows/release.yml`
+
+- [ ] **Step 1: Install it beside the app**
+
+The updater has to be in the install folder for `stage` to copy it. In
+`crates/kuvatin/wix/main.wxs`, find the component holding `kuvatin.exe` in the
+`Bin` directory and add a `File` for `kuvatin-updater.exe` next to it,
+following the shape of the entry already there. Check how the build passes the
+executable's path in: if it comes from a preprocessor variable, the new file
+needs one too, and `.github/workflows/release.yml` must define it where it
+defines the others.
+
+- [ ] **Step 2: Build the installer the way the pipeline does**
+
+Do not run the installer. Build it only, following the command in
+`crates/kuvatin/wix/README.md`, and confirm `light` does not complain about the
+new file. If building the installer locally is not possible, say so and rely on
+the pipeline, but say it plainly rather than leaving it untested.
+
+- [ ] **Step 3: Update the pipeline step**
+
+In `.github/workflows/release.yml`, the "Update test" step copies
+`kuvatin.exe` and runs it. It now copies `kuvatin-updater.exe` from
+`C:\Program Files\kuvatin\bin\` instead, and runs that. Two assertions are
+worth adding while you are there:
+
+- that `kuvatin-updater.exe` exists in the install folder at all, which proves
+  Step 1 worked;
+- that the staging folder holds **only** the updater and the installer, which
+  is what makes the "it runs with nothing beside it" claim true on the runner
+  rather than accidentally true because GStreamer happens to be on `PATH`.
+
+The second one matters: the previous version of this step passed on the runner
+for the wrong reason.
+
+- [ ] **Step 4: Check the YAML parses**
+
+Run: `python -c "import yaml,io; yaml.safe_load(io.open('.github/workflows/release.yml', encoding='utf-8')); print('yaml ok')"`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A
+git commit -m "The installer ships the updater, and the pipeline runs that one"
 ```

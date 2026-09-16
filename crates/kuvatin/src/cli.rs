@@ -252,6 +252,16 @@ mod tests {
         assert!(matches!(mode_of(&["--sequence-mp4"]), Mode::Invalid(_)));
     }
 
+    /// Installing an update is `kuvatin-updater`'s job, not the app's: the
+    /// app cannot replace its own running executable, and a program that
+    /// imports libraries from the folder being replaced cannot do it either.
+    #[test]
+    fn the_app_does_not_install_updates_itself() {
+        assert!(parse_err(&["--apply-update", r"C:\tmp\k.msi"]));
+        assert!(parse_err(&["--after", "4321"]));
+        assert!(parse_err(&["--relaunch", r"C:\tmp\kuvatin.exe"]));
+    }
+
     #[test]
     fn repairs_the_drive_root_quote_artifact() {
         assert_eq!(

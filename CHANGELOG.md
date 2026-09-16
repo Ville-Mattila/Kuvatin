@@ -15,10 +15,20 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **Updates install themselves.** Clicking the update badge now offers to
+  install the new version instead of opening a web page: Kuvatin downloads the
+  installer, checks it against the checksum published with it, then closes,
+  installs and opens again. The update check is still opt-in and still the
+  only thing that reaches the network unless you ask.
+
 ### Fixed
 - Moving or scaling a clip while it is still starting up, as when a
   transform slider is nudged right after a clip is added to a playing
   preview, no longer freezes the app for good.
+- The window opens larger, so the timeline and the inspector both fit without
+  resizing it first. On a screen too small for that it opens as large as the
+  desktop allows.
 
 ## [2.12.0] - 2026-09-16
 Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and
