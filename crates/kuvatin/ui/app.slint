@@ -287,9 +287,21 @@ export component AppWindow inherits Window {
     in-out property <bool> update-check-enabled: false;
     in property <string> update-status: "";
     in property <string> update-available: "";  // newer version, "" when none/unknown
+    in property <string> app-version;           // the version running right now
+    // 0 none, 1 confirm, 2 working, 3 failed.
+    in-out property <int> update-phase: 0;
+    // 0..1, or negative when the server did not say how big the file is.
+    in property <float> update-progress: -1;
+    in property <string> update-step: "";
+    in property <string> update-error: "";
+    in property <bool> update-unsaved: false;
     callback update-check-toggled(bool);
     callback check-updates-now();
     callback open-releases();
+    callback update-open();
+    callback update-start();
+    callback update-cancel();
+    callback update-save-first();
     callback apply-crop();
 
     // Central image viewer.
@@ -332,6 +344,9 @@ export component AppWindow inherits Window {
         if (root.importing) { root.import-cancel(); return EventResult.accept; }
         if (root.confirm-delete) { root.confirm-delete = false; return EventResult.accept; }
         if (root.confirm-open-project) { root.confirm-open-project = false; return EventResult.accept; }
+        // The update dialog, but only where it may be dismissed: a download in
+        // flight (phase 2) is stopped with Cancel, which also stops the worker.
+        if (root.update-phase == 1 || root.update-phase == 3) { root.update-phase = 0; return EventResult.accept; }
         // No modal is up: Esc stops a running image batch, the way it aborts an
         // import. Harmless in Video mode, where `running` is never set.
         if (root.running) { root.convert-cancel(); return EventResult.accept; }
@@ -534,7 +549,7 @@ export component AppWindow inherits Window {
                     background: badge-ta.has-hover ? Theme.accent-pressed : Theme.accent;
                     animate background { duration: 120ms; }
                     accessible-role: button;
-                    accessible-label: "Update available: version " + root.update-available + ". Opens the download page.";
+                    accessible-label: "Update available: version " + root.update-available + ". Opens the update dialog.";
                     badge-t := Text {
                         text: "Update " + root.update-available + " available";
                         color: Theme.on-accent;
@@ -545,7 +560,7 @@ export component AppWindow inherits Window {
                     }
                     badge-ta := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.open-releases(); }
+                        clicked => { root.update-open(); }
                     }
                 }
             }
@@ -2150,6 +2165,88 @@ export component AppWindow inherits Window {
                 DialogButton {
                     text: "Open…"; primary: true; min-width: 92px;
                     clicked => { root.confirm-open-project = false; root.video-open-project-confirmed(); }
+                }
+            }
+        }
+
+        // The update, in three states: ask (1), download and install (2), and
+        // the one where it did not work (3). The badge opens the first.
+        if root.update-phase == 1 : Modal {
+            card-width: 430px; card-height: root.update-unsaved ? 224px : 190px; card-spacing: 12px;
+            title: "Update Kuvatin?";
+            default-action => { root.update-phase = 2; root.update-start(); }
+            Text {
+                text: "Kuvatin " + root.update-available + " is available";
+                color: Theme.ink; font-size: 15px; font-weight: 700;
+            }
+            Text {
+                text: "You are running " + root.app-version + ". Kuvatin will close, install the update, and open again. Windows will ask for administrator rights once.";
+                color: Theme.muted; font-size: 12px; wrap: word-wrap; vertical-stretch: 1;
+            }
+            if root.update-unsaved : Text {
+                text: "The timeline has changes that have not been saved. Closing loses them.";
+                color: Theme.danger; font-size: 12px; wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                DialogButton { text: "What is new"; clicked => { root.open-releases(); } }
+                Rectangle { horizontal-stretch: 1; }
+                DialogButton { text: "Not now"; clicked => { root.update-phase = 0; } }
+                if root.update-unsaved : DialogButton {
+                    text: "Save first…"; min-width: 104px;
+                    clicked => { root.update-phase = 0; root.update-save-first(); }
+                }
+                DialogButton {
+                    text: "Update"; primary: true; min-width: 92px;
+                    clicked => { root.update-phase = 2; root.update-start(); }
+                }
+            }
+        }
+
+        if root.update-phase == 2 : Modal {
+            card-width: 430px; card-height: 156px; card-spacing: 12px;
+            title: "Updating Kuvatin";
+            // No default-action: a progress dialog must not be dismissed by
+            // leaning on Return.
+            Text { text: "Updating Kuvatin"; color: Theme.ink; font-size: 15px; font-weight: 700; }
+            Text {
+                text: root.update-step; color: Theme.muted; font-size: 12px;
+                wrap: word-wrap; vertical-stretch: 1;
+            }
+            Rectangle {
+                height: 6px; border-radius: 3px; background: Theme.well;
+                Rectangle {
+                    x: 0; height: parent.height; border-radius: 3px; background: Theme.accent;
+                    width: root.update-progress < 0 ? parent.width : parent.width * root.update-progress;
+                    opacity: root.update-progress < 0 ? 0.45 : 1.0;
+                }
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                DialogButton { text: "Cancel"; clicked => { root.update-cancel(); } }
+            }
+        }
+
+        if root.update-phase == 3 : Modal {
+            card-width: 430px; card-height: 186px; card-spacing: 12px;
+            title: "The update did not go through";
+            default-action => { root.update-phase = 0; }
+            Text {
+                text: "The update did not go through";
+                color: Theme.ink; font-size: 15px; font-weight: 700;
+            }
+            Text {
+                text: root.update-error; color: Theme.muted; font-size: 12px;
+                wrap: word-wrap; vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                Rectangle { horizontal-stretch: 1; }
+                DialogButton { text: "Close"; clicked => { root.update-phase = 0; } }
+                DialogButton {
+                    text: "Download page"; primary: true; min-width: 120px;
+                    clicked => { root.update-phase = 0; root.open-releases(); }
                 }
             }
         }
