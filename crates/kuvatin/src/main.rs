@@ -143,9 +143,6 @@ fn main() {
     // A windowed exe run from a terminal joins that terminal's console, so
     // `--register` / errors print where the user is looking.
     shell::attach_parent_console();
-    applog::install_panic_hook();
-    configure_bundled_gstreamer();
-    configure_batch_memory();
     let args: Vec<std::ffi::OsString> = std::env::args_os()
         .map(|a| cli::repair_drive_root(&a))
         .collect();
@@ -154,7 +151,22 @@ fn main() {
     if quiet {
         shell::set_quiet(true);
     }
-    match cli.into_mode() {
+    let mode = cli.into_mode();
+    // The uninstaller's SYSTEM pass is dispatched FIRST, before the panic hook
+    // and the engine setup. As SYSTEM, %LOCALAPPDATA% resolves inside
+    // C:\Windows\System32\config\systemprofile, so applog's crash log — and
+    // anything else that writes where a user's files go — would leave a
+    // brand-new folder behind, which is exactly what this mode exists to
+    // remove. It reports on stdout, which the installer's WixQuietExec64
+    // action captures into the MSI log, and its exit code says whether the run
+    // happened at all.
+    if matches!(mode, Mode::UnregisterAllUsers) {
+        std::process::exit(shell::unregister_all_users());
+    }
+    applog::install_panic_hook();
+    configure_bundled_gstreamer();
+    configure_batch_memory();
+    match mode {
         Mode::Register => {
             applog::log(&format!("register context menu ({})", applog::context()));
             or_fail(
@@ -170,6 +182,10 @@ fn main() {
                 shell::unregister(),
             );
             applog::log("unregister done");
+        }
+        // Handled above, before the panic hook and the engine setup.
+        Mode::UnregisterAllUsers => {
+            unreachable!("--unregister-all-users is dispatched earlier")
         }
         Mode::Invalid(reason) => fail("Kuvatin", anyhow::anyhow!("{reason}")),
         Mode::PrintExtensions => {

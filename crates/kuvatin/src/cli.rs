@@ -35,6 +35,14 @@ pub struct Cli {
     #[arg(long)]
     pub unregister: bool,
 
+    /// Remove the Explorer context-menu entries for EVERY account and exit
+    /// (the installer runs this as SYSTEM during uninstall).
+    #[arg(
+        long,
+        conflicts_with_all = ["register", "unregister", "preset", "sequence_mp4", "print_extensions"]
+    )]
+    pub unregister_all_users: bool,
+
     /// Never show dialogs (the installer runs --register/--unregister with this).
     #[arg(long)]
     pub quiet: bool,
@@ -53,6 +61,10 @@ pub struct Cli {
 pub enum Mode {
     Register,
     Unregister,
+    /// The uninstaller's SYSTEM pass: clean every account on the machine. It
+    /// runs in no user's profile, so `main` dispatches it before anything that
+    /// would write into one.
+    UnregisterAllUsers,
     PrintExtensions,
     QuickRun {
         preset: String,
@@ -75,6 +87,8 @@ impl Cli {
             Mode::Register
         } else if self.unregister {
             Mode::Unregister
+        } else if self.unregister_all_users {
+            Mode::UnregisterAllUsers
         } else if self.print_extensions {
             Mode::PrintExtensions
         } else if self.sequence_mp4 {
@@ -159,6 +173,28 @@ mod tests {
         assert_eq!(mode_of(&["--unregister", "--quiet"]), Mode::Unregister);
         assert_eq!(mode_of(&["--print-extensions"]), Mode::PrintExtensions);
         assert!(parse_err(&["--print-extensions", "--register"]));
+    }
+
+    /// The installer's SYSTEM pass. It takes `--quiet` and nothing else: every
+    /// other headless mode wants a profile this one is not running in.
+    #[test]
+    fn unregister_all_users_flag() {
+        assert_eq!(
+            mode_of(&["--unregister-all-users", "--quiet"]),
+            Mode::UnregisterAllUsers
+        );
+        // Mutually exclusive with every other headless mode.
+        assert!(parse_err(&["--unregister-all-users", "--register"]));
+        assert!(parse_err(&["--unregister-all-users", "--unregister"]));
+        assert!(parse_err(&["--unregister-all-users", "--preset", "X"]));
+        assert!(parse_err(&["--unregister-all-users", "--sequence-mp4"]));
+        assert!(parse_err(&["--unregister-all-users", "--print-extensions"]));
+        // A PATH plays no part in it, exactly as for --register/--unregister:
+        // the mode cleans every account, not something somebody selected.
+        assert_eq!(
+            mode_of(&["--unregister-all-users", "a.png"]),
+            Mode::UnregisterAllUsers
+        );
     }
 
     #[test]

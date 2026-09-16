@@ -19,9 +19,7 @@ mod verbs;
 #[cfg(windows)]
 mod windows;
 
-// Imported by main.rs's `--unregister-all-users` arm, a later task in this plan.
 #[cfg(windows)]
-#[allow(unused_imports)]
 pub use allusers::unregister_all_users;
 #[cfg(windows)]
 pub use windows::{
@@ -42,6 +40,15 @@ pub fn register() -> anyhow::Result<()> {
 #[cfg(not(windows))]
 pub fn unregister() -> anyhow::Result<()> {
     anyhow::bail!("context-menu registration is only supported on Windows")
+}
+
+/// Remove the context menu, the menu package and the leftover files for every
+/// account; no-op off Windows, where there is none of that to remove. The code
+/// is the Windows path's "the run happened", because it did: there was nothing
+/// to do.
+#[cfg(not(windows))]
+pub fn unregister_all_users() -> i32 {
+    0
 }
 
 /// Best-effort self-healing registration for GUI startup; no-op off Windows.
