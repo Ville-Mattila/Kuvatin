@@ -223,7 +223,6 @@ const DEPLOYMENT_POLL: Duration = Duration::from_millis(250);
 
 /// One account a registration belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Read by `unregister_all_users`'s caller: `--unregister-all-users`.
 pub(super) struct PackageUser {
     /// The account's SID, as the deployment service spells it.
     pub sid: String,
@@ -233,7 +232,6 @@ pub(super) struct PackageUser {
 
 /// One registration of our package, and who it is registered for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Read by `unregister_all_users`'s caller: `--unregister-all-users`.
 pub(super) struct Registration {
     /// The package full name, which is what a removal is asked for by.
     pub full_name: String,
@@ -278,7 +276,6 @@ impl Registration {
 
 /// What one removal came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Built by `unregister_all_users`, for `--unregister-all-users`.
 pub(super) enum Removal {
     /// The deployment service reported no error.
     Gone,
@@ -302,7 +299,6 @@ struct Removals {
 
 /// How far the sweep got before it had anything to sweep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Read by `unregister_all_users`'s caller: `--unregister-all-users`.
 pub(super) enum PackageReach {
     /// The deployment service answered and the sweep ran. Whether it found
     /// anything is `found`'s business.
@@ -318,7 +314,6 @@ pub(super) enum PackageReach {
 impl PackageReach {
     /// How the uninstall should say this, so whoever prints does not have to
     /// work it out again.
-    #[allow(dead_code)] // Printed by `--unregister-all-users`.
     pub(super) fn wording(&self) -> &'static str {
         match self {
             PackageReach::Swept => "the deployment service answered",
@@ -335,7 +330,6 @@ impl PackageReach {
 /// What removing the package for every account came to, ready for the uninstall
 /// to print. Nothing here has been printed or logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Read by `unregister_all_users`'s caller: `--unregister-all-users`.
 pub(super) struct PackageSweep {
     /// How far the sweep got.
     pub reach: PackageReach,
@@ -381,7 +375,6 @@ type Found = (Vec<Registration>, Option<String>);
 /// Best effort throughout: every failure is recorded and the rest carries on,
 /// because a second account's registration is no less worth removing for the
 /// first one having gone wrong.
-#[allow(dead_code)] // The caller is the `--unregister-all-users` entry point, a later task.
 pub(super) fn unregister_all_users() -> PackageSweep {
     if !os_supports_package() {
         return PackageSweep::nothing_attempted(PackageReach::Unsupported, Vec::new());

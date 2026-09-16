@@ -1,4 +1,6 @@
 #[cfg(windows)]
+mod allusers;
+#[cfg(windows)]
 mod files;
 #[cfg(windows)]
 mod hive;
@@ -17,6 +19,10 @@ mod verbs;
 #[cfg(windows)]
 mod windows;
 
+// Imported by main.rs's `--unregister-all-users` arm, a later task in this plan.
+#[cfg(windows)]
+#[allow(unused_imports)]
+pub use allusers::unregister_all_users;
 #[cfg(windows)]
 pub use windows::{
     attach_parent_console, ensure_registered, menu_extensions, notify_error, register, set_quiet,

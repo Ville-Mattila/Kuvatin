@@ -33,13 +33,9 @@
 //! `HKEY_USERS\S-1-5-21-…_Classes\an empty path names no key` is clumsy, but it
 //! is also a bug in the caller, and the only way to reach it.
 //!
-//! The per-user unregister in `windows.rs` deletes through this module, so
-//! most of it is live. What is not called outside `#[cfg(test)]` yet is
-//! `is_reg_link`, because the path that needs it is the offline one: a later
-//! task in the all-users-uninstall plan mounts each profile's hive and has to
-//! open keys for writing in a hive whose owner may have planted links. Until
-//! then, allow it.
-#![allow(dead_code)]
+//! The per-user unregister in `windows.rs` and the all-users one in
+//! `super::hive` both delete through this module, so all of it is live bar
+//! `is_reg_link`, which carries its own allow and says why there.
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Wdk::System::Registry::NtDeleteKey;
@@ -150,6 +146,7 @@ impl OwnedKey {
     /// this module hands out. For a caller that had to call `RegCreateKeyExW`
     /// or the like itself; never for a handle an `OwnedKey` already holds,
     /// which would close it twice.
+    #[allow(dead_code)] // Only the tests create keys of their own; production only ever opens.
     pub(super) fn own(h: HKEY) -> Self {
         OwnedKey(h)
     }
@@ -192,6 +189,9 @@ pub(super) fn open_owned(root: HKEY, subpath: &str) -> Option<OwnedKey> {
 /// that is there and will not open is not the same as no key, and an uninstall
 /// that treats it as no key moves on and leaves it.
 pub(super) enum Found {
+    // The handle is carried rather than read: holding it is what keeps the key
+    // open for as long as the arm that matched it, and closes it after.
+    #[allow(dead_code)]
     Key(OwnedKey),
     Absent,
     /// Why it would not open, in words fit to print, naming the key.
@@ -325,6 +325,10 @@ fn is_link_handle(h: HKEY) -> bool {
 /// Carries the same caveat as `is_link_handle`: a plain key can be dressed up
 /// to look like this, so treat a `true` as "do not walk through it", not as
 /// "this key is not mine to delete".
+// Asked by the tests, which pin what Windows does with a planted link. The
+// walks here need no caller: `open_through` holds the handle it just opened and
+// asks `is_link_handle` about that, rather than resolving a name twice.
+#[allow(dead_code)]
 pub(super) fn is_reg_link(root: HKEY, subpath: &str) -> Result<bool, String> {
     // `open_component` passes REG_OPTION_OPEN_LINK, which opens the link itself
     // rather than its target — and, as ever, protects only the last segment,

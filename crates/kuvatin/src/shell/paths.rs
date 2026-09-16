@@ -43,10 +43,8 @@
 //! reading that account's own environment out of its hive, and a wrong answer
 //! there is a directory this uninstall would then delete as SYSTEM.
 //!
-//! Nothing outside `#[cfg(test)]` calls into this module yet: the caller is
-//! the all-users file walk of the `--unregister-all-users` entry point, a
-//! later task in that plan. Until then, allow the otherwise-unused items.
-#![allow(dead_code)]
+//! The caller is `super::allusers`, the `--unregister-all-users` entry point:
+//! it plans each account's files here and hands the plan to [`super::files`].
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

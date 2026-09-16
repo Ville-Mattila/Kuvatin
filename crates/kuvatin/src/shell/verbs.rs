@@ -136,9 +136,8 @@ pub(super) struct VerbSweep {
     pub lines: Vec<SweepLine>,
 }
 
-// The per-user unregister walks `lines` itself; these are for the all-users
-// uninstall, whose orchestrator is a later task in that plan.
-#[allow(dead_code)]
+// The per-user unregister walks `lines` itself; these are what the all-users
+// uninstall's orchestrator, `super::allusers`, reports each account with.
 impl VerbSweep {
     /// Every reason the key list may be short. Empty on a hive that read in
     /// full, which is every hive nobody has locked anything in.

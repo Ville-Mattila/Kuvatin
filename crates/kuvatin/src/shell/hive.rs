@@ -57,10 +57,8 @@
 //! all-users uninstall exists to remove. The orchestrator prints what comes
 //! back here to stdout.
 //!
-//! Nothing outside `#[cfg(test)]` calls this yet: the orchestrator that walks
-//! every profile and prints these results is a later task in the
-//! all-users-uninstall plan.
-#![allow(dead_code)]
+//! The orchestrator that walks every profile and prints these results is
+//! `super::allusers`, the `--unregister-all-users` entry point.
 
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -96,6 +94,7 @@ const USRCLASS_UNDER_PROFILE: [&str; 5] =
 
 /// Where a profile's classes hive file lives, named but not vouched for.
 /// Anything that means to *load* it wants `checked_usrclass_path`.
+#[allow(dead_code)] // Only the tests name a hive file without vetting it; production must not.
 pub(super) fn usrclass_path(profile_dir: &Path) -> PathBuf {
     let mut path = profile_dir.to_path_buf();
     for step in USRCLASS_UNDER_PROFILE {

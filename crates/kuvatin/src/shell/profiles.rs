@@ -2,12 +2,8 @@
 //! `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`, so the
 //! all-users uninstall can visit each one's classes hive and files.
 //!
-//! `Profile` is already in use by the offline-hive walk; `all()` is not called
-//! outside `#[cfg(test)]` yet, because what calls it is the all-users entry
-//! point — the `--unregister-all-users` mode, a later task in that plan, which
-//! is the one thing that has a reason to walk every account. Until then, allow
-//! the otherwise-unused helpers.
-#![allow(dead_code)]
+//! `all()` is called by `super::allusers`, the `--unregister-all-users` entry
+//! point, which is the one thing that has a reason to walk every account.
 
 use std::os::windows::fs::MetadataExt;
 use std::path::PathBuf;
