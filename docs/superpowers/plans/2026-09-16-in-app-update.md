@@ -1853,7 +1853,9 @@ the menu registered:
           # built: same version, so MajorUpgrade's AllowSameVersionUpgrades
           # is what makes it a legal reinstall.
           $msi = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
-          $installed = "$env:ProgramFiles\Kuvatin\kuvatin.exe"
+          # The install step above checks this exact path; the product
+          # installs into bin\, not straight into the product folder.
+          $installed = "C:\Program Files\kuvatin\bin\kuvatin.exe"
           if (-not (Test-Path $installed)) { throw "no installed kuvatin.exe to copy: the install step did not run" }
           $stage = Join-Path $env:TEMP 'kuvatin\update'
           New-Item -ItemType Directory -Force $stage | Out-Null
@@ -1868,9 +1870,21 @@ the menu registered:
           if ($p.ExitCode -ne 0) { throw "the staged updater exited $($p.ExitCode)" }
 
           if (-not (Test-Path $installed)) { throw 'the update removed the app instead of replacing it' }
-          $product = Get-CimInstance Win32_Product -Filter "Name='Kuvatin'" -ErrorAction SilentlyContinue
+          # Deliberately NOT Win32_Product: enumerating it runs a consistency
+          # check against every installed package and can reconfigure them.
+          # The uninstall registry key answers the same question for nothing.
+          $keys = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $product = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1
           if (-not $product) { throw 'Kuvatin is no longer registered as installed' }
-          Write-Host "updater ran clean; Kuvatin $($product.Version) is installed"
+          $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
+          if (-not (Test-Path (Join-Path $startMenu 'Kuvatin.lnk'))) {
+            throw 'the update left the all-users Start menu shortcut behind'
+          }
+          Write-Host "updater ran clean; Kuvatin $($product.DisplayVersion) is installed"
 
           # It deletes the installer it used and leaves its own copy for the
           # app to sweep on next start.
