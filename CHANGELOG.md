@@ -19,6 +19,9 @@ something is fixed.
 - Moving or scaling a clip while it is still starting up, as when a
   transform slider is nudged right after a clip is added to a playing
   preview, no longer freezes the app for good.
+- The window opens larger, so the timeline and the inspector both fit without
+  resizing it first. On a screen too small for that it opens as large as the
+  desktop allows.
 
 ## [2.12.0] - 2026-09-16
 Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and

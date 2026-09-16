@@ -16,6 +16,7 @@ mod updates;
 mod video;
 #[cfg(windows)]
 mod win_drop;
+mod window_size;
 
 use anyhow::{anyhow, Result};
 use image_mode::ImageState;
@@ -109,6 +110,34 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let store = Arc::new(Mutex::new(PresetStore::load_or_init(&store_path)?));
 
     let ui = AppWindow::new()?;
+    // preferred-width/height in app.slint is what we ask for. A 1080p desktop
+    // has less usable height than that once the taskbar is out, and a window
+    // taller than the desktop cannot be dragged back into view.
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        };
+        let mut area = RECT::default();
+        let got = unsafe {
+            SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some((&mut area as *mut RECT).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        if got.is_ok() {
+            let (aw, ah) = (
+                (area.right - area.left).max(0) as u32,
+                (area.bottom - area.top).max(0) as u32,
+            );
+            let (w, h) = window_size::opening_size(1584, 1008, aw, ah);
+            ui.window()
+                .set_size(slint::LogicalSize::new(w as f32, h as f32));
+        }
+    }
     // Every repeating timer lives here, owned by run(): a forgotten timer kept
     // its closure — and the Rc<RefCell<Option<Project>>> inside — alive past
     // the window, so the project was never dropped and GStreamer threads were
