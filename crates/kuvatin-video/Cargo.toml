@@ -17,7 +17,7 @@ gstreamer-pbutils = { version = "0.23", features = ["v1_20"] }
 # v1_20 enables GESVideoSource::natural_size (aspect-correct scaling); v1_24
 # the discoverer manager, whose timeout keeps an unreachable file from wedging
 # an import forever. The bundled SDK is 1.26, so both are present.
-gstreamer-editing-services = { version = "0.23", features = ["v1_20", "v1_24"] }
+gstreamer-editing-services = { version = "0.25", features = ["v1_20", "v1_24"] }
 anyhow = { workspace = true }
 # The saved project format (document.rs): the same pair the presets use.
 serde = { workspace = true }
