@@ -3,8 +3,8 @@
 //! **every** account on the machine.
 //!
 //! The installer runs this as SYSTEM, from a deferred custom action, while the
-//! exe it is running still exists. Two rules follow from that, and they are the
-//! shape of this module:
+//! exe it is running still exists. Three rules follow from that, and they are
+//! the shape of this module:
 //!
 //! * It prints to **stdout** and nowhere else. `crate::applog` as SYSTEM would
 //!   resolve `%LOCALAPPDATA%` to `C:\Windows\System32\config\systemprofile\…`
@@ -15,6 +15,11 @@
 //!   uninstall carries on whatever this says; one account whose hive is locked
 //!   must not cost the other accounts theirs. What the run could not do is
 //!   said, in the log, where somebody can read it and act on it.
+//! * Nothing here waits for ever, either, and for the same reason: the accounts
+//!   are visited one after another, so an account that could hold its own step
+//!   open would hold up every account after it. Each one's file walk gets
+//!   [`FILE_BUDGET`] and no more; the package sweep brings a deadline of its
+//!   own; and the registry work is bounded by the hive it is walking.
 //!
 //! The work is gathered first and printed afterwards, and that is what makes it
 //! testable: [`gather`] is all the machine-touching, and [`opening`] and
@@ -31,11 +36,14 @@
 //! service still leaves a sign in the MSI log that it began.
 
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use super::files::{self, FileSweep};
 use super::hive::{self, HiveAccess, HiveOutcome};
 use super::package::{self, PackageReach, PackageSweep, PackageUser};
-use super::paths;
+use super::paths::{self, FilePlan};
 use super::profiles::{self, Profile};
 use super::verbs::VerbSweep;
 
@@ -61,6 +69,30 @@ const EXIT_NO_ACCOUNTS: i32 = 2;
 /// too. Three and a count says as much as three hundred lines and leaves the
 /// rest of the uninstall log readable.
 const CAP: usize = 3;
+
+/// How long one account's file walk may run before the uninstall stops waiting
+/// for it and goes on to the next account.
+///
+/// There is a hole without it. `std::fs::remove_dir_all` starts its enumeration
+/// again for every subdirectory it meets and caps nothing, so an account that
+/// keeps creating directories under its own `AppData\Local\Temp\kuvatin` while
+/// the sweep is running can keep it in that loop for as long as it cares to.
+/// Nothing is gained by it — the files are that account's own, and SYSTEM
+/// reaches nowhere here it could not already reach — but this runs in a deferred
+/// custom action, so one account could hold the whole machine's uninstall open,
+/// and an uninstall that an unprivileged account can hang is worth closing for
+/// its own sake.
+///
+/// Sixty seconds because an ordinary account's file work is milliseconds: three
+/// named files, one temp tree and one package data folder. A profile on a slow,
+/// fragmented or network-backed disk might want a second or two; a thousand
+/// times that is not a profile taking its time, it is a profile that will not
+/// finish. The budget is per account, so a machine with N accounts could spend
+/// N × 60 s in the worst case — only an account that reaches the budget spends
+/// any of it, and a budget across the whole run is a possible follow-up if a
+/// real machine ever shows one, exactly as `super::package`'s per-operation
+/// deadline leaves its own total open.
+const FILE_BUDGET: Duration = Duration::from_secs(60);
 
 /// What every line of the report opens with, so these lines can be picked out
 /// of an MSI log carrying everything else the uninstall did.
@@ -134,8 +166,23 @@ struct Account {
     /// What `paths::package_data_dirs` could not read under its `Packages`
     /// folder. Each line is already `<path>: <what happened>`.
     dirs: Vec<String>,
-    /// Its files.
-    files: FileSweep,
+    /// Its files, when the walk over them finished inside [`FILE_BUDGET`].
+    files: FileWork,
+}
+
+/// What one account's file walk came to, or why there is nothing to say about
+/// it.
+#[derive(Debug)]
+enum FileWork {
+    /// It finished, and this is what it did.
+    Done(FileSweep),
+    /// It was still going when [`FILE_BUDGET`] ran out. Nothing is counted from
+    /// it: whatever it had removed by then belongs to a walk that had not
+    /// finished, and counting half of one as a whole is how a machine gets
+    /// called clean that is not.
+    OutOfTime,
+    /// It ended without answering, and this is what that looked like from here.
+    Lost(String),
 }
 
 /// The report, ready to print, and what the process should exit with.
@@ -183,16 +230,54 @@ fn gather(elevated: bool) -> Run {
 /// the length of a disk walk, for no gain whatever.
 fn clean(profile: &Profile) -> Account {
     let hive = hive::clean_profile(profile);
+    // The glob is left outside the budget below: it is one directory listing,
+    // which ends when it has read the entries that were there. Nothing about it
+    // can be made to start again.
     let (dirs, trouble) = paths::package_data_dirs(&profile.dir);
     let plan = paths::plan(&profile.dir, &dirs);
-    // `profile.dir` itself and not a path built to look like it: the walk
-    // strips this exact path off the front of every planned path, component by
-    // component.
-    let files = files::remove_plan(&profile.dir, &plan);
     Account {
         hive,
         dirs: trouble,
-        files,
+        // `profile.dir` itself and not a path built to look like it: the walk
+        // strips this exact path off the front of every planned path, component
+        // by component, so it wants the value `profiles::vet_dir` vouched for.
+        files: remove_within_budget(profile.dir.clone(), plan),
+    }
+}
+
+/// Carry out one account's file plan, and stop waiting for it after
+/// [`FILE_BUDGET`].
+///
+/// On a thread of its own, with the wait on a channel, because that is the only
+/// place the waiting can be bounded from. What does not end is inside a single
+/// `remove_dir_all` call, so a deadline checked between the plan's entries would
+/// bound how many entries are attempted and not the one that never returns. And
+/// nothing in [`super::files`] changes for it, which is the point: that walk's
+/// argument about junctions, held handles and re-read attributes is a delicate
+/// thing, and a deadline threaded through it would be a second reader of every
+/// step for no gain here.
+///
+/// A walk that runs out of time is left running rather than stopped. It cannot
+/// be stopped — there is no way to interrupt a thread mid-syscall that is safe
+/// to do to one holding open handles — and it does not need to be: what it
+/// holds are handles inside that one account's profile, which it opened and
+/// vetted itself. It either finishes on its own, unwatched, or it ends with this
+/// process a moment later.
+fn remove_within_budget(profile: PathBuf, plan: FilePlan) -> FileWork {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // A send nobody is waiting for any more is not an error worth having:
+        // the budget ran out and the answer is late, which is what the caller
+        // has already said.
+        let _ = tx.send(files::remove_plan(&profile, &plan));
+    });
+    match rx.recv_timeout(FILE_BUDGET) {
+        Ok(sweep) => FileWork::Done(sweep),
+        Err(mpsc::RecvTimeoutError::Timeout) => FileWork::OutOfTime,
+        // The sender went without sending, which only a panic in the walk does.
+        Err(mpsc::RecvTimeoutError::Disconnected) => FileWork::Lost(
+            "its file walk ended without a word, which nothing but a panic does".to_string(),
+        ),
     }
 }
 
@@ -391,22 +476,33 @@ fn under(hive: &str, lines: Vec<&str>) -> Vec<String> {
         .collect()
 }
 
-/// What came off one account's disk.
+/// What came off one account's disk, or what became of the walk that was
+/// taking it off.
 fn file_lines(account: &Account, out: &mut Lines) {
-    let files = &account.files;
-    out.detail(format!(
-        "files: {} removed, {} already gone; {} folder tree(s) removed, {} already gone; \
-         {} folder(s) pruned.",
-        files.files_removed,
-        files.files_absent,
-        files.trees_removed,
-        files.trees_absent,
-        files.pruned
-    ));
+    match &account.files {
+        FileWork::Done(files) => out.detail(format!(
+            "files: {} removed, {} already gone; {} folder tree(s) removed, {} already gone; \
+             {} folder(s) pruned.",
+            files.files_removed,
+            files.files_absent,
+            files.trees_removed,
+            files.trees_absent,
+            files.pruned
+        )),
+        FileWork::OutOfTime => out.detail(format!(
+            "files: still going after {} seconds, so the run stopped waiting and moved on to the \
+             next account. What it had removed by then is not counted here; it either finishes on \
+             its own or ends when this process does.",
+            FILE_BUDGET.as_secs()
+        )),
+        FileWork::Lost(why) => out.detail(format!("files: {why}")),
+    }
     // Both capped: a `Packages` folder holds names the account chose, and the
     // walk refuses each one it does not like by name.
     out.capped(&account.dirs);
-    out.capped(&files.trouble);
+    if let FileWork::Done(files) = &account.files {
+        out.capped(&files.trouble);
+    }
 }
 
 /// The last two lines: what the run added up to, and what it exits with.
@@ -447,9 +543,9 @@ fn footer_lines(run: &Run, out: &mut Lines) -> i32 {
         run.accounts.len(),
         total(run, |account| account.hive.sweep.removed),
         total(run, |account| account.hive.sweep.refused),
-        total(run, |account| account.files.files_removed),
-        total(run, |account| account.files.trees_removed),
-        total(run, |account| account.files.pruned),
+        total(run, |account| swept(account).map_or(0, |f| f.files_removed)),
+        total(run, |account| swept(account).map_or(0, |f| f.trees_removed)),
+        total(run, |account| swept(account).map_or(0, |f| f.pruned)),
         package_total(run),
         worth_going_back_to(run)
     ));
@@ -462,6 +558,17 @@ fn footer_lines(run: &Run, out: &mut Lines) -> i32 {
 
 fn total(run: &Run, of: impl Fn(&Account) -> usize) -> usize {
     run.accounts.iter().map(of).sum()
+}
+
+/// One account's file counts, when there are any to have. A walk that ran out
+/// of time or ended without a word has none, and adding nothing for it is the
+/// whole point: the footer counts what was seen through, and that account is in
+/// the tally of what to go back to instead.
+fn swept(account: &Account) -> Option<&FileSweep> {
+    match &account.files {
+        FileWork::Done(files) => Some(files),
+        FileWork::OutOfTime | FileWork::Lost(_) => None,
+    }
 }
 
 /// What is left to go back to, as a clause at the end of the footer: the
@@ -494,13 +601,17 @@ fn worth_going_back_to(run: &Run) -> String {
 }
 
 /// Whether one account is worth going back to: anything refused, anything that
-/// would not read, anything that would not go.
+/// would not read, anything that would not go — and a file walk that did not
+/// finish, which is the plainest of them all.
 fn account_reported(account: &Account) -> bool {
     !account.hive.trouble.is_empty()
         || !account.dirs.is_empty()
-        || !account.files.trouble.is_empty()
         || account.hive.sweep.refused > 0
         || !account.hive.sweep.troubles().is_empty()
+        || match &account.files {
+            FileWork::Done(files) => !files.trouble.is_empty(),
+            FileWork::OutOfTime | FileWork::Lost(_) => true,
+        }
 }
 
 /// The package's share of the footer, in the same words the section above used
@@ -633,14 +744,23 @@ mod tests {
                 trouble: Vec::new(),
             },
             dirs: Vec::new(),
-            files: FileSweep {
+            files: FileWork::Done(FileSweep {
                 files_removed: 3,
                 files_absent: 0,
                 trees_removed: 2,
                 trees_absent: 0,
                 pruned: 1,
                 trouble: Vec::new(),
-            },
+            }),
+        }
+    }
+
+    /// One account's file sweep, to be edited by a test that wants a walk which
+    /// finished but had something to say.
+    fn files_of(account: &mut Account) -> &mut FileSweep {
+        match &mut account.files {
+            FileWork::Done(files) => files,
+            other => panic!("this account's file walk did not finish: {other:?}"),
         }
     }
 
@@ -1023,7 +1143,7 @@ mod tests {
     fn refusals_do_not_make_the_run_a_failure() {
         let mut run = ordinary_run();
         run.accounts[0].hive.sweep.refused = 4;
-        run.accounts[0].files.trouble = vec![
+        files_of(&mut run.accounts[0]).trouble = vec![
             r"C:\Users\alice\AppData\Local\Kuvatin\kuvatin.log: we are not allowed to delete it (os error 5)"
                 .to_string(),
         ];
@@ -1134,6 +1254,46 @@ mod tests {
         // without a tally of who had something to say.
         assert!(footer.contains("nothing left registered"), "{footer}");
         assert!(!footer.contains("had something to report"), "{footer}");
+    }
+
+    /// An account can hold its own file walk open for as long as it likes —
+    /// `remove_dir_all` starts again at every subdirectory it meets — so the
+    /// run stops waiting, says so under that account, counts nothing from a
+    /// walk that has not finished, and goes on to the next account.
+    #[test]
+    fn an_account_whose_files_ran_out_of_time_is_said_and_counted() {
+        let mut run = ordinary_run();
+        run.accounts[0].files = FileWork::OutOfTime;
+        let report = full(&run);
+        let lines = &report.lines;
+        let said = at(lines, "still going after");
+
+        assert!(
+            lines[said].contains("60 seconds"),
+            "the budget must be in the line: {}",
+            lines[said]
+        );
+        // Under the account it belongs to, and not the one after it.
+        assert!(
+            at(lines, &format!("{PREFIX}{ALICE}: ")) < said,
+            "{lines:#?}"
+        );
+        assert!(said < at(lines, &format!("{PREFIX}{BOB}: ")), "{lines:#?}");
+
+        // The next account was visited all the same, and the run finished.
+        assert_eq!(report.code, 0, "{lines:#?}");
+        let footer = lines[at(lines, "done:")].to_string();
+        assert!(footer.contains("2 account(s) visited"), "{footer}");
+        assert!(
+            footer.contains("1 account(s) had something to report"),
+            "{footer}"
+        );
+        // Nothing is counted from the walk that did not finish: the totals are
+        // the other account's alone.
+        assert!(
+            footer.contains("3 file(s) and 2 folder tree(s) removed, 1 folder(s) pruned"),
+            "{footer}"
+        );
     }
 
     /// A second enumeration that would not list leaves `remaining` empty and
