@@ -95,10 +95,23 @@ out of the box only that user gets the menu. Two mitigations keep this sane:
   context menu. It never hijacks: a menu owned by another Kuvatin that still
   exists is left alone, and debug builds never touch the registry at all —
   run `--register` explicitly from the copy that should own the menu.
-- **Uninstall is best-effort:** `--unregister` on uninstall cleans the menu
-  for the uninstalling user only. Other users' HKCU entries die on their next
-  launch attempt (the exe is gone, Explorer ignores dead verbs) — accepted
-  limitation of the per-machine + per-user split.
+- **Uninstall cleans every account:** the impersonated `--unregister` cleans
+  the uninstalling user only; a second custom action, `kuvatin.exe
+  --unregister-all-users`, then runs as SYSTEM (deferred, `Impersonate='no'`,
+  `Return='ignore'`) after it and before `KuvatinUntrustCert`. It removes the
+  classic verbs, the sparse package and the per-user files (logs,
+  `%TEMP%\kuvatin`, the package's `AppData\Local\Packages` folder) for
+  **every** profile on the machine — loading a signed-out account's
+  `UsrClass.dat` when its hive is not already mounted. Presets and settings
+  (`%APPDATA%\Kuvatin`) are kept. Registry keys are deleted through handles
+  that never follow a symbolic link, and files are deleted by a walk from the
+  vetted profile root that never follows a junction, so a hostile account
+  cannot redirect the SYSTEM delete elsewhere. It is skipped during a major
+  upgrade (`NOT UPGRADINGPRODUCTCODE`) so other users' menus survive an
+  upgrade; `ensure_registered()` re-heals them per user at next launch. Its
+  report — what ran, what it skipped and why — goes to stdout and lands in
+  the verbose MSI log (`msiexec /x ... /l*v uninstall.log`) under the
+  `KuvatinUnregisterAllUsers` action, every line prefixed `Kuvatin:`.
 
 ## Regenerating main.wxs
 

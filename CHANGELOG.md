@@ -40,6 +40,9 @@ something is fixed.
   behind an open dialog.
 - Ctrl+Enter starts a conversion even while a button has keyboard focus,
   instead of pressing that button.
+- Uninstalling now removes Kuvatin's right-click menu, its Windows 11 menu
+  package and its leftover logs and cache for every account on the PC, not just
+  the account that runs the uninstaller. Your saved presets are kept.
 
 ## [2.11.0] - 2026-09-13
 A smaller release, mostly about images. WebP can now be lossless, for the
