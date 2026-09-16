@@ -29,7 +29,7 @@ pub(super) type ProjectSlot = Rc<RefCell<Option<kuvatin_video::Project>>>;
 pub(super) fn has_unsaved_changes(slot: &ProjectSlot) -> bool {
     slot.borrow()
         .as_ref()
-        .is_some_and(kuvatin_video::Project::is_dirty)
+        .is_some_and(kuvatin_video::Project::has_unsaved_work)
 }
 
 /// Everything the Videos mode owns that more than one handler touches.

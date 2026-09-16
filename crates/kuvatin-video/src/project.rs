@@ -740,6 +740,10 @@ pub struct Project {
     clips: HashMap<String, ges::Clip>,
     /// Set by edits, cleared by `refresh_preview` — coalesces repaints.
     dirty: std::cell::Cell<bool>,
+    /// Set by edits, cleared only by saving or loading. Unlike `dirty`, which
+    /// is a repaint-pending flag the preview timer clears, this answers "would
+    /// closing now lose work".
+    unsaved: std::cell::Cell<bool>,
     /// The preview video sink; kept so we can restore preview mode after a render.
     appsink: AppSink,
     /// Composited canvas ("viewport") size in px. Configurable via
@@ -848,6 +852,7 @@ impl Project {
             pipeline,
             clips: HashMap::new(),
             dirty: std::cell::Cell::new(false),
+            unsaved: std::cell::Cell::new(false),
             appsink,
             canvas_w: CANVAS_W,
             canvas_h: CANVAS_H,
@@ -864,11 +869,22 @@ impl Project {
         self.rendering.get()
     }
 
-    /// Whether anything has changed since the last save. The flag is already
-    /// kept for the project file; this lets the window ask before it closes
-    /// itself for an update.
-    pub fn is_dirty(&self) -> bool {
-        self.dirty.get()
+    /// An edit happened: repaint, and remember that the file on disk is behind.
+    fn touched(&self) {
+        self.dirty.set(true);
+        self.unsaved.set(true);
+    }
+
+    /// Would closing now lose work? Unlike the repaint flag, this survives
+    /// every tick of the preview timer and clears only on a save or a load,
+    /// so the window can ask before it closes itself for an update.
+    pub fn has_unsaved_work(&self) -> bool {
+        self.unsaved.get()
+    }
+
+    /// The project now matches a file on disk.
+    pub fn mark_saved(&self) {
+        self.unsaved.set(false);
     }
 
     /// Current composited canvas ("viewport") size in px.
@@ -898,7 +914,7 @@ impl Project {
             }
         }
         self.commit();
-        self.dirty.set(true);
+        self.touched();
     }
 
     /// Ensure at least `index + 1` layers exist; return the layer at `index`.
@@ -1036,7 +1052,7 @@ impl Project {
         let new_start = slide_within_gap(start, dur, delta, &self.layer_neighbours(id)) as u64;
         clip.set_start(gst::ClockTime::from_nseconds(new_start));
         self.commit();
-        self.dirty.set(true);
+        self.touched();
         Some(clip_geom(&clip))
     }
 
@@ -1098,7 +1114,7 @@ impl Project {
             clip.set_duration(gst::ClockTime::from_nseconds(nd as u64));
         }
         self.commit();
-        self.dirty.set(true);
+        self.touched();
         Some(clip_geom(&clip))
     }
 
@@ -1217,7 +1233,7 @@ impl Project {
         }
         if !found.is_empty() {
             self.commit();
-            self.dirty.set(true);
+            self.touched();
         }
         failed
     }
@@ -1248,7 +1264,7 @@ impl Project {
         self.commit();
         self.clips.insert(id.0.clone(), clip.upcast());
         self.set_clip_layout(id, record.layout.into());
-        self.dirty.set(true);
+        self.touched();
         Ok(id.clone())
     }
 
@@ -1291,7 +1307,7 @@ impl Project {
         }
         if changed {
             self.commit();
-            self.dirty.set(true);
+            self.touched();
         }
     }
 
@@ -1310,7 +1326,7 @@ impl Project {
         let target = self.layer(track);
         clip.move_to_layer(&target).ok()?;
         self.commit();
-        self.dirty.set(true);
+        self.touched();
         Some(track)
     }
 
@@ -1355,7 +1371,7 @@ impl Project {
             let _ = self.timeline.remove_layer(&last);
         }
         self.commit();
-        self.dirty.set(true);
+        self.touched();
         // Stamped with the commits asked for so far, this removal's own
         // included: the clip goes once every track has finished that many.
         let stamp = self.commits.get();
@@ -1519,7 +1535,10 @@ impl Project {
             }
         }
         self.commit();
-        self.dirty.set(true);
+        self.touched();
+        // Just loaded: this is exactly what is on disk. The edits above set the
+        // flag on their way through, so this has to come last.
+        self.unsaved.set(false);
         Ok(missing)
     }
 
@@ -1537,7 +1556,7 @@ impl Project {
         // Resync our layer vec to the new priority order.
         self.layers = self.timeline.layers();
         self.commit();
-        self.dirty.set(true);
+        self.touched();
     }
 
     /// Read a clip's current layout (position, aspect-preserving scale, opacity,
@@ -1596,7 +1615,7 @@ impl Project {
         let _ = clip.set_child_property("alpha", &l.alpha.to_value());
         let _ = clip.set_child_property("volume", &l.volume.to_value());
         self.commit();
-        self.dirty.set(true);
+        self.touched();
     }
 
     /// The clip's aspect-fit size in canvas px (largest undistorted size), used to
@@ -1633,7 +1652,7 @@ impl Project {
         let posy = ((self.canvas_h as f64 - fh) / 2.0).round() as i32;
         set_clip_frame(clip, posx, posy, fw.round() as i32, fh.round() as i32);
         self.commit();
-        self.dirty.set(true);
+        self.touched();
     }
 
     /// End time (start + duration) of the last clip on `track`, or zero.
@@ -1881,7 +1900,7 @@ impl Project {
         let step = settled(&self.pipeline);
         if step == Step::Ready && self.rendering.get() {
             self.rendering.set(false);
-            self.dirty.set(true);
+            self.touched();
         }
         step
     }
@@ -1937,7 +1956,7 @@ impl Project {
         self.begin_restore()?;
         let _ = self.pipeline.state(gst::ClockTime::from_seconds(5));
         self.rendering.set(false);
-        self.dirty.set(true);
+        self.touched();
         Ok(())
     }
 }
@@ -2130,11 +2149,41 @@ mod tests {
     }
 
     #[test]
-    fn a_project_says_whether_it_has_unsaved_changes() {
+    fn unsaved_work_survives_a_repaint_unlike_the_repaint_flag() {
         let mut project = Project::new(|_f| {}).expect("project");
-        assert!(!project.is_dirty(), "a new project has nothing to lose");
+        assert!(
+            !project.has_unsaved_work(),
+            "a new project has nothing to lose"
+        );
+
         project.set_canvas_size(1280, 720);
-        assert!(project.is_dirty(), "an edit is an unsaved change");
+        assert!(project.has_unsaved_work(), "an edit is unsaved work");
+
+        // The repaint flag clears on a timer. Unsaved work must not.
+        project.refresh_preview();
+        assert!(
+            project.has_unsaved_work(),
+            "a repaint is not a save: this is the bug this flag exists to fix"
+        );
+    }
+
+    #[test]
+    fn saving_and_loading_both_clear_unsaved_work() {
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.set_canvas_size(1600, 900);
+        assert!(project.has_unsaved_work());
+
+        let doc = project.to_document();
+        project.mark_saved();
+        assert!(!project.has_unsaved_work(), "saving clears it");
+
+        project.set_canvas_size(1280, 720);
+        assert!(project.has_unsaved_work());
+        project.apply_document(&doc).expect("apply");
+        assert!(
+            !project.has_unsaved_work(),
+            "a project just loaded from a file matches that file"
+        );
     }
 
     /// A saved project has to come back as the same timeline: same sources, on
