@@ -220,13 +220,22 @@ jobs:
       # SeBackup/SeRestore: locally, unelevated, it prints a reason and skips,
       # but under CI it panics instead of skipping (GitHub sets CI=true, and the
       # hosted runner IS elevated), so a skip here is a failed step. The exit
-      # code is the whole gate — nothing greps the output; --nocapture is only
-      # so the reason is readable when it does fail.
+      # code is the gate — nothing greps for a skip line; --nocapture is only so
+      # the reason is readable when it does fail. The one thing the exit code
+      # cannot say is whether the name still matches anything: `--exact` with a
+      # name that matches no test runs zero tests and exits 0, so a rename would
+      # turn this gate off in silence. Hence the count below, which asks that
+      # one test ran, not what it printed.
       - name: Test (offline hive cleanup — gates the release)
         shell: pwsh
         run: |
-          cargo test -p kuvatin --release -- --exact shell::hive::tests::offline_cleanup_removes_only_kuvatin_verbs --nocapture
+          # Only stdout is captured (the harness's own report and anything
+          # --nocapture prints); cargo's progress and any compile error stay on
+          # stderr and stream straight into this log.
+          $out = cargo test -p kuvatin --release -- --exact shell::hive::tests::offline_cleanup_removes_only_kuvatin_verbs --nocapture | Out-String
+          Write-Host $out
           if ($LASTEXITCODE -ne 0) { throw "the offline hive test exited $LASTEXITCODE, so the signed-out cleanup path is unproven" }
+          if ($out -notmatch '1 passed') { throw 'the offline hive test matched no test: has it been renamed or moved?' }
 
       # Self-contained video tests: they generate their own frames under the
       # workspace's target dir and drive real GES/GStreamer pipelines (encode,
@@ -454,8 +463,10 @@ jobs:
               # Never leave the private key behind, not even when signing threw.
               # The exported .cer stays: the WiX build and the install test
               # both need it.
+              # -DeleteKey: without it the certificate goes but its CNG key
+              # container stays on disk, which is the private key.
               Remove-Item $pfx -Force -ErrorAction SilentlyContinue
-              Remove-Item $store -Force -ErrorAction SilentlyContinue
+              Remove-Item $store -Force -DeleteKey -ErrorAction SilentlyContinue
             }
           }
           cd crates\kuvatin
@@ -516,24 +527,26 @@ jobs:
           $icon = (Get-ItemProperty $verb).Icon
           if ($icon -ne $exe) { throw "Explorer verb points at '$icon', expected '$exe'" }
           # Windows 11 top-level menu: the sparse package must be registered for
-          # this user with the install dir as its external location. Windows 10
-          # (build < 22000) has neither the menu nor unsigned-package support.
+          # this user with the install dir as its external location. These used
+          # to be skipped when the package was unsigned or the runner was older
+          # than build 22000; every packaging run signs now (a throwaway key
+          # when the release key is out of reach) and the hosted runner is
+          # build 26100, so a run where they would not apply is a run whose
+          # package half proves nothing, and it says so rather than passing.
           $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
           Get-Content "$env:LOCALAPPDATA\Kuvatin\kuvatin.log" -ErrorAction SilentlyContinue | Select-String 'Windows 11 menu' | Select-Object -Last 1
-          if ($build -ge 22000 -and $env:SIGNED -eq 'true') {
-            if (-not (Test-Path 'C:\Program Files\kuvatin\bin\kuvatin-signing.cer')) { throw 'signed build, but the installer did not ship kuvatin-signing.cer (SignCerPath not passed to WiX?)' }
-            $pkg = Get-AppxPackage VilleMattila.Kuvatin
-            if (-not $pkg) {
-              Write-Host '--- Trusted People (machine):'
-              Get-ChildItem Cert:\LocalMachine\TrustedPeople | ForEach-Object { "  $($_.Subject) $($_.Thumbprint)" }
-              Write-Host '--- installer log, certificate + register actions:'
-              Get-Content $log | Select-String 'KuvatinTrustCert|KuvatinRegister|certutil' | ForEach-Object { $_.Line } | Select-Object -Last 12
-              throw "signed sparse package not registered on build $build"
-            }
-            Write-Host "sparse package registered: $($pkg.PackageFullName) ($($pkg.SignatureKind))"
-          } else {
-            Write-Host "build $build, signed=$env:SIGNED: package registration not required here"
+          if ($build -lt 22000) { throw "runner build $build predates the Windows 11 menu: the package assertions cannot run here" }
+          if ($env:SIGNED -ne 'true') { throw "SIGNED is '$env:SIGNED', not true: the package assertions would all be skipped" }
+          if (-not (Test-Path 'C:\Program Files\kuvatin\bin\kuvatin-signing.cer')) { throw 'signed build, but the installer did not ship kuvatin-signing.cer (SignCerPath not passed to WiX?)' }
+          $pkg = Get-AppxPackage VilleMattila.Kuvatin
+          if (-not $pkg) {
+            Write-Host '--- Trusted People (machine):'
+            Get-ChildItem Cert:\LocalMachine\TrustedPeople | ForEach-Object { "  $($_.Subject) $($_.Thumbprint)" }
+            Write-Host '--- installer log, certificate + register actions:'
+            Get-Content $log | Select-String 'KuvatinTrustCert|KuvatinRegister|certutil' | ForEach-Object { $_.Line } | Select-Object -Last 12
+            throw "signed sparse package not registered on build $build"
           }
+          Write-Host "sparse package registered: $($pkg.PackageFullName) ($($pkg.SignatureKind))"
           $env:Path = (($env:Path -split ';') | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
           $work = Join-Path $env:GITHUB_WORKSPACE "target\smoke\installed"
           New-Item -ItemType Directory -Force -Path "$work\frames" | Out-Null
@@ -561,10 +574,13 @@ jobs:
       # user's profile, so HKCU is their own classes hive and the sparse package
       # registers in their context (proven by the pk-uninst probe). A fresh
       # account has no "Log on as a batch job" right, so secedit grants it first
-      # — without that the tasks never start (0x41303). kvon stays signed in
-      # across the uninstall while kvoff signs out, so the loaded hive and the
-      # offline UsrClass.dat are both exercised. Then uninstall as the runner
-      # and assert that all three accounts are clean.
+      # — without that the tasks never start (0x41303). kvon is held signed in
+      # across the uninstall, which the step asserts, so the loaded-hive path is
+      # always exercised; kvoff's task ends and its hive unloads if the profile
+      # service gets round to it, which the probe measured it usually does not,
+      # so the offline UsrClass.dat path is a bonus here and is really gated by
+      # the offline hive unit test. Then uninstall as the runner and assert that
+      # all three accounts are clean.
       - name: Uninstall test (every account)
         if: env.PACKAGE == 'true'
         shell: pwsh
@@ -577,6 +593,11 @@ jobs:
           $msi = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
           # The install test's $build went with its step.
           $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+          # Every package assertion below is written `SIGNED -eq true -and …`,
+          # so an unsigned run would not fail them, it would skip them. A
+          # packaging run always signs now, and if that ever stops being true
+          # this step must say so rather than quietly prove half as much.
+          if ($env:SIGNED -ne 'true') { throw "SIGNED is '$env:SIGNED', not true: the package assertions would all be skipped" }
           $log = "$env:TEMP\kuvatin-uninstall.log"
           New-Item -ItemType Directory -Force C:\kvtest\users, C:\kvtest\out | Out-Null
           # The tasks run as ordinary users and write their transcript here.
@@ -594,11 +615,15 @@ jobs:
           "$(whoami): USERPROFILE=$env:USERPROFILE TEMP=$env:TEMP"
           $p = Start-Process $exe -ArgumentList '--register','--quiet' -Wait -PassThru
           "--register exited $($p.ExitCode)"
+          # Name the culprit here: otherwise the runner only sees a task that
+          # ended with 1 and a precondition that fails much later.
+          if ($p.ExitCode -ne 0) { throw "--register exited $($p.ExitCode)" }
           # Start-Process joins the list with spaces and does NOT quote, so the
           # preset name carries its own quotes.
           $png = "C:\kvtest\users\$User\photo.png"
           $p = Start-Process $exe -ArgumentList '--preset','"Convert to WebP"','--quiet',"`"$png`"" -Wait -PassThru
           "--preset exited $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "--preset exited $($p.ExitCode)" }
           New-Item -ItemType Directory -Force "$env:TEMP\kuvatin\seq-cache\probe" | Out-Null
           Set-Content "$env:TEMP\kuvatin\seq-cache\probe\.complete" 'x'
           Stop-Transcript | Out-Null
@@ -652,7 +677,14 @@ jobs:
               $mounted = $true
             }
             $n = @($rel | Where-Object { reg query "$root\$_" *> $null; $LASTEXITCODE -eq 0 }).Count
-            if ($mounted) { [GC]::Collect(); [GC]::WaitForPendingFinalizers(); reg unload $root *> $null }
+            if ($mounted) {
+              [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+              reg unload $root *> $null
+              # A hive this check leaves mounted is one the SYSTEM action's own
+              # RegLoadKeyW then cannot open, which comes back as -1 keys and
+              # reads like a missing profile. Say it where it happened.
+              if ($LASTEXITCODE -ne 0) { Write-Host "::warning::reg unload $root exited $LASTEXITCODE; $sid's classes hive may still be mounted" }
+            }
             $global:LASTEXITCODE = 0
             return $n
           }
@@ -684,7 +716,14 @@ jobs:
             $inf | Set-Content -Encoding Unicode C:\kvtest\rights-new.inf
             secedit /configure /db C:\kvtest\rights.sdb /cfg C:\kvtest\rights-new.inf /areas USER_RIGHTS | Out-Null
             secedit /export /cfg C:\kvtest\after.inf /areas USER_RIGHTS | Out-Null
-            Write-Host "SeBatchLogonRight now: $((Get-Content C:\kvtest\after.inf) -match '^SeBatchLogonRight')"
+            # secedit reports success on stdout and can still have granted
+            # nothing; read the right back instead of believing it, or the
+            # failure resurfaces a step later as a task that never starts.
+            $granted = ((@(Get-Content C:\kvtest\after.inf) -match '^SeBatchLogonRight') -join ' ')
+            Write-Host "SeBatchLogonRight now: $granted"
+            foreach ($s in $sids) {
+              if (-not $granted.Contains($s.TrimStart('*'))) { throw "secedit did not grant the batch logon right to $s, so its task would fail to start (0x41303)" }
+            }
 
             Register-As kvoff (Get-Variable PW_kvoff -ValueOnly)
             Register-As kvon (Get-Variable PW_kvon -ValueOnly)
@@ -694,13 +733,29 @@ jobs:
             Register-ScheduledTask -TaskName kv-hold -Action $ha -Settings $hs -User "$env:COMPUTERNAME\kvon" -Password (Get-Variable PW_kvon -ValueOnly) -RunLevel Limited -Force | Out-Null
             Start-ScheduledTask -TaskName kv-hold
             Start-Sleep -Seconds 5
-            # kvoff signs out when its task ends, but the profile service takes
-            # its time; waiting is what makes kvoff the offline-hive case.
+            # kvoff's task has ended, so kvoff is signed out; the profile
+            # service unloads the classes hive when it feels like it. Poll the
+            # key everything here branches on, not the plain user hive.
             $offSid = Sid kvoff
             $t0 = Get-Date
-            while ((Test-Path "Registry::HKEY_USERS\$offSid") -and ((Get-Date) - $t0).TotalSeconds -lt 180) { Start-Sleep -Seconds 3 }
-            Write-Host "kvoff signed out: $(-not (Test-Path "Registry::HKEY_USERS\$offSid")) after $([int]((Get-Date) - $t0).TotalSeconds) s"
-            Write-Host "kvon still signed in: $(Test-Path "Registry::HKEY_USERS\$(Sid kvon)_Classes")"
+            while ((Test-Path "Registry::HKEY_USERS\$($offSid)_Classes") -and ((Get-Date) - $t0).TotalSeconds -lt 180) { Start-Sleep -Seconds 3 }
+            if (Test-Path "Registry::HKEY_USERS\$($offSid)_Classes") {
+              # The probe measured the same, so this is the usual outcome and
+              # not a failure — but it does mean this run proves less.
+              Write-Host "::warning::kvoff's classes hive is still mounted after 180 s, so BOTH accounts exercise the LOADED-hive path this run and the offline UsrClass.dat path is not exercised end to end here; that path is gated by the unit test shell::hive::tests::offline_cleanup_removes_only_kuvatin_verbs instead."
+            } else {
+              Write-Host ('kvoff signed out after {0} s: this run exercises the offline UsrClass.dat path as well' -f [int]((Get-Date) - $t0).TotalSeconds)
+            }
+            # kvon must be signed in, or the loaded-hive path goes unproven and
+            # nothing here would have noticed. The hold task has just started,
+            # so give the profile a moment to come back if it was unloading.
+            $onSid = Sid kvon
+            $t1 = Get-Date
+            while (-not (Test-Path "Registry::HKEY_USERS\$($onSid)_Classes") -and ((Get-Date) - $t1).TotalSeconds -lt 60) { Start-Sleep -Seconds 3 }
+            if (-not (Test-Path "Registry::HKEY_USERS\$($onSid)_Classes")) {
+              throw "kvon's classes hive is not loaded: kv-hold did not keep it signed in, so the loaded-hive path would go unproven"
+            }
+            Write-Host 'kvon is signed in: the loaded-hive path is exercised'
 
             # Preconditions, so the test cannot pass vacuously.
             foreach ($u in 'kvoff','kvon') {
@@ -723,7 +778,15 @@ jobs:
             # SYSTEM action's stdout into this log.
             $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/norestart","/l*v","`"$log`"" -Wait -PassThru
             if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
-            Get-Content $log | Select-String 'KuvatinUnregisterAllUsers|Kuvatin: ' | Select-Object -Last 30 | ForEach-Object { $_.Line }
+            $report = @(Get-Content $log | Select-String 'KuvatinUnregisterAllUsers|Kuvatin: ')
+            $report | Select-Object -Last 30 | ForEach-Object { $_.Line }
+            # Every line the all-users pass prints is prefixed `Kuvatin: `. With
+            # none of them the action never ran (unscheduled, condition false,
+            # WixQuietExec64 not linked) and every assertion below would be
+            # measuring an uninstall that was only ever the per-user one.
+            if (-not ($report | Where-Object { $_.Line -match 'Kuvatin: ' })) {
+              throw 'the uninstall log carries no "Kuvatin: " line: the all-users action never ran'
+            }
 
             # The uninstalling account (what the install test used to check).
             if (Test-Path $exe) { throw "uninstall left $exe behind" }
