@@ -34,8 +34,9 @@
 //! is also a bug in the caller, and the only way to reach it.
 //!
 //! The per-user unregister in `windows.rs` and the all-users one in
-//! `super::hive` both delete through this module, so all of it is live bar
-//! `is_reg_link`, which carries its own allow and says why there.
+//! `super::hive` both delete through this module, so all of it is live bar the
+//! few items only the tests reach; each carries its own allow and says why
+//! there.
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Wdk::System::Registry::NtDeleteKey;
@@ -117,10 +118,13 @@ pub(super) fn wide(s: &str) -> Vec<u16> {
 /// Give an open key handle back to the registry; a failed close leaves a
 /// caller nothing to do about it.
 ///
-/// Private on purpose: every opener in this module hands back an [`OwnedKey`],
+/// Private on purpose: every key this module hands *out* is an [`OwnedKey`],
 /// so nobody outside it has a raw handle to close and nobody can close one an
-/// `OwnedKey` still holds. A caller who makes a handle of its own — a test
-/// with `RegCreateKeyExW` — hands it to [`OwnedKey::own`] instead.
+/// `OwnedKey` still holds. That leaves `OwnedKey`'s own `Drop` and regutil's
+/// own short-lived handles — the ones a helper here opens, asks a single
+/// question of, and closes on the spot. Code elsewhere that makes a handle of
+/// its own — a test with `RegCreateKeyExW` — hands it to [`OwnedKey::own`]
+/// instead.
 fn close(h: HKEY) {
     unsafe {
         let _ = RegCloseKey(h);

@@ -154,11 +154,15 @@ fn main() {
     let mode = cli.into_mode();
     // The uninstaller's SYSTEM pass is dispatched FIRST, before the panic hook
     // and the engine setup. As SYSTEM, %LOCALAPPDATA% resolves inside
-    // C:\Windows\System32\config\systemprofile, so applog's crash log — and
-    // anything else that writes where a user's files go — would leave a
-    // brand-new folder behind, which is exactly what this mode exists to
-    // remove. It reports on stdout, which the installer's WixQuietExec64
-    // action captures into the MSI log, and its exit code says whether the run
+    // C:\Windows\System32\config\systemprofile, so anything that writes where a
+    // user's files go leaves a brand-new folder behind — exactly what this mode
+    // exists to remove. Installing the hook writes nothing itself; it is the
+    // hook's own body that would, because it resolves the log directory (and
+    // creates it) at panic time, so a panic during the SYSTEM run would leave
+    // …\systemprofile\AppData\Local\Kuvatin\{crash.log,kuvatin.log}. With no
+    // hook installed yet, such a panic prints to stderr and leaves no files.
+    // The mode reports on stdout, which the installer's WixQuietExec64 action
+    // captures into the MSI log, and its exit code says whether the run
     // happened at all.
     if matches!(mode, Mode::UnregisterAllUsers) {
         std::process::exit(shell::unregister_all_users());

@@ -121,9 +121,7 @@
 //! all-users uninstall exists to remove. The orchestrator prints what comes
 //! back here to stdout.
 //!
-//! The one item not called outside `#[cfg(test)]` is the seam the regression
-//! tests stand in; `--unregister-all-users` calls everything else.
-#![allow(dead_code)]
+//! `--unregister-all-users` calls everything here.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -449,6 +447,7 @@ fn kept_by_the_uninstall(path: &Path) -> Option<String> {
 /// this walk built, which is the one to name in any message and the only one to
 /// hand to a path-taking call.
 struct Held {
+    #[allow(dead_code)] // Never read: held open is all these handles are for.
     ancestors: Vec<(PathBuf, File)>,
     leaf: File,
     attributes: u32,

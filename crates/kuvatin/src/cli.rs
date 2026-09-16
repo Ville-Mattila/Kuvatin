@@ -175,8 +175,9 @@ mod tests {
         assert!(parse_err(&["--print-extensions", "--register"]));
     }
 
-    /// The installer's SYSTEM pass. It takes `--quiet` and nothing else: every
-    /// other headless mode wants a profile this one is not running in.
+    /// The installer's SYSTEM pass. It takes `--quiet` and no other mode flag:
+    /// every other headless mode wants a profile this one is not running in.
+    /// A stray path is not a mode, so it parses and is ignored.
     #[test]
     fn unregister_all_users_flag() {
         assert_eq!(

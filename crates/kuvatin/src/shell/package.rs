@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use windows::core::{RuntimeType, HRESULT, HSTRING};
+use windows::ApplicationModel::Package;
 use windows::Foundation::Collections::IIterable;
 use windows::Foundation::{AsyncStatus, IAsyncOperationWithProgress, Uri};
 use windows::Management::Deployment::{
@@ -96,22 +97,41 @@ fn file_uri(path: &Path) -> Result<Uri> {
 pub fn registered() -> Result<Option<(String, String, String)>> {
     let _ = init_com();
     let pm = PackageManager::new()?;
-    for p in pm.FindPackagesByUserSecurityId(&HSTRING::new())? {
-        let id = p.Id()?;
-        if id.Name()? != PACKAGE_NAME {
-            continue;
+    let packages = pm.FindPackagesByUserSecurityId(&HSTRING::new())?;
+    // Walked by hand like every other enumeration here, rather than with the
+    // crate's `IntoIterator` for `&IIterable`, which is `First().unwrap()`
+    // (see [`walk`]). The walk runs to the end even once ours is in hand:
+    // stopping early is not something `walk` offers, and one account's
+    // packages are a short list.
+    let mut ours: windows::core::Result<Option<(String, String, String)>> = Ok(None);
+    let walked = walk(&packages, |package| {
+        // The first answer stands, whether it is ours or a read that failed.
+        if matches!(ours, Ok(None)) {
+            ours = ours_registration(&package);
         }
-        let v = id.Version()?;
-        let version = format!("{}.{}.{}", v.Major, v.Minor, v.Build);
-        // The external location (the install dir), not the WindowsApps folder
-        // that holds the package's own manifest.
-        let location = p
-            .EffectiveExternalPath()
-            .map(|h| h.to_string())
-            .unwrap_or_default();
-        return Ok(Some((id.FullName()?.to_string(), version, location)));
+    });
+    if let Err(why) = walked {
+        bail!("this account's packages could not be walked to the end: {why}");
     }
-    Ok(None)
+    Ok(ours?)
+}
+
+/// `package` as `(full name, version, external location)` when it is ours;
+/// `None` when it belongs to somebody else.
+fn ours_registration(package: &Package) -> windows::core::Result<Option<(String, String, String)>> {
+    let id = package.Id()?;
+    if id.Name()? != PACKAGE_NAME {
+        return Ok(None);
+    }
+    let v = id.Version()?;
+    let version = format!("{}.{}.{}", v.Major, v.Minor, v.Build);
+    // The external location (the install dir), not the WindowsApps folder
+    // that holds the package's own manifest.
+    let location = package
+        .EffectiveExternalPath()
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    Ok(Some((id.FullName()?.to_string(), version, location)))
 }
 
 /// Register `install_dir\Kuvatin.msix` with `install_dir` as the external
@@ -236,7 +256,9 @@ pub(super) struct Registration {
     /// The package full name, which is what a removal is asked for by.
     pub full_name: String,
     /// The accounts it is registered for. Empty when the deployment service
-    /// would not say — the reason is then in the sweep's `trouble`.
+    /// would not say, and short of them all when the walk over them broke
+    /// partway — either way the reason is in the sweep's `trouble`, and a list
+    /// that is empty or short is never proof that no other account has it.
     pub users: Vec<PackageUser>,
 }
 
@@ -660,9 +682,11 @@ fn deprovision_provisioned(
     };
     // An `IVector`, whose iterator is an index walk over `GetAt` — no `unwrap`
     // to panic on, unlike the `IIterable` adapter [`walk`] exists to avoid. It
-    // does end silently if `GetAt` ever failed, which would read as "nothing is
-    // provisioned"; with nothing ever provisioned and a fallback below, that is
-    // a risk worth the four lines it saves.
+    // does end silently if `GetAt` ever failed, and a list cut short reads here
+    // as "nothing is provisioned": the sweep would deprovision nothing and say
+    // nothing about it. Nothing in Kuvatin's install ever provisions the
+    // package, so that is a risk on an empty list, and worth the four lines it
+    // saves.
     let ours = provisioned.into_iter().find(|package| {
         package
             .Id()
