@@ -19,13 +19,11 @@ pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const DOWNLOAD_BASE: &str = "https://github.com/Ville-Mattila/Kuvatin/releases/download";
 
 /// The installer file a release publishes for `version`.
-#[allow(dead_code)] // Only the tests call this so far; the downloader is next.
 pub fn asset_name(version: &str) -> String {
     format!("kuvatin-{version}-x86_64.msi")
 }
 
 /// The installer and its checksum file, in that order.
-#[allow(dead_code)] // Only the tests call this so far; the downloader is next.
 pub fn asset_urls(version: &str) -> (String, String) {
     let msi = format!("{DOWNLOAD_BASE}/v{version}/{}", asset_name(version));
     let sha = format!("{msi}.sha256");

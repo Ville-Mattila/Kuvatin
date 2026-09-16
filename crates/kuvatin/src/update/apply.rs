@@ -1,13 +1,14 @@
 //! Staging an installer, handing off to a copy of this executable, and that
 //! copy's own run. See the design doc for why the copy exists.
 
-use anyhow::{bail, Result};
+use super::{asset_name, asset_urls, fetch, verify};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 /// Where a download waits to be installed. Under `%TEMP%\kuvatin`, which the
 /// every-account uninstall deletes, so a machine that never runs Kuvatin
 /// again is still left clean.
-#[allow(dead_code)] // Only the tests call this so far; staging a download (Task 7) is next.
 pub fn stage_dir() -> Result<PathBuf> {
     let temp = std::env::temp_dir();
     if temp.as_os_str().is_empty() {
@@ -18,7 +19,6 @@ pub fn stage_dir() -> Result<PathBuf> {
 
 /// Delete a staging folder, saying nothing if it is not there. The helper
 /// cannot delete the copy it is running from, so this runs at the next start.
-#[allow(dead_code)] // Only the tests call this so far; staging a download (Task 7) is next.
 pub fn sweep(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => crate::applog::log(&format!("update: cleared {}", dir.display())),
@@ -33,6 +33,74 @@ pub fn sweep_stage() {
     if let Ok(dir) = stage_dir() {
         sweep(&dir);
     }
+}
+
+/// What a finished download left behind.
+#[allow(dead_code)] // Nothing reads these yet; wiring the dialog (Task 12) is next.
+#[derive(Debug, Clone)]
+pub struct Staged {
+    pub msi: PathBuf,
+    pub helper: PathBuf,
+}
+
+/// Does this file match what the release says it should be? A file that fails
+/// is deleted, so a later run cannot pick it up.
+fn accept(msi: &Path, checksum_file: &str, name: &str) -> Result<()> {
+    let expected = match verify::expected_hash(checksum_file, name) {
+        Some(h) => h,
+        None => {
+            let _ = std::fs::remove_file(msi);
+            bail!("could not check the download: the checksum file does not name {name}");
+        }
+    };
+    let actual = match verify::sha256_file(msi) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = std::fs::remove_file(msi);
+            return Err(e).context("could not check the download");
+        }
+    };
+    if actual != expected {
+        let _ = std::fs::remove_file(msi);
+        bail!("the download did not arrive intact");
+    }
+    Ok(())
+}
+
+/// Download `version`'s installer and its checksum, check it, and copy this
+/// executable in beside it to do the installing. Anything it wrote is removed
+/// if any step fails.
+#[allow(dead_code)] // Only the tests call this so far; wiring the dialog (Task 12) is next.
+pub fn stage(
+    version: &str,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(fetch::Progress),
+) -> Result<Staged> {
+    let dir = stage_dir()?;
+    sweep(&dir);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("could not write to {}", dir.display()))?;
+
+    let name = asset_name(version);
+    let (msi_url, sha_url) = asset_urls(version);
+    let msi = dir.join(&name);
+
+    let staged = (|| -> Result<Staged> {
+        fetch::get_to_file(&msi_url, &msi, cancel, on_progress)?;
+        let checksum = fetch::get_to_string(&sha_url, 4096)?;
+        accept(&msi, &checksum, &name)?;
+
+        let running = std::env::current_exe().context("could not find this executable")?;
+        let helper = dir.join("kuvatin-updater.exe");
+        std::fs::copy(&running, &helper)
+            .with_context(|| format!("could not copy this executable to {}", helper.display()))?;
+        Ok(Staged { msi, helper })
+    })();
+
+    if staged.is_err() {
+        sweep(&dir);
+    }
+    staged
 }
 
 /// What `msiexec` exiting with a given code means for us.
@@ -127,5 +195,47 @@ mod tests {
             let said = describe(install_outcome(code));
             assert!(said.is_ascii(), "{said:?}");
         }
+    }
+
+    /// The rule that decides whether a downloaded file may be run, separated
+    /// from the download so it can be tested without a network.
+    #[test]
+    fn a_file_is_only_accepted_when_it_matches_the_published_digest() {
+        let dir = std::env::temp_dir().join(format!("kuvatin-accept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let msi = dir.join("kuvatin-2.13.0-x86_64.msi");
+        std::fs::write(&msi, b"abc").expect("write");
+        let real = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let good = format!("{real}  kuvatin-2.13.0-x86_64.msi\n");
+        accept(&msi, &good, "kuvatin-2.13.0-x86_64.msi").expect("the digest matches");
+
+        let wrong = format!("{}  kuvatin-2.13.0-x86_64.msi\n", "0".repeat(64));
+        let err = accept(&msi, &wrong, "kuvatin-2.13.0-x86_64.msi")
+            .expect_err("a mismatch must not be accepted");
+        assert!(
+            format!("{err:#}").contains("did not arrive intact"),
+            "{err:#}"
+        );
+        assert!(
+            !msi.exists(),
+            "a file that failed its check must be deleted"
+        );
+
+        // And a checksum file that never names our asset.
+        std::fs::write(&msi, b"abc").expect("write again");
+        let other = format!("{real}  something-else.msi\n");
+        let err = accept(&msi, &other, "kuvatin-2.13.0-x86_64.msi").expect_err("wrong name");
+        assert!(format!("{err:#}").contains("could not check"), "{err:#}");
+        assert!(!msi.exists());
+
+        // And the third way out: the hashing itself fails. A refusal too, and
+        // nothing is left behind for a later run to pick up.
+        let err = accept(&msi, &good, "kuvatin-2.13.0-x86_64.msi").expect_err("nothing to hash");
+        assert!(format!("{err:#}").contains("could not check"), "{err:#}");
+        assert!(!msi.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

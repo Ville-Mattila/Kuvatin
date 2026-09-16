@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Nothing we publish comes near this. It stops a wrong address, or a server
 /// that keeps talking, from filling the disk.
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 pub const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 
 /// How far a download has got.
@@ -183,7 +182,6 @@ mod win {
 
 /// GET `url` into `dest`, following redirects. `on_progress` is called as
 /// bytes land. A set `cancel` stops the transfer and removes the part file.
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 #[cfg(windows)]
 pub fn get_to_file(
     url: &str,
@@ -243,7 +241,6 @@ pub fn get_to_file(
 }
 
 /// GET `url` as text, refusing anything past `limit` bytes.
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 #[cfg(windows)]
 pub fn get_to_string(url: &str, limit: usize) -> Result<String> {
     let (_session, _conn, req, _total) = win::send(url)?;
@@ -255,7 +252,6 @@ pub fn get_to_string(url: &str, limit: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 #[cfg(not(windows))]
 pub fn get_to_file(
     _url: &str,
@@ -266,7 +262,6 @@ pub fn get_to_file(
     bail!("downloading is Windows-only")
 }
 
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 #[cfg(not(windows))]
 pub fn get_to_string(_url: &str, _limit: usize) -> Result<String> {
     bail!("downloading is Windows-only")

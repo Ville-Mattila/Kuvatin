@@ -6,7 +6,6 @@ use std::path::Path;
 
 /// Lower-case hex SHA-256 of a file, through CNG so no hashing crate is
 /// needed. Read in chunks: the installer is tens of megabytes.
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 #[cfg(windows)]
 pub fn sha256_file(path: &Path) -> Result<String> {
     use windows::Win32::Security::Cryptography::*;
@@ -55,7 +54,6 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     }
 }
 
-#[allow(dead_code)] // Only the tests call this so far; staging a download is next.
 #[cfg(not(windows))]
 pub fn sha256_file(_path: &Path) -> Result<String> {
     anyhow::bail!("hashing is Windows-only")
@@ -64,7 +62,6 @@ pub fn sha256_file(_path: &Path) -> Result<String> {
 /// The digest a `sha256sum`-style file gives for `asset_name`, if it names it
 /// and the digest is 64 hex characters. Lower-cased, so callers can compare
 /// with `==`.
-#[allow(dead_code)] // Only the tests call this so far; the downloader is next.
 pub fn expected_hash(checksum_file: &str, asset_name: &str) -> Option<String> {
     checksum_file.lines().find_map(|line| {
         let (hex, name) = line.trim().split_once(char::is_whitespace)?;
