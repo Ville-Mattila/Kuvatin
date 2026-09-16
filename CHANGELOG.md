@@ -36,6 +36,9 @@ something is fixed.
   its preview was still loading.
 - Removing a clip straight after adding it, with Delete or with undo, no
   longer crashes the app.
+- Moving or scaling a clip while it is still starting up, as when a
+  transform slider is nudged right after a clip is added to a playing
+  preview, no longer freezes the app for good.
 - The mouse wheel no longer scrolls the timeline, the preview or the file list
   behind an open dialog.
 - Ctrl+Enter starts a conversion even while a button has keyboard focus,

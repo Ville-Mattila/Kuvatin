@@ -683,6 +683,51 @@ fn clip_natural_size(clip: &ges::Clip) -> Option<(u32, u32)> {
     (w > 0 && h > 0).then_some((w as u32, h as u32))
 }
 
+/// The capsfilter GES pairs with a clip's frame positioner: the element
+/// whose caps the positioner rewrites whenever its `width` or `height` is
+/// set. Found from the positioner, which is what answers for `width`, as the
+/// one capsfilter in the bin around it. None until the clip has a video
+/// track element, when there is nothing to guard either.
+fn positioner_capsfilter(clip: &ges::Clip) -> Option<gst::Element> {
+    let (positioner, _) = clip.lookup_child("width")?;
+    let bin = positioner
+        .downcast::<gst::Element>()
+        .ok()?
+        .parent()?
+        .downcast::<gst::Bin>()
+        .ok()?;
+    bin.children()
+        .into_iter()
+        .find(|e| e.factory().is_some_and(|f| f.name() == "capsfilter"))
+}
+
+/// Set a clip's frame: its position and size on the canvas.
+///
+/// The size goes to the GES frame positioner, whose setter rewrites the caps
+/// of the capsfilter behind it while still holding the positioner's own
+/// object lock. GStreamer answers any property change by walking up the
+/// element's parents, taking each bin's lock in turn, so that walk runs
+/// under the positioner's lock. The composition's thread takes the same
+/// locks the other way round, the bin's first and then every child's,
+/// whenever it adds the clip's source to its stack or changes the source's
+/// state: while a clip that has just been added comes up, and while a stack
+/// is torn down for a commit, a seek or the end of a clip. Where the two
+/// meet, each waits for the other for good: GES itself is deadlocked, and
+/// the app with it. Transforming a clip that was still prerolling hung 5
+/// runs in 25 under load, every one on this pair of stacks.
+///
+/// Freezing the capsfilter's notifications for the duration holds the parent
+/// walk back until the guard drops, after the positioner's setter has
+/// returned and let go of its lock. Nothing else the setter does under that
+/// lock waits on another thread.
+fn set_clip_frame(clip: &ges::Clip, posx: i32, posy: i32, width: i32, height: i32) {
+    let _deferred_notify = positioner_capsfilter(clip).map(|f| f.freeze_notify());
+    let _ = clip.set_child_property("posx", &posx.to_value());
+    let _ = clip.set_child_property("posy", &posy.to_value());
+    let _ = clip.set_child_property("width", &width.to_value());
+    let _ = clip.set_child_property("height", &height.to_value());
+}
+
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
 /// visual tracks, index 0 = bottom (top layers composite over lower ones).
 pub struct Project {
@@ -1535,10 +1580,7 @@ impl Project {
         };
         let width = (l.scale * fit_w).round().max(1.0) as i32;
         let height = (l.scale * fit_h).round().max(1.0) as i32;
-        let _ = clip.set_child_property("posx", &l.posx.to_value());
-        let _ = clip.set_child_property("posy", &l.posy.to_value());
-        let _ = clip.set_child_property("width", &width.to_value());
-        let _ = clip.set_child_property("height", &height.to_value());
+        set_clip_frame(clip, l.posx, l.posy, width, height);
         let _ = clip.set_child_property("alpha", &l.alpha.to_value());
         let _ = clip.set_child_property("volume", &l.volume.to_value());
         self.commit();
@@ -1577,10 +1619,7 @@ impl Project {
         let (fw, fh) = fit_size(nw, nh, self.canvas_w, self.canvas_h);
         let posx = ((self.canvas_w as f64 - fw) / 2.0).round() as i32;
         let posy = ((self.canvas_h as f64 - fh) / 2.0).round() as i32;
-        let _ = clip.set_child_property("posx", &posx.to_value());
-        let _ = clip.set_child_property("posy", &posy.to_value());
-        let _ = clip.set_child_property("width", &(fw.round() as i32).to_value());
-        let _ = clip.set_child_property("height", &(fh.round() as i32).to_value());
+        set_clip_frame(clip, posx, posy, fw.round() as i32, fh.round() as i32);
         self.commit();
         self.dirty.set(true);
     }
@@ -2453,6 +2492,11 @@ mod tests {
     /// had started brought it up after the engine had let the clip go. So
     /// "not in a stack" is not "done with": only the timeline's `commited`
     /// after the removal's own commit is.
+    ///
+    /// The transform before each removal is applied while the clip is still
+    /// prerolling, on purpose: that is the sequence that deadlocked GES (a
+    /// hang, not a crash) until `set_clip_frame` held the frame positioner's
+    /// deep-notify walk back. Run it under CPU load to see either fault.
     #[test]
     fn removing_a_clip_added_while_playing_does_not_crash() {
         let dir = scratch("remove-while-playing");
@@ -2478,18 +2522,13 @@ mod tests {
                 .append_clip(&png, 1, Some(Duration::from_secs(5)))
                 .expect("second");
             project.play().expect("play");
-            // Let the clip come up before transforming it. Transforming one
-            // that is still prerolling deadlocks GES itself, with no clip
-            // released and nothing to do with this fix: on the code BEFORE
-            // it, that sequence hung 4 runs in 25 under load. Waiting here
-            // keeps this test on its own subject.
-            let up = std::time::Instant::now() + Duration::from_secs(10);
-            while settled(&project.pipeline) == Step::Pending && std::time::Instant::now() < up {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            // The inspector's transform, as a slider drag leaves behind: more
-            // commits still in flight when the removal lands, so an older
-            // one's `commited` must not be read as this removal's.
+            // The inspector's transform, as a slider drag leaves behind, and
+            // straight away: the clip is still coming up, which is when a
+            // width or height write met the composition's thread head-on and
+            // deadlocked GES for good (see `set_clip_frame`; 5 hangs in 25
+            // under load before the guard). It also leaves more commits in
+            // flight when the removal lands, so an older one's `commited`
+            // must not be read as this removal's.
             for i in 0..3 {
                 project.set_clip_layout(
                     &added.id,
