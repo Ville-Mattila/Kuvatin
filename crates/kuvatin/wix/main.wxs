@@ -150,6 +150,24 @@
                                 Source='$(var.CargoTargetBinDir)\kuvatin.exe'
                                 KeyPath='yes'/>
                         </Component>
+                        <!-- The updater. An installer cannot replace a running
+                             executable, so Kuvatin copies this program into a
+                             staging folder beside the downloaded installer and
+                             hands over to it as it closes. It has to be in the
+                             install folder for that copy to be possible, and it
+                             is its own tiny program rather than a copy of
+                             kuvatin.exe because kuvatin.exe cannot start
+                             without the GStreamer DLLs that sit beside it here
+                             — which is exactly the folder the installer is
+                             about to replace. -->
+                        <Component Id='updater' Guid='*'>
+                            <File
+                                Id='updater_exe'
+                                Name='kuvatin-updater.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\kuvatin-updater.exe'
+                                KeyPath='yes'/>
+                        </Component>
                         <!-- Windows 11 top-level context menu: the IExplorerCommand
                              handler DLL and the sparse package that gives this
                              folder package identity (see crates\kuvatin\msix).
@@ -233,6 +251,7 @@
             <ComponentRef Id='License'/>
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='updater'/>
             <ComponentRef Id='shellext'/>
             <ComponentRef Id='msix'/>
 <?ifdef SignCerPath?>
