@@ -15,6 +15,11 @@ something is fixed.
 
 ## [Unreleased]
 
+### Fixed
+- Moving or scaling a clip while it is still starting up, as when a
+  transform slider is nudged right after a clip is added to a playing
+  preview, no longer freezes the app for good.
+
 ## [2.12.0] - 2026-09-16
 Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and
 the Undo button names the step it is about to undo. On the video timeline
