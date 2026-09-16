@@ -52,6 +52,13 @@ windows = { version = "0.58", features = [
     # vetted handle names, with no path for a planted junction to redirect
     # (see shell::files).
     "Win32_Storage_FileSystem",
+    # NtOpenFile + OBJECT_ATTRIBUTES + IO_STATUS_BLOCK + OBJ_DONT_REPARSE: open
+    # each component relative to its parent's handle, so no name below the
+    # profile root is ever resolved a second time (see shell::files).
+    "Wdk_Storage_FileSystem",
+    "Wdk_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Kernel",
 ] }
 
 [build-dependencies]
