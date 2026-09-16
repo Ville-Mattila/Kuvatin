@@ -639,6 +639,8 @@ jobs:
             if ($log -and (Test-Path $log)) {
               Write-Host '--- uninstall log: the all-users action and its report'
               Get-Content $log | Select-String 'KuvatinUnregisterAllUsers|Kuvatin: ' | ForEach-Object { $_.Line }
+            } else {
+              Write-Host '--- no uninstall log yet: this failed before msiexec /x ran'
             }
             Write-Host '--- Task Scheduler events for the account tasks'
             Get-WinEvent -LogName Microsoft-Windows-TaskScheduler/Operational -MaxEvents 200 -ErrorAction SilentlyContinue |
@@ -719,10 +721,21 @@ jobs:
             # secedit reports success on stdout and can still have granted
             # nothing; read the right back instead of believing it, or the
             # failure resurfaces a step later as a task that never starts.
-            $granted = ((@(Get-Content C:\kvtest\after.inf) -match '^SeBatchLogonRight') -join ' ')
-            Write-Host "SeBatchLogonRight now: $granted"
-            foreach ($s in $sids) {
-              if (-not $granted.Contains($s.TrimStart('*'))) { throw "secedit did not grant the batch logon right to $s, so its task would fail to start (0x41303)" }
+            # It accepts either spelling going in and picks its own coming out:
+            # the runner's line came back with these two local accounts as
+            # NAMES and the builtin groups as SIDs. The SID goes in (a name is
+            # locale-sensitive, survives no rename, and one containing a comma
+            # would corrupt the line) and both spellings are accepted back,
+            # with any DOMAIN\ or machine\ prefix dropped.
+            $line = ((@(Get-Content C:\kvtest\after.inf) -match '^SeBatchLogonRight') -join ' ')
+            Write-Host "SeBatchLogonRight now: $line"
+            $holders = @(($line -split '=', 2)[-1] -split ',' | ForEach-Object { (($_.Trim() -replace '^\*', '') -split '\\')[-1] })
+            foreach ($u in 'kvoff','kvon') {
+              $sid = Sid $u
+              if ($holders -notcontains $sid -and $holders -notcontains $u) {
+                throw "secedit did not grant the batch logon right to $u ($sid), so its task would fail to start (0x41303); the right lists: $line"
+              }
+              Write-Host "  $u holds the batch logon right"
             }
 
             Register-As kvoff (Get-Variable PW_kvoff -ValueOnly)
@@ -823,7 +836,9 @@ jobs:
             $global:LASTEXITCODE = 0
             Write-Host 'every account is clean after uninstall'
           } catch {
-            Show-Diagnostics
+            # Whatever the diagnostics do, the failure that got us here is the
+            # one that must reach the log and fail the step.
+            try { Show-Diagnostics } catch { Write-Host "::warning::the diagnostics themselves failed: $($_.Exception.Message)" }
             throw
           }
 
