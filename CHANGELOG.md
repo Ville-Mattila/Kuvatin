@@ -15,6 +15,13 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **Updates install themselves.** Clicking the update badge now offers to
+  install the new version instead of opening a web page: Kuvatin downloads the
+  installer, checks it against the checksum published with it, then closes,
+  installs and opens again. The update check is still opt-in and still the
+  only thing that reaches the network unless you ask.
+
 ### Fixed
 - Moving or scaling a clip while it is still starting up, as when a
   transform slider is nudged right after a clip is added to a playing
