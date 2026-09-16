@@ -29,7 +29,6 @@ pub fn sweep(dir: &Path) {
 }
 
 /// Clear the staging folder left by a previous update. Called once at start.
-#[allow(dead_code)] // Only the tests call this so far; wiring the dialog (Task 12) is next.
 pub fn sweep_stage() {
     if let Ok(dir) = stage_dir() {
         sweep(&dir);
@@ -70,7 +69,6 @@ fn accept(msi: &Path, checksum_file: &str, name: &str) -> Result<()> {
 /// Download `version`'s installer and its checksum, check it, and copy this
 /// executable in beside it to do the installing. Anything it wrote is removed
 /// if any step fails.
-#[allow(dead_code)] // Only the tests call this so far; wiring the dialog (Task 12) is next.
 pub fn stage(
     version: &str,
     cancel: &AtomicBool,
@@ -182,7 +180,6 @@ fn msiexec_args(msi: &Path) -> Vec<String> {
 
 /// Start the staged copy as the updater, then the caller quits. `relaunch` is
 /// the executable to start afterwards, normally this one's own path.
-#[allow(dead_code)] // Nothing calls this yet; wiring the dialog (Task 12) is next.
 pub fn hand_off(staged: &Staged, relaunch: &Path) -> Result<()> {
     std::process::Command::new(&staged.helper)
         .arg("--apply-update")

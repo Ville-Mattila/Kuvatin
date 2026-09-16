@@ -130,7 +130,6 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     presets::wire(&ui, &store, &store_path);
     // "Show in folder" on any dialog that names a file it just wrote.
     ui.on_reveal_path(|p| reveal_in_explorer(Path::new(p.as_str())));
-    updates::wire(&ui);
     image_mode::wire(&ui, &image, &store);
     image_mode::wire_history(&ui, &image);
 
@@ -140,6 +139,10 @@ pub fn run(initial_paths: Vec<PathBuf>) -> Result<()> {
     let video = VideoState::new(&ui);
     let import = ImportState::new();
     let export = ExportState::default();
+
+    // The update dialog asks the timeline whether closing would lose anything,
+    // so it is wired once the Videos state exists.
+    updates::wire(&ui, video.project_slot());
 
     #[cfg(windows)]
     let import_q = &import.q;

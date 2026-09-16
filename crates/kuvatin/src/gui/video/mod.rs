@@ -19,10 +19,23 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+/// The Videos mode's handle on its GES project, which does not exist until a
+/// clip (or a canvas change) creates it.
+pub(super) type ProjectSlot = Rc<RefCell<Option<kuvatin_video::Project>>>;
+
+/// Does the timeline hold changes that closing the window would lose? `false`
+/// while there is no project: nothing has been arranged yet, so there is
+/// nothing to lose.
+pub(super) fn has_unsaved_changes(slot: &ProjectSlot) -> bool {
+    slot.borrow()
+        .as_ref()
+        .is_some_and(kuvatin_video::Project::is_dirty)
+}
+
 /// Everything the Videos mode owns that more than one handler touches.
 pub(super) struct VideoState {
     /// The GES project, created on demand by the first clip (or canvas change).
-    pub(super) project: Rc<RefCell<Option<kuvatin_video::Project>>>,
+    pub(super) project: ProjectSlot,
     /// Media-bin rows; `bin_paths[i]` is the source of `assets[i]`.
     pub(super) assets: Rc<VecModel<VideoAsset>>,
     pub(super) bin_paths: Rc<RefCell<Vec<PathBuf>>>,
@@ -66,6 +79,12 @@ impl VideoState {
             pending_seek: Rc::new(Cell::new(None)),
             history: Rc::new(RefCell::new(crate::gui::history::History::new())),
         }
+    }
+
+    /// A clone of the project handle, for code outside the Videos mode that
+    /// has a question for the timeline (see [`has_unsaved_changes`]).
+    pub(super) fn project_slot(&self) -> ProjectSlot {
+        self.project.clone()
     }
 
     /// The handles an editing handler records its steps through.

@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 
 /// How far a download has got.
-#[allow(dead_code)] // Only the tests read this so far; the dialog is next.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Progress {
     pub done: u64,
@@ -20,7 +19,6 @@ pub struct Progress {
 
 impl Progress {
     /// 0.0 to 1.0, or `None` when the size is unknown.
-    #[allow(dead_code)] // Only the tests call this so far; the dialog is next.
     pub fn fraction(&self) -> Option<f32> {
         let total = self.total?;
         if total == 0 {
