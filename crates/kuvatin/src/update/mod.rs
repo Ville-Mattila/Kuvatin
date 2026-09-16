@@ -3,6 +3,8 @@
 //! (`…/releases/tag/v2.9.0`). No JSON, no API quota, and nothing is sent
 //! beyond the request itself (User-Agent `Kuvatin/<version>`).
 
+pub mod verify;
+
 use anyhow::{anyhow, bail, Result};
 
 pub const RELEASES_URL: &str = "https://github.com/Ville-Mattila/Kuvatin/releases/latest";

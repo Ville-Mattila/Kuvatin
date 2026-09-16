@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     const NAME: &str = "kuvatin-2.13.0-x86_64.msi";
-    const HEX: &str = "9f2c4a1b8e7d6c5b4a39281706f5e4d3c2b1a09887766554433221100ffeeddcc";
+    const HEX: &str = "9f2c4a1b8e7d6c5b4a39281706f5e4d3c2b1a09887766554433221100ffeeddc";
 
     #[test]
     fn reads_the_hash_for_the_file_it_names() {
