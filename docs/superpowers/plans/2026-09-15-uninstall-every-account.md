@@ -52,11 +52,11 @@ Everything else was already enabled: `RegLoadKeyW`, `RegUnLoadKeyW`, `RegOpenKey
 - **A file another process holds open is reported, not cleaned.** Any account can arrange that deliberately; it costs that account its own leftovers and the line naming the path is the whole of the damage.
 - **The `RegLoadKeyW` window cannot be closed.** Between the last look at `UsrClass.dat` and the mount, its owner can still swap the path. Holding the file open ourselves is exactly what makes `RegLoadKeyW` fail, so what is left is to make the window as small as two adjacent statements and say plainly that it is there. Everything a junction could aim at outside the profile is refused before that point.
 
-**Commit rule:** every commit message on this branch ends with exactly:
+**Commit rule:** most commit messages on this branch end with exactly:
 ```
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 ```
-(the last commit of the branch was made by a different model and carries its own name; the rule is the trailer, not the name in it). Commit titles are plain sentences in this repo's voice — no `feat:`, `wix:`, `ci:` or `docs:` prefixes.
+The session's attribution changed part-way through: the later commits — `5fbfff3`, `320b665`, `6f0e4a6` and `532f0ea` — carry `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` instead (the last commit of the branch was made by a different model and carries its own name; the rule is the trailer, not the name in it). Commit titles are plain sentences in this repo's voice — no `feat:`, `wix:`, `ci:` or `docs:` prefixes.
 
 ---
 
@@ -128,6 +128,8 @@ fn open_relative(
 ### The same lesson in the registry, one hive up
 
 `hive.rs` has the file-side version of finding 1, and it is worth naming here because it is why `checked_usrclass_path` exists. `ProfileImagePath` comes from an admin-only key, but everything below the profile root belongs to the account, and `RegLoadKeyW` **creates** the hive file when it is missing — so a wrong path is not merely read, it is written. The guard walks `profile_dir` itself and then each of `AppData`, `Local`, `Microsoft`, `Windows`, `UsrClass.dat`, refusing a reparse point at any of them, confirms with `canonicalize` that the file resolves back inside the canonicalised profile root, and `clean_offline` looks once more, as late as it can, that the file is still a file. It stats the profile directory itself at the top of the walk and does not lean on `profiles::vet_dir` having done so, because a guard that is only correct when read together with another module's is not a guard. `under()` compares whole components and is correct only when both sides come from `canonicalize`; its doc says so and its test carries a `\\?\`-prefixed pair.
+
+A fourth finding came later, and it is not of the same kind as the three above: those are escalation, this is availability. `std::fs::remove_dir_all`'s descent is unbounded, so an account that keeps creating subdirectories under its own `AppData\Local\Temp\kuvatin` while the sweep runs can hold that one call open for as long as it cares to, and because the accounts are visited one after another inside a deferred custom action, that holds up every account after it and the uninstall with them — an account denying the machine's uninstall, not reaching anywhere it could not already reach. `allusers.rs` now bounds each account's file work to a sixty-second `FILE_BUDGET` (Task 9), which is the fix: nowhere in `files.rs` itself needed to change.
 
 ---
 
@@ -778,7 +780,11 @@ const PREFIX: &str = "Kuvatin: ";  // every line, so an MSI log can be grepped
 
 `gather`'s order matters: **the package first**, while `kuvatin.exe` and `kuvatin_shellext.dll` are still on disk, because removing the registration is what lets go of the DLL before `RemoveFiles` comes for it. Then `hive::enable_backup_restore()` once for the whole run, then `profiles::all()` destructured into `(cleanable, trouble, skipped)`, then each account: the hive, then its files, with **nothing between the two halves** — `clean_profile` holds `UsrClass.dat` exclusively while it is mounted, and putting a disk walk in the middle would hold an account's hive open for no gain.
 
+**One account cannot hold the whole machine's uninstall open.** `std::fs::remove_dir_all`'s descent is unbounded — it starts its enumeration again at every subdirectory it meets — so an account that keeps creating subdirectories under its own `AppData\Local\Temp\kuvatin` while the sweep is running can hold that loop open for as long as it cares to. It gains nothing by it, since the files are its own and SYSTEM reaches nowhere there it could not already reach, but the accounts are visited one after another inside a deferred custom action, so the account after it waits, and so does the uninstall: a denial of service against the uninstall, not an escalation. Each account's file work now gets a sixty-second `FILE_BUDGET`: `remove_within_budget(profile, plan) -> FileWork` spawns a thread running `files::remove_plan` and waits on it through an `mpsc` channel with `recv_timeout`, coming back as `enum FileWork { Done(FileSweep), OutOfTime, Lost(String) }`. A deadline threaded into `remove_plan` itself was considered and rejected: it would bound how many of the plan's entries are attempted, not the single `remove_dir_all` call that never returns, and it would thread a second reader through `files.rs`'s delicate argument about junctions, held handles and re-read attributes for no gain. A walk that runs out of time is left running deliberately — its handles are inside that one account's own profile, so it either finishes unwatched or ends with the process. `paths::package_data_dirs` stays outside the budget, being one directory listing that ends when it has read what was there.
+
 What the report says, and why:
+
+- A timed-out account is named in its own section ("files: still going after 60 seconds…"), contributes nothing to the footer totals — a walk that has not finished has nothing to count — and is counted in "N account(s) had something to report".
 
 - The opening two lines are printed and flushed **before any work starts**, so an action that is killed, or that waits three minutes on the deployment service, still leaves a sign in the MSI log that it began.
 - Lines go out through `writeln!` on a locked, flushed stdout, not `println!`: there is nothing to be done about a stdout that will not take a line, and panicking over one in a mode that exists to fail softly is the wrong end of the trade. Flushed as we go because the installer captures this through a pipe, where nothing is line-buffered.
@@ -791,7 +797,7 @@ What the report says, and why:
 
 - [x] **Step 3: Compile and run the tests**
 
-Run: `cargo test -p kuvatin --release allusers::` — 18 tests, all pure.
+Run: `cargo test -p kuvatin --release allusers::` — 19 tests, all pure, including `an_account_whose_files_ran_out_of_time_is_said_and_counted` (says so under that account, moves on to the next, and counts nothing from a walk that never finished).
 
 - [x] **Step 4: Commit**
 
@@ -799,6 +805,8 @@ Run: `cargo test -p kuvatin --release allusers::` — 18 tests, all pure.
 One pass cleans every account, and says what it could not clean
 The log says it began, and never calls an unread list clean
 ```
+
+A later commit added the file-work budget above: `One account cannot hold the whole machine's uninstall open`.
 
 ---
 
@@ -1069,6 +1077,24 @@ Two real defects were caught locally before CI by parsing every edited `run:` bl
 CI signs the package it tests, so uninstall is proven for every account
 ```
 
+### 14d. A gate that would prove nothing now says so instead of passing
+
+- [x] **Step 7: Tighten nine assertions across both steps, so a gap fails loudly instead of passing quietly**
+
+Three of these checks could pass while measuring less than they claimed. `cargo test -- --exact <name>` matching **zero** tests exits `0`, the same as matching and passing one, so a rename could have turned the offline-hive gate off in silence; the step now captures the harness's stdout (stderr, carrying cargo's own progress and any compile error, still streams straight into the log) and throws unless it contains `1 passed`, in addition to the exit-code check already there — verified by deliberately misspelling the test name locally and watching the new assertion fire where the old one would have stayed green. Nothing previously asserted that the all-users action had actually run or that the two accounts were in the states the step claims to exercise: `kvon`'s classes hive is now polled for up to 60 s and the step throws if it never mounts, so the loaded-hive path cannot go unproven unnoticed, and the uninstall log must carry a `Kuvatin: ` line afterwards or the step throws, since without one `KuvatinUnregisterAllUsers` never fired and every assertion below it would be measuring the ordinary per-user uninstall instead. When `kvoff`'s hive is still mounted after the 180 s wait — which the probe found is the usual outcome — that is a `::warning::` rather than a failure, but it says plainly that both accounts exercised the loaded path this run and that the offline path is proven by the unit test instead.
+
+Every package assertion in both steps reads `SIGNED -eq true -and …`, so an unsigned run would not fail them, it would skip them. Both steps now throw unless `SIGNED` is `true`, and the install test's package assertions (build ≥ 22000, the certificate shipped, the package registered) are unconditional rather than gated behind `$build -ge 22000 -and $env:SIGNED -eq 'true'` — so a runner image older than build 22000 now fails the release instead of quietly skipping the package half, which is safe only because 14a means every packaging run signs and the hosted runner is always build ≥ 22000.
+
+Smaller changes in the same spirit: a swallowed `reg unload` failure — which leaves a hive mounted that the SYSTEM action's own `RegLoadKeyW` then cannot open, reading back as a missing profile — now warns with the exit code instead of vanishing; the throwaway certificate is removed with `-DeleteKey`, or its CNG key container stays behind after the certificate is gone; `secedit`'s grant of the batch logon right is read back from the exported `.inf` and both accounts' SIDs must appear in it, because `secedit` reports success on stdout without necessarily granting anything; the as-user script throws on a non-zero `--register`/`--preset` exit, naming which one failed where it happened rather than leaving a task result of `1` for a precondition check to trip over three steps later; and the `kvoff` wait now polls `<sid>_Classes`, the key the code actually branches on, rather than the plain `HKEY_USERS\<SID>` mount.
+
+The WiX comment for `KuvatinUnregisterAllUsers` (four lines, `crates/kuvatin/wix/main.wxs`) now records that the action has no rollback pair, same as `KuvatinUnregister` above it: a rolled-back uninstall brings the product back with every account's menu entries still removed, until each of those users next launches Kuvatin and it registers them again.
+
+- [x] **Step 8: Commit**
+
+```
+A gate that would prove nothing now says so instead of passing
+```
+
 ---
 
 ## Task 15: Docs — README and CHANGELOG
@@ -1165,14 +1191,14 @@ Under `CI=1` locally, exactly one of these fails — the offline hive test, beca
 | `shell::verbs::tests::*` (9) | 2, 3 | same gate | always; 3 self-skip on the same rule. Includes the drift test `the_shared_list_is_the_per_user_key_set` |
 | `shell::windows::tests::*` (5) | 3 | same gate | always. Includes `every_root_points_at_a_store_the_uninstall_removes` |
 | `shell::profiles::tests::*` (5) | 4 | same gate | always; the junction test self-skips only where `mklink /J` is refused |
-| `shell::hive::tests::*` (10) | 5 | the gate **and** the dedicated `Test (offline hive cleanup — gates the release)` step | every push/PR/tag/dispatch. The dedicated step runs `offline_cleanup_removes_only_kuvatin_verbs` by exact name and **relies on its exit code**: the test panics instead of skipping when `CI` is set, so a skip is a failed build. No output is grepped |
+| `shell::hive::tests::*` (10) | 5 | the gate **and** the dedicated `Test (offline hive cleanup — gates the release)` step | every push/PR/tag/dispatch. The dedicated step runs `offline_cleanup_removes_only_kuvatin_verbs` by exact name and gates on **exit code and `1 passed`**: the test panics instead of skipping when `CI` is set, so a skip is a failed build, and a rename that matched zero tests would still exit `0` — which is why the captured stdout must also show one test passing |
 | `shell::paths::tests::*` (10) | 6 | the core gate | always — none of them skip |
 | `shell::files::tests::*` (21) | 7 | the core gate | always; 10 self-skip only where a junction or a reparse conversion is refused, which fails the build under `CI` |
 | `shell::package::tests::*` (16) | 8 | the core gate | always; `enumerating_every_account_hands_back_only_our_package` needs an elevated token |
-| `shell::allusers::tests::*` (18) | 9 | the core gate | always — pure functions over hand-built structs, so nothing to skip |
+| `shell::allusers::tests::*` (19) | 9 | the core gate | always — pure functions over hand-built structs, so nothing to skip |
 | `cli::tests::unregister_all_users_flag` | 11 | the core gate | always |
 | clippy over all targets | 10, 12 | `Clippy (warnings are errors)` | always |
-| Every-account uninstall, end to end (verbs + package + files + presets kept + no system-profile leftover, for the runner, a signed-in account and a signed-out one) | 13, 14c | `Uninstall test (every account)` | when `PACKAGE == 'true'`: tags, manual dispatch, and PRs touching the installer. The package assertions need `SIGNED == 'true'`, which 14a now makes true on those runs too |
+| Every-account uninstall, end to end (verbs + package + files + presets kept + no system-profile leftover, for the runner, a signed-in account and a signed-out-or-still-loaded one) | 13, 14c, 14d | `Uninstall test (every account)` | when `PACKAGE == 'true'`: tags, manual dispatch, and PRs touching the installer. Throws unless `SIGNED == 'true'` (which 14a now makes true on those runs too), unless `kvon`'s hive is actually loaded, and unless the uninstall log carries a `Kuvatin: ` line; warns rather than fails when `kvoff`'s hive is still mounted, since the offline `UsrClass.dat` path is then proven by `shell::hive::tests::*` instead |
 
 **The rule, in one line: a test that skips under `CI` fails the build.** That is enforced inside the tests, by `skip_or_fail_on_ci`, and not by any step reading their output — the one exception being `skip_even_on_ci`, which is used in exactly two places and only where the test has *measured* that the condition it needs cannot hold in this process.
 
@@ -1188,6 +1214,6 @@ The signed-out hive is the one thing a live account on the runner cannot reprodu
 4. File part — a walk that opens every component relative to its parent's handle with `OBJ_DONT_REPARSE`, deletes through handles, includes `Packages\<family>` per profile, prunes parents only when empty, and is pinned by regression tests that perform the real conversion attack (Tasks 6, 7). ✓
 5. `main.rs` switch, stdout only, never `applog`, dispatched before the panic hook with the pre-dispatch audit written down (Tasks 11, 12). ✓
 6. WiX — `SetProperty` + `WixQuietExec64` deferred `Impersonate='no'` `Return='ignore'`, sequenced after `KuvatinUnregister` and before `KuvatinUntrustCert`, `NOT UPGRADINGPRODUCTCODE`, util extension already linked, plus how to read the action's output in the MSI log (Task 13). ✓
-7. CI — every packaging run signed so the package paths are proven on a pull request rather than first on a tag; the offline-hive test gated by exit code; the every-account uninstall with the probe's proven recipe (secedit batch right, password tasks, `reg.exe`-only hive checks, `$global:LASTEXITCODE` resets, native-exit-code guard), hard assertions for the signed-in and signed-out accounts, `Packages` folder asserted gone, presets asserted kept (Task 14). ✓
+7. CI — every packaging run signed so the package paths are proven on a pull request rather than first on a tag; the offline-hive test gated by exit code and a passed-count check; the every-account uninstall with the probe's proven recipe (secedit batch right, password tasks, `reg.exe`-only hive checks, `$global:LASTEXITCODE` resets, native-exit-code guard), hard assertions that the all-users action ran and that the signed-in and signed-out accounts were in the states the step claims, `Packages` folder asserted gone, presets asserted kept (Task 14). ✓
 8. Docs — README "Registration scope" and CHANGELOG Unreleased→Fixed in CRLF (Task 15). ✓
 9. Residual risks written down rather than implied away — hard links, reparse points above the profile, the `RegLoadKeyW` window, files another process holds open, a planted `Packages` junction left in place, and a signed-out account's package removal resting on Windows' own `RemoveForAllUsers` (the orientation's "Known gaps, accepted", and each module's own documentation). ✓
