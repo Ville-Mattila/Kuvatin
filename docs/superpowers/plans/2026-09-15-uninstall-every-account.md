@@ -131,6 +131,8 @@ fn open_relative(
 
 A fourth finding came later, and it is not of the same kind as the three above: those are escalation, this is availability. `std::fs::remove_dir_all`'s descent is unbounded, so an account that keeps creating subdirectories under its own `AppData\Local\Temp\kuvatin` while the sweep runs can hold that one call open for as long as it cares to, and because the accounts are visited one after another inside a deferred custom action, that holds up every account after it and the uninstall with them — an account denying the machine's uninstall, not reaching anywhere it could not already reach. `allusers.rs` now bounds each account's file work to a sixty-second `FILE_BUDGET` (Task 9), which is the fix: nowhere in `files.rs` itself needed to change.
 
+The first cut of that budget covered the removal and left the `Packages` listing in front of it outside, on the grounds that one directory listing ends when it has read what was there. That reading was wrong, and the review said so: `read_dir` is `FindFirstFileW` and `FindNextFileW`, which keep a resume position in the directory's index rather than taking a snapshot, so names created during the scan that sort after the cursor come back like any other — and MSDN leaves what a concurrent change does undefined rather than promising it ends. An account looping on `Packages\zzz-0001`, `zzz-0002`, … could keep the listing yielding and the budgeted thread would never start. The listing and the planning are now inside the budget with the walk, which is where all three belong: the account owns every directory all three of them touch.
+
 ---
 
 ## File structure
@@ -640,6 +642,8 @@ pub(super) struct FileSweep {
 pub(super) fn remove_plan(profile: &Path, plan: &FilePlan) -> FileSweep;
 ```
 
+Absent and gone are told apart at the top of the walk: a profile directory that has vanished between `profiles::vet_dir` vouching for it and the walk starting is a refusal naming it ("the profile directory is no longer there, so nothing of this account's was removed"), not an "already gone" against every planned path. One is an account this uninstall did not clean and the other is an account that was already clean, and this was the one place in the walk where a disappearance would have read as an absence.
+
 Inside, the only thing worth memorising:
 
 ```rust
@@ -773,14 +777,16 @@ Thin on purpose. **`gather` is all the machine-touching; `opening` and `report` 
 ```rust
 const EXIT_DONE: i32 = 0;          // the run happened; refusals do not change it
 const EXIT_NOT_ELEVATED: i32 = 1;  // nothing was attempted
-const EXIT_NO_ACCOUNTS: i32 = 2;   // no account could be listed
+const EXIT_NO_ACCOUNTS: i32 = 2;   // none listed, or every one listed was passed over
 const CAP: usize = 3;              // lines of one kind of trouble before counting only
 const PREFIX: &str = "Kuvatin: ";  // every line, so an MSI log can be grepped
 ```
 
 `gather`'s order matters: **the package first**, while `kuvatin.exe` and `kuvatin_shellext.dll` are still on disk, because removing the registration is what lets go of the DLL before `RemoveFiles` comes for it. Then `hive::enable_backup_restore()` once for the whole run, then `profiles::all()` destructured into `(cleanable, trouble, skipped)`, then each account: the hive, then its files, with **nothing between the two halves** — `clean_profile` holds `UsrClass.dat` exclusively while it is mounted, and putting a disk walk in the middle would hold an account's hive open for no gain.
 
-**One account cannot hold the whole machine's uninstall open.** `std::fs::remove_dir_all`'s descent is unbounded — it starts its enumeration again at every subdirectory it meets — so an account that keeps creating subdirectories under its own `AppData\Local\Temp\kuvatin` while the sweep is running can hold that loop open for as long as it cares to. It gains nothing by it, since the files are its own and SYSTEM reaches nowhere there it could not already reach, but the accounts are visited one after another inside a deferred custom action, so the account after it waits, and so does the uninstall: a denial of service against the uninstall, not an escalation. Each account's file work now gets a sixty-second `FILE_BUDGET`: `remove_within_budget(profile, plan) -> FileWork` spawns a thread running `files::remove_plan` and waits on it through an `mpsc` channel with `recv_timeout`, coming back as `enum FileWork { Done(FileSweep), OutOfTime, Lost(String) }`. A deadline threaded into `remove_plan` itself was considered and rejected: it would bound how many of the plan's entries are attempted, not the single `remove_dir_all` call that never returns, and it would thread a second reader through `files.rs`'s delicate argument about junctions, held handles and re-read attributes for no gain. A walk that runs out of time is left running deliberately — its handles are inside that one account's own profile, so it either finishes unwatched or ends with the process. `paths::package_data_dirs` stays outside the budget, being one directory listing that ends when it has read what was there.
+**One account cannot hold the whole machine's uninstall open.** `std::fs::remove_dir_all`'s descent is unbounded — it starts its enumeration again at every subdirectory it meets — so an account that keeps creating subdirectories under its own `AppData\Local\Temp\kuvatin` while the sweep is running can hold that loop open for as long as it cares to. It gains nothing by it, since the files are its own and SYSTEM reaches nowhere there it could not already reach, but the accounts are visited one after another inside a deferred custom action, so the account after it waits, and so does the uninstall: a denial of service against the uninstall, not an escalation. The listing that comes first is no safer, and the first cut of this budget wrongly assumed it was: `read_dir` is `FindFirstFileW` and `FindNextFileW`, which keep a resume position in the directory's index rather than taking a snapshot, so names created during the scan that sort after the cursor are handed back like any other, and MSDN leaves what a concurrent change does undefined rather than promising it ends. An account looping on `Packages\zzz-0001`, `zzz-0002`, … can keep it yielding just as long as the other end.
+
+All of one account's disk work now gets a single sixty-second `FILE_BUDGET`: `files_within_budget(profile) -> FileWork` spawns a thread that lists (`paths::package_data_dirs`), plans (`paths::plan`) and removes (`files::remove_plan`), and waits on it through an `mpsc` channel with `recv_timeout`, coming back as `enum FileWork { Done { dirs: Vec<String>, sweep: FileSweep }, OutOfTime, Lost(String) }`. The listing's trouble lives inside `Done` rather than beside it, so there is no way to hold a reason from a listing that never finished. A deadline threaded into `remove_plan` itself was considered and rejected: it would bound how many of the plan's entries are attempted, not the single `read_dir` or `remove_dir_all` call that never returns, and it would thread a second reader through `files.rs`'s delicate argument about junctions, held handles and re-read attributes for no gain. Work that runs out of time is left running deliberately — its handles are inside that one account's own profile, so it either finishes unwatched or ends with the process — and nothing of it is counted in the footer's totals, while the account is named in the tally of what to go back to.
 
 What the report says, and why:
 
@@ -792,7 +798,7 @@ What the report says, and why:
 - `shared_obstacle()` is printed once and loudly, then `other_refusals()`, so each thing is said exactly once. A key refused at the read and again at the delete is two lines for one key — a `Trouble` then a `Refused` — and that is correct.
 - Keys are named inside the account's own hive, never `HKCU\Software\Classes\`. A `Mounted` account's keys are reported under `HKEY_USERS\<SID>_Classes\…` even though the mount is gone by print time; that is documented rather than worked around.
 - `access.wording()` and `reach.wording()` are used rather than re-derived. `HiveOutcome::trouble` is hive-level only; verb-level trouble lives in `sweep.lines`.
-- "No account to clean" does not read as "nothing was attempted" when the package sweep above plainly was.
+- "No account to clean" does not read as "nothing was attempted" when the package sweep above plainly was — and it tells the two ways of getting there apart: a machine whose every cleanable account has a junction where its profile directory should be listed its accounts perfectly well and then passed over every one, so the footer says "N were listed and every one of them was passed over" rather than "no account could be listed", which would send the reader to the wrong end of the problem.
 - The footer tallies accounts visited, verb keys removed and refused, files and trees removed, folders pruned, the package, and what is worth going back to — and it never reads "still registered" off a `remaining` list the verify pass could not fill.
 
 - [x] **Step 3: Compile and run the tests**

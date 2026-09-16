@@ -209,9 +209,6 @@ fn same_dir(a: &str, b: &Path) -> bool {
 // SYSTEM would resolve `%LOCALAPPDATA%` to the system profile and leave a
 // brand-new file behind — exactly the sort of leftover this mode exists to
 // remove — so what comes back here is the orchestrator's to print.
-//
-// Nothing outside `#[cfg(test)]` calls it yet: the caller is the
-// `--unregister-all-users` entry point, a later task in that plan.
 // ---------------------------------------------------------------------------
 
 /// How long one deployment operation may take before the sweep stops waiting on

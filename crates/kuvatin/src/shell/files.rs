@@ -512,7 +512,19 @@ fn reach(profile: &Path, target: &Path) -> Reached {
     let mut here = profile.to_path_buf();
     let root = match open_root(profile) {
         Ok(root) => root,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Reached::Absent,
+        // The profile directory has gone between `profiles::vet_dir` vouching
+        // for it and this walk starting. That is not the same as a profile with
+        // nothing of ours left in it: one is an account this uninstall did not
+        // clean, the other an account that was already clean, and counting the
+        // first as "already gone" is the one place in this walk where a
+        // disappearance would read as an absence.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Reached::Refused(format!(
+                "{}: the profile directory is no longer there, so nothing of this account's was \
+                 removed",
+                here.display()
+            ))
+        }
         Err(e) => return Reached::Refused(format!("{}: {}", here.display(), explain("open", &e))),
     };
     match root.metadata().map(|m| m.file_attributes()) {
@@ -1177,6 +1189,43 @@ mod tests {
         assert_eq!(sweep.files_removed, 1);
         assert_eq!(sweep.trees_removed, 1);
         assert_eq!(sweep.trouble, Vec::<String>::new());
+    }
+
+    /// A profile directory that went between the vetting and the walk is an
+    /// account this uninstall did not clean, and reads differently from one
+    /// that had nothing of ours left in it.
+    #[test]
+    fn a_profile_directory_that_has_gone_is_said_rather_than_counted_absent() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        // Named but never created — and the names below are joined by hand
+        // rather than through `local_in`, which would make the very directory
+        // this test is about.
+        let profile = dir.path().join("went-away");
+        let local = profile.join("AppData").join("Local");
+        assert!(
+            !profile.exists(),
+            "the account's directory must not be there"
+        );
+
+        let plan = FilePlan {
+            files: vec![local.join("Kuvatin").join("crash.log")],
+            trees: vec![local.join("Temp").join("kuvatin")],
+            prune_if_empty: Vec::new(),
+        };
+        let sweep = remove_plan(&profile, &plan);
+
+        assert_eq!(sweep.files_absent, 0, "{sweep:?}");
+        assert_eq!(sweep.trees_absent, 0, "{sweep:?}");
+        assert_eq!(
+            sweep.trouble.len(),
+            2,
+            "one for each planned path: {:?}",
+            sweep.trouble
+        );
+        for why in &sweep.trouble {
+            assert!(why.contains("no longer there"), "{why}");
+            assert!(why.contains("went-away"), "the account is named: {why}");
+        }
     }
 
     #[test]
