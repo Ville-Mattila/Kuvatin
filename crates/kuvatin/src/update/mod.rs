@@ -3,6 +3,7 @@
 //! (`…/releases/tag/v2.9.0`). No JSON, no API quota, and nothing is sent
 //! beyond the request itself (User-Agent `Kuvatin/<version>`).
 
+pub mod apply;
 pub mod fetch;
 pub mod verify;
 
