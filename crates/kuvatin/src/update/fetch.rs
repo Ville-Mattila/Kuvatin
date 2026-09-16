@@ -221,10 +221,16 @@ pub fn get_to_file(
     })();
 
     match outcome {
-        Ok(true) => {
-            std::fs::rename(&part, dest)?;
-            Ok(())
-        }
+        Ok(true) => match std::fs::rename(&part, dest) {
+            Ok(()) => Ok(()),
+            // Every other way out of here removes the part file. A rename that
+            // failed must too, or a complete body sits under a name nothing
+            // looks for and nothing cleans up.
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                Err(e.into())
+            }
+        },
         Ok(false) => {
             let _ = std::fs::remove_file(&part);
             bail!("cancelled")
