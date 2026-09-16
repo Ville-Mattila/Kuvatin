@@ -280,6 +280,30 @@
                       Impersonate='yes'
                       Return='ignore' />
 
+        <!--
+          Clean the context menu, the sparse package and the per-user files for
+          EVERY account, as SYSTEM (Impersonate='no'), during uninstall. The
+          impersonated KuvatinUnregister above still cleans the uninstalling
+          user; this adds every other account. WixQuietExec64 (from the already
+          linked WixUtilExtension) runs the command line held in the property
+          whose Id matches this action's Id, and copies the command's stdout
+          into the MSI log. Return='ignore' so one stuck profile cannot abort
+          the uninstall. Run the uninstall with `msiexec /l*v <file>` to get
+          that log; the report is printed under this action's Id
+          (KuvatinUnregisterAllUsers), and the exit code is deliberately
+          ignored, so the log is the only place the detail shows up.
+        -->
+        <SetProperty Id='KuvatinUnregisterAllUsers'
+                     Before='KuvatinUnregisterAllUsers'
+                     Sequence='execute'
+                     Value='&quot;[#exe0]&quot; --unregister-all-users --quiet' />
+        <CustomAction Id='KuvatinUnregisterAllUsers'
+                      BinaryKey='WixCA'
+                      DllEntry='WixQuietExec64'
+                      Execute='deferred'
+                      Impersonate='no'
+                      Return='ignore' />
+
 <?ifdef SignCerPath?>
         <!--
           The Windows 11 menu package is signed; its certificate must be in the
@@ -307,10 +331,12 @@
             <Custom Action='KuvatinTrustCert' After='InstallFiles'>NOT Installed</Custom>
             <Custom Action='KuvatinRegister' After='KuvatinTrustCert'>NOT Installed</Custom>
             <Custom Action='KuvatinUnregister' Before='RemoveFiles'>Installed AND (REMOVE="ALL")</Custom>
-            <Custom Action='KuvatinUntrustCert' After='KuvatinUnregister'>Installed AND (REMOVE="ALL")</Custom>
+            <Custom Action='KuvatinUnregisterAllUsers' After='KuvatinUnregister'>Installed AND (REMOVE="ALL") AND NOT UPGRADINGPRODUCTCODE</Custom>
+            <Custom Action='KuvatinUntrustCert' After='KuvatinUnregisterAllUsers'>Installed AND (REMOVE="ALL")</Custom>
 <?else?>
             <Custom Action='KuvatinRegister' After='InstallFiles'>NOT Installed</Custom>
             <Custom Action='KuvatinUnregister' Before='RemoveFiles'>Installed AND (REMOVE="ALL")</Custom>
+            <Custom Action='KuvatinUnregisterAllUsers' After='KuvatinUnregister'>Installed AND (REMOVE="ALL") AND NOT UPGRADINGPRODUCTCODE</Custom>
 <?endif?>
         </InstallExecuteSequence>
 
