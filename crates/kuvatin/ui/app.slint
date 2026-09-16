@@ -327,6 +327,7 @@ export component AppWindow inherits Window {
     changed exporting => { if (!self.exporting) { kbd.focus(); } }
     changed confirm-delete => { if (!self.confirm-delete) { kbd.focus(); } }
     changed confirm-open-project => { if (!self.confirm-open-project) { kbd.focus(); } }
+    changed update-phase => { if (self.update-phase == 0) { kbd.focus(); } }
 
     // Global key handling. The FocusScope wraps every child of the window
     // (main layout, drop banner, modals), so a key the focused element rejects
@@ -356,7 +357,8 @@ export component AppWindow inherits Window {
     // pressed behind a dialog must never change the edit underneath it.
     pure function modal-open() -> bool {
         return root.error-visible || root.export-config || root.seq-config || root.importing
-            || root.confirm-delete || root.confirm-open-project || root.exporting;
+            || root.confirm-delete || root.confirm-open-project || root.exporting
+            || root.update-phase != 0;
     }
     // Ctrl+Z undoes; Ctrl+Y and Ctrl+Shift+Z redo, in whichever mode is showing.
     // A focused text field keeps all three keys: Ctrl+Z and Ctrl+Y are its own
