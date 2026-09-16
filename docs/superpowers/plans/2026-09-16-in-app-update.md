@@ -1492,7 +1492,7 @@ Beside the other modals (after the `confirm-open-project` block):
             }
             if root.update-unsaved : Text {
                 text: "The timeline has changes that have not been saved. Closing loses them.";
-                color: Theme.warn; font-size: 12px; wrap: word-wrap;
+                color: Theme.danger; font-size: 12px; wrap: word-wrap;
             }
             HorizontalLayout {
                 spacing: 10px;
@@ -1521,7 +1521,7 @@ Beside the other modals (after the `confirm-open-project` block):
                 wrap: word-wrap; vertical-stretch: 1;
             }
             Rectangle {
-                height: 6px; border-radius: 3px; background: Theme.track;
+                height: 6px; border-radius: 3px; background: Theme.well;
                 Rectangle {
                     x: 0; height: parent.height; border-radius: 3px; background: Theme.accent;
                     width: root.update-progress < 0 ? parent.width : parent.width * root.update-progress;
@@ -1571,16 +1571,21 @@ alongside the other modal cases, and **before** any catch-all:
 Escape is deliberately not wired for phase 2: a download in flight is stopped
 with Cancel, which also stops the worker.
 
-- [ ] **Step 5: Add the two properties the dialog needs**
+- [ ] **Step 5: Add the one property the dialog needs**
 
-If `app-version`, `Theme.warn` or `Theme.track` do not exist, add them:
-`app-version` as `in property <string> app-version;` next to `update-available`
-(set from `update::CURRENT` in Task 12), and any missing theme colour in
-`crates/kuvatin/ui/theme.slint` following the names already there. Check first:
+`app-version` does not exist yet. Add it next to `update-available`:
 
-```bash
-grep -n "app-version\|warn:\|track:" crates/kuvatin/ui/app.slint crates/kuvatin/ui/theme.slint
+```slint
+    in property <string> app-version;
 ```
+
+Task 12 sets it from `update::CURRENT`.
+
+The colours above are ones the palette already has. It carries no amber, so
+the unsaved-changes line uses `Theme.danger`, which is what this palette means
+by "you are about to lose something", and the progress groove uses
+`Theme.well`, the sunken-surface colour. Do not add a colour to
+`crates/kuvatin/ui/theme.slint` for this dialog.
 
 - [ ] **Step 6: Build the interface**
 
