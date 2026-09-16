@@ -1,11 +1,12 @@
-//! Staging an installer, handing off to a copy of this executable, and that
-//! copy's own run. See the design doc for why the copy exists.
+//! Staging an installer and handing off to `kuvatin-updater`, which installs
+//! it once this process is gone. See the design doc for why the installing is
+//! done by another program: an installer cannot replace a running executable,
+//! and this one imports libraries from the folder being replaced.
 
 use super::{asset_name, asset_urls, fetch, verify};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 /// Where a download waits to be installed. Under `%TEMP%\kuvatin`, which the
 /// every-account uninstall deletes, so a machine that never runs Kuvatin
@@ -18,7 +19,7 @@ pub fn stage_dir() -> Result<PathBuf> {
     Ok(temp.join("kuvatin").join("update"))
 }
 
-/// Delete a staging folder, saying nothing if it is not there. The helper
+/// Delete a staging folder, saying nothing if it is not there. The updater
 /// cannot delete the copy it is running from, so this runs at the next start.
 pub fn sweep(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
@@ -35,7 +36,8 @@ pub fn sweep_stage() {
     }
 }
 
-/// What a finished download left behind.
+/// What a finished download left behind: the installer, and the copy of
+/// `kuvatin-updater.exe` that will run it.
 #[derive(Debug, Clone)]
 pub struct Staged {
     pub msi: PathBuf,
@@ -66,9 +68,9 @@ fn accept(msi: &Path, checksum_file: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Download `version`'s installer and its checksum, check it, and copy this
-/// executable in beside it to do the installing. Anything it wrote is removed
-/// if any step fails.
+/// Download `version`'s installer and its checksum, check it, and copy the
+/// updater in beside it to do the installing. Anything it wrote is removed if
+/// any step fails.
 pub fn stage(
     version: &str,
     cancel: &AtomicBool,
@@ -88,10 +90,21 @@ pub fn stage(
         let checksum = fetch::get_to_string(&sha_url, 4096)?;
         accept(&msi, &checksum, &name)?;
 
-        let running = std::env::current_exe().context("could not find this executable")?;
+        // The updater, not a copy of this executable: this one imports its
+        // libraries from the install folder, which is the folder the installer
+        // is about to replace.
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("kuvatin-updater.exe")))
+            .context("could not find kuvatin-updater.exe beside this program")?;
         let helper = dir.join("kuvatin-updater.exe");
-        std::fs::copy(&running, &helper)
-            .with_context(|| format!("could not copy this executable to {}", helper.display()))?;
+        std::fs::copy(&beside, &helper).with_context(|| {
+            format!(
+                "could not copy {} to {}",
+                beside.display(),
+                helper.display()
+            )
+        })?;
         Ok(Staged { msi, helper })
     })();
 
@@ -101,85 +114,8 @@ pub fn stage(
     staged
 }
 
-/// What `msiexec` exiting with a given code means for us.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Installed {
-    Yes,
-    /// The elevation prompt was declined. Nothing was changed.
-    Declined,
-    Failed(u32),
-}
-
-/// 3010 is "installed, reboot when you like", which is still installed. 1602
-/// is "user cancelled" and 1223 is "the elevation prompt was refused".
-pub fn install_outcome(code: u32) -> Installed {
-    match code {
-        0 | 3010 => Installed::Yes,
-        1602 | 1223 => Installed::Declined,
-        other => Installed::Failed(other),
-    }
-}
-
-/// One ASCII line about an outcome, for the log and the message box.
-pub fn describe(outcome: Installed) -> String {
-    match outcome {
-        Installed::Yes => "the update installed".to_string(),
-        Installed::Declined => {
-            "the update needs administrator rights, and the prompt was declined. \
-             Kuvatin is unchanged."
-                .to_string()
-        }
-        Installed::Failed(code) => format!(
-            "the installer stopped with code {code}. Kuvatin is unchanged. \
-             You can install by hand from {}",
-            crate::update::RELEASES_URL
-        ),
-    }
-}
-
-/// How long the helper waits for the app to go before installing anyway.
-const WAIT_FOR_APP: Duration = Duration::from_secs(30);
-
-/// Wait for a process to exit. `true` when it has gone (including when it was
-/// already gone), `false` when the deadline passed first.
-#[cfg(windows)]
-pub fn wait_for_exit(pid: u32, limit: Duration) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, BOOL, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
-
-    unsafe {
-        let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, BOOL::from(false), pid) else {
-            // Not openable: it has exited, or it never existed. Either way
-            // there is nothing left holding the files we are replacing.
-            return true;
-        };
-        let waited =
-            WaitForSingleObject(handle, limit.as_millis().min(u128::from(u32::MAX)) as u32);
-        let _ = CloseHandle(handle);
-        waited == WAIT_OBJECT_0
-    }
-}
-
-#[cfg(not(windows))]
-pub fn wait_for_exit(_pid: u32, _limit: Duration) -> bool {
-    true
-}
-
-/// `/qb` shows a small progress window, so an elevation prompt and a slow
-/// install are not a silent freeze.
-fn msiexec_args(msi: &Path) -> Vec<String> {
-    vec![
-        "/i".to_string(),
-        msi.display().to_string(),
-        "/qb".to_string(),
-        "/norestart".to_string(),
-    ]
-}
-
-/// Start the staged copy as the updater, then the caller quits. `relaunch` is
-/// the executable to start afterwards, normally this one's own path.
+/// Start the staged updater, then the caller quits. `relaunch` is the
+/// executable to start afterwards, normally this one's own path.
 pub fn hand_off(staged: &Staged, relaunch: &Path) -> Result<()> {
     std::process::Command::new(&staged.helper)
         .arg("--apply-update")
@@ -191,73 +127,6 @@ pub fn hand_off(staged: &Staged, relaunch: &Path) -> Result<()> {
         .spawn()
         .with_context(|| format!("could not start {}", staged.helper.display()))?;
     Ok(())
-}
-
-/// The `--apply-update` mode. Returns the process exit code: 0 when the
-/// update installed, 1 when it did not.
-pub fn run_helper(msi: &Path, after: u32, relaunch: Option<&Path>) -> i32 {
-    crate::applog::log(&format!(
-        "update: waiting for process {after}, then installing {}",
-        msi.display()
-    ));
-    if !wait_for_exit(after, WAIT_FOR_APP) {
-        crate::applog::log("update: gave up waiting; installing anyway");
-    }
-
-    let status = std::process::Command::new("msiexec")
-        .args(msiexec_args(msi))
-        .status();
-    let outcome = match status {
-        Ok(s) => install_outcome(s.code().unwrap_or(-1) as u32),
-        Err(e) => {
-            let said = format!("could not start the installer: {e}");
-            crate::applog::log(&format!("update: {said}"));
-            report_failure(&said);
-            return 1;
-        }
-    };
-    crate::applog::log(&format!("update: {}", describe(outcome)));
-
-    if outcome != Installed::Yes {
-        report_failure(&describe(outcome));
-        // The app is gone, so put it back the way it was.
-        if let Some(exe) = relaunch {
-            let _ = std::process::Command::new(exe).spawn();
-        }
-        return 1;
-    }
-
-    let _ = std::fs::remove_file(msi);
-    if let Some(exe) = relaunch {
-        if let Err(e) = std::process::Command::new(exe).spawn() {
-            let said = format!(
-                "the update installed, but Kuvatin did not start again: {e}. \
-                 Start it from the Start menu."
-            );
-            crate::applog::log(&format!("update: {said}"));
-            report_failure(&said);
-            return 1;
-        }
-    }
-    0
-}
-
-/// No window is left by this point, so failures go to a message box as well
-/// as the log.
-#[cfg(windows)]
-fn report_failure(text: &str) {
-    use windows::core::HSTRING;
-    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
-    let body = HSTRING::from(text);
-    let title = HSTRING::from("Kuvatin update");
-    unsafe {
-        MessageBoxW(None, &body, &title, MB_OK | MB_ICONWARNING);
-    }
-}
-
-#[cfg(not(windows))]
-fn report_failure(text: &str) {
-    eprintln!("{text}");
 }
 
 #[cfg(test)]
@@ -292,29 +161,6 @@ mod tests {
         sweep(&root);
     }
 
-    #[test]
-    fn reads_what_msiexec_said() {
-        assert_eq!(install_outcome(0), Installed::Yes);
-        // 3010: installed, wants a reboot at the user's convenience.
-        assert_eq!(install_outcome(3010), Installed::Yes);
-        // 1602 and 1223: the elevation prompt was declined.
-        assert_eq!(install_outcome(1602), Installed::Declined);
-        assert_eq!(install_outcome(1223), Installed::Declined);
-        assert_eq!(install_outcome(1603), Installed::Failed(1603));
-        assert_eq!(install_outcome(1), Installed::Failed(1));
-    }
-
-    #[test]
-    fn every_word_the_helper_can_print_is_ascii() {
-        // The helper's lines end up in kuvatin.log and in a message box, and
-        // the uninstall report taught us what a non-ASCII character does on
-        // the way through Windows tooling.
-        for code in [0u32, 3010, 1602, 1223, 1603, 7] {
-            let said = describe(install_outcome(code));
-            assert!(said.is_ascii(), "{said:?}");
-        }
-    }
-
     /// Same guard as the uninstall report, for the same reason: these lines
     /// reach a log and a message box through Windows tooling that does not
     /// always read UTF-8.
@@ -327,52 +173,10 @@ mod tests {
     fn every_message_this_module_can_produce_is_ascii() {
         let dir = std::env::temp_dir().join("kuvatin-ascii-check");
         let msi = dir.join("kuvatin-9.9.9-x86_64.msi");
-        let mut said: Vec<String> = Vec::new();
-        for code in [0u32, 3010, 1602, 1223, 1603] {
-            said.push(describe(install_outcome(code)));
-        }
-        said.push(
-            accept(&msi, "", "kuvatin-9.9.9-x86_64.msi")
-                .expect_err("no checksum")
-                .to_string(),
-        );
-        for line in &said {
-            assert!(line.is_ascii(), "{line:?}");
-        }
-    }
-
-    #[test]
-    fn waiting_on_a_process_that_has_already_gone_is_success_not_failure() {
-        // A pid that cannot be opened has exited (or never existed), which is
-        // exactly the state the helper is waiting for.
-        assert!(wait_for_exit(
-            0xFFFF_FFF0,
-            std::time::Duration::from_millis(50)
-        ));
-    }
-
-    #[test]
-    fn waiting_on_ourselves_gives_up_at_the_deadline() {
-        let started = std::time::Instant::now();
-        let waited = wait_for_exit(std::process::id(), std::time::Duration::from_millis(200));
-        assert!(!waited, "we are still running, so the wait must time out");
-        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
-    }
-
-    #[test]
-    fn the_command_line_it_runs_names_the_installer_and_nothing_else() {
-        let msi = Path::new(r"C:\Users\x\AppData\Local\Temp\kuvatin\update\k.msi");
-        let args = msiexec_args(msi);
-        assert_eq!(args[0], "/i");
-        assert_eq!(Path::new(&args[1]), msi);
-        assert!(args.contains(&"/qb".to_string()), "{args:?}");
-        assert!(args.contains(&"/norestart".to_string()), "{args:?}");
-        // No REINSTALLMODE: the package's MajorUpgrade handles an upgrade, and
-        // forcing a reinstall mode here would fight it.
-        assert!(
-            !args.iter().any(|a| a.starts_with("REINSTALLMODE")),
-            "{args:?}"
-        );
+        let said = accept(&msi, "", "kuvatin-9.9.9-x86_64.msi")
+            .expect_err("no checksum")
+            .to_string();
+        assert!(said.is_ascii(), "{said:?}");
     }
 
     /// The rule that decides whether a downloaded file may be run, separated

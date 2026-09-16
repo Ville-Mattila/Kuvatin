@@ -43,25 +43,6 @@ pub struct Cli {
     )]
     pub unregister_all_users: bool,
 
-    /// Install an update and exit. Kuvatin starts a copy of itself with this
-    /// while it closes: an installer cannot replace a running executable.
-    #[arg(
-        long,
-        value_name = "MSI",
-        requires = "after",
-        conflicts_with_all = ["register", "unregister", "unregister_all_users", "preset", "sequence_mp4", "print_extensions"]
-    )]
-    pub apply_update: Option<PathBuf>,
-
-    /// The process id --apply-update waits for before installing.
-    #[arg(long, value_name = "PID", requires = "apply_update")]
-    pub after: Option<u32>,
-
-    /// What --apply-update starts once the install is done. Left out, it
-    /// installs and stops.
-    #[arg(long, value_name = "EXE", requires = "apply_update")]
-    pub relaunch: Option<PathBuf>,
-
     /// Never show dialogs (the installer runs --register/--unregister with this).
     #[arg(long)]
     pub quiet: bool,
@@ -85,13 +66,6 @@ pub enum Mode {
     /// would write into one.
     UnregisterAllUsers,
     PrintExtensions,
-    /// Install a staged update. This runs from a copy of the executable in
-    /// the staging folder, never from the installed path.
-    ApplyUpdate {
-        msi: PathBuf,
-        after: u32,
-        relaunch: Option<PathBuf>,
-    },
     QuickRun {
         preset: String,
         paths: Vec<PathBuf>,
@@ -115,15 +89,6 @@ impl Cli {
             Mode::Unregister
         } else if self.unregister_all_users {
             Mode::UnregisterAllUsers
-        } else if let Some(msi) = self.apply_update {
-            match self.after {
-                Some(after) => Mode::ApplyUpdate {
-                    msi,
-                    after,
-                    relaunch: self.relaunch,
-                },
-                None => Mode::Invalid("--apply-update needs --after"),
-            }
         } else if self.print_extensions {
             Mode::PrintExtensions
         } else if self.sequence_mp4 {
@@ -287,44 +252,14 @@ mod tests {
         assert!(matches!(mode_of(&["--sequence-mp4"]), Mode::Invalid(_)));
     }
 
+    /// Installing an update is `kuvatin-updater`'s job, not the app's: the
+    /// app cannot replace its own running executable, and a program that
+    /// imports libraries from the folder being replaced cannot do it either.
     #[test]
-    fn apply_update_carries_the_installer_the_pid_and_the_relaunch() {
-        let mode = mode_of(&[
-            "--apply-update",
-            r"C:\tmp\k.msi",
-            "--after",
-            "4321",
-            "--relaunch",
-            r"C:\Program Files\Kuvatin\kuvatin.exe",
-        ]);
-        assert_eq!(
-            mode,
-            Mode::ApplyUpdate {
-                msi: PathBuf::from(r"C:\tmp\k.msi"),
-                after: 4321,
-                relaunch: Some(PathBuf::from(r"C:\Program Files\Kuvatin\kuvatin.exe")),
-            }
-        );
-    }
-
-    #[test]
-    fn apply_update_can_be_told_not_to_start_anything_afterwards() {
-        // What the pipeline test uses: install, then stop, so no window opens
-        // on the runner.
-        let mode = mode_of(&["--apply-update", r"C:\tmp\k.msi", "--after", "1"]);
-        assert_eq!(
-            mode,
-            Mode::ApplyUpdate {
-                msi: PathBuf::from(r"C:\tmp\k.msi"),
-                after: 1,
-                relaunch: None,
-            }
-        );
-    }
-
-    #[test]
-    fn apply_update_needs_the_process_it_waits_for() {
+    fn the_app_does_not_install_updates_itself() {
         assert!(parse_err(&["--apply-update", r"C:\tmp\k.msi"]));
+        assert!(parse_err(&["--after", "4321"]));
+        assert!(parse_err(&["--relaunch", r"C:\tmp\kuvatin.exe"]));
     }
 
     #[test]
