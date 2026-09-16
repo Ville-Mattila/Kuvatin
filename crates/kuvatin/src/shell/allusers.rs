@@ -17,13 +17,20 @@
 //!   said, in the log, where somebody can read it and act on it.
 //!
 //! The work is gathered first and printed afterwards, and that is what makes it
-//! testable: [`gather`] is all the machine-touching and [`report`] is all the
-//! wording — a pure function over what the other modules handed back. The tests
-//! build those structs by hand and read the lines, so every rule about what
-//! gets printed (the order, the counts, the cap on a hostile hive's hundred
-//! refusals, which cases are failures and which are not) is pinned here rather
-//! than left to be proven by running a real uninstall. Running a real one is
-//! the release workflow's job.
+//! testable: [`gather`] is all the machine-touching, and [`opening`] and
+//! [`report`] are all the wording — pure functions over what the other modules
+//! handed back. The tests build those structs by hand and read the lines, so
+//! every rule about what gets printed (the order, the counts, the cap on a
+//! hostile hive's hundred refusals, which cases are failures and which are not)
+//! is pinned here rather than left to be proven by running a real uninstall.
+//! Running a real one is the release workflow's job.
+//!
+//! The one thing not held back until the end is the opening: two lines saying
+//! what this is and whether it has the token for it, printed and flushed before
+//! any work starts, so an action that is killed or that hangs in the deployment
+//! service still leaves a sign in the MSI log that it began.
+
+use std::io::Write;
 
 use super::files::{self, FileSweep};
 use super::hive::{self, HiveAccess, HiveOutcome};
@@ -65,15 +72,32 @@ const HEADLINE: &str = "--unregister-all-users: taking the Explorer menu, the Wi
 
 /// Clean every account, print what happened, and hand back the exit code.
 ///
-/// Thin on purpose: it gathers, it words, it prints. Everything worth testing
-/// is in the two halves it calls.
-#[allow(dead_code)] // Called by main.rs's `--unregister-all-users` arm, a later task in this plan.
+/// Thin on purpose: it says what it is about to do, it gathers, it words, it
+/// prints. Everything worth testing is in the pure halves it calls.
 pub fn unregister_all_users() -> i32 {
-    let report = report(&gather());
-    for line in &report.lines {
-        println!("{line}");
-    }
+    let elevated = hive::is_elevated();
+    print(&opening(elevated));
+    let report = report(&gather(elevated));
+    print(&report.lines);
     report.code
+}
+
+/// Put lines on stdout, and nowhere else, flushing as we go.
+///
+/// Flushed because the installer captures this through a pipe, where nothing is
+/// line-buffered: unflushed, the opening lines would sit in a buffer until the
+/// process ended, which is exactly the run that has none to show for itself.
+///
+/// A failed write is dropped on purpose. There is nothing to be done about a
+/// stdout that will not take a line, and `println!` would panic on one — taking
+/// a whole machine's cleanup down for the sake of a line of log, in a mode whose
+/// custom action is `Return='ignore'` precisely so that nothing here can.
+fn print(lines: &[String]) {
+    let mut out = std::io::stdout().lock();
+    for line in lines {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = out.flush();
 }
 
 /// What one run gathered, before a word of it is printed.
@@ -81,40 +105,43 @@ pub fn unregister_all_users() -> i32 {
 /// Everything the report says comes from here, which is what lets the wording
 /// be tested without a machine to clean.
 #[derive(Debug, Default)]
-pub(super) struct Run {
+struct Run {
     /// Whether this process holds a full token. Without one nothing below was
     /// attempted, and every field after this one is empty.
-    pub elevated: bool,
+    elevated: bool,
     /// What removing the package for every account came to. `None` when the run
     /// stopped before it.
-    pub package: Option<PackageSweep>,
+    package: Option<PackageSweep>,
     /// Why `SeBackupPrivilege` and `SeRestorePrivilege` could not be enabled,
     /// when they could not. The run carries on regardless: a signed-in
     /// account's hive is mounted already and needs neither privilege.
-    pub privileges: Option<String>,
-    /// What `profiles::all()` could not read, exactly as it came — three kinds
-    /// of trouble joined with `"; "`.
-    pub listing: Option<String>,
+    privileges: Option<String>,
+    /// What `profiles::all()` could not read, a line each as it came.
+    trouble: Vec<String>,
+    /// How many cleanable accounts it had to pass over. Counted by `profiles`
+    /// from what it skipped, not read back out of the lines above, so a capped
+    /// print can never change it.
+    skipped: usize,
     /// One entry per account the run visited.
-    pub accounts: Vec<Account>,
+    accounts: Vec<Account>,
 }
 
 /// What visiting one account came to: its classes hive, then its files.
 #[derive(Debug)]
-pub(super) struct Account {
+struct Account {
     /// Its classes hive, and how that hive was reached.
-    pub hive: HiveOutcome,
+    hive: HiveOutcome,
     /// What `paths::package_data_dirs` could not read under its `Packages`
     /// folder. Each line is already `<path>: <what happened>`.
-    pub dirs: Vec<String>,
+    dirs: Vec<String>,
     /// Its files.
-    pub files: FileSweep,
+    files: FileSweep,
 }
 
 /// The report, ready to print, and what the process should exit with.
-pub(super) struct Report {
-    pub lines: Vec<String>,
-    pub code: i32,
+struct Report {
+    lines: Vec<String>,
+    code: i32,
 }
 
 /// Do the work, touching the machine and printing nothing.
@@ -123,8 +150,7 @@ pub(super) struct Report {
 /// `kuvatin.exe` and `kuvatin_shellext.dll` are still on disk, because removing
 /// the registration is what lets go of the DLL before `RemoveFiles` comes to
 /// delete it.
-fn gather() -> Run {
-    let elevated = hive::is_elevated();
+fn gather(elevated: bool) -> Run {
     if !elevated {
         // Nothing below would work, and half of it would fail loudly enough to
         // read as a machine in trouble rather than as a shell without a token.
@@ -136,13 +162,14 @@ fn gather() -> Run {
     let package = Some(package::unregister_all_users());
     // Once for the whole run, before the first signed-out account needs it.
     let privileges = hive::enable_backup_restore().err();
-    let (profiles, listing) = profiles::all();
-    let accounts = profiles.iter().map(clean).collect();
+    let (cleanable, trouble, skipped) = profiles::all();
+    let accounts = cleanable.iter().map(clean).collect();
     Run {
         elevated,
         package,
         privileges,
-        listing,
+        trouble,
+        skipped: skipped.len(),
         accounts,
     }
 }
@@ -169,15 +196,26 @@ fn clean(profile: &Profile) -> Account {
     }
 }
 
-/// Turn what a run gathered into the lines it prints and the code it exits
-/// with. Pure: it reads the structs and touches nothing.
-pub(super) fn report(run: &Run) -> Report {
+/// The two lines that go out before any work begins: what this mode is, and
+/// whether it has the token it needs.
+///
+/// Pure, like the rest of the wording, so that the report's first two lines are
+/// pinned by the same tests as everything after them even though they are
+/// printed a few minutes earlier.
+fn opening(elevated: bool) -> Vec<String> {
     let mut out = Lines::default();
     out.say(HEADLINE);
     out.say(format!(
         "this process is elevated: {}.",
-        if run.elevated { "yes" } else { "no" }
+        if elevated { "yes" } else { "no" }
     ));
+    out.0
+}
+
+/// Everything after the opening: the lines a finished run prints, and the code
+/// it exits with. Pure — it reads the structs and touches nothing.
+fn report(run: &Run) -> Report {
+    let mut out = Lines::default();
     // A run that never had a token attempted none of the steps below, so it
     // reports none of them: a step that did not run has nothing to say, and
     // saying it anyway reads as a step that found nothing.
@@ -250,57 +288,40 @@ fn registered_for(users: &[PackageUser]) -> String {
 /// enable. Worth a line of its own: the accounts that then keep their menu are
 /// exactly the ones nobody is signed in to notice.
 fn privilege_lines(why: &str, out: &mut Lines) {
-    out.say(format!(
-        "a signed-out account's hive cannot be mounted: {why}"
-    ));
+    // The reason already says what it costs, so the frame only says what it is
+    // about.
+    out.say(format!("the backup and restore privileges: {why}"));
     out.detail("a signed-in account's hive is mounted already, so those are still cleaned.");
 }
 
 /// What the account list came to: everything it could not read, a line each,
 /// and then how many accounts there are to clean and how many were passed over.
 ///
-/// The trouble is split back into lines exactly as `profiles::all()` joined it,
-/// and printed with nothing in front of it — it mixes a ProfileList key path, a
-/// sentence about a list with nothing in it, and one `<SID>: <reason>` per
-/// account, so no one prefix would suit all three. (A reason that carries a
-/// `"; "` of its own is split too, which reads as one line of reason and one of
-/// consequence. That is the price of a joined string, and it costs nothing:
-/// neither half starts with a SID, so neither is counted as an account.)
+/// The trouble is printed with nothing in front of it: `profiles::all()` hands
+/// back three kinds of line — the ProfileList key path, a sentence about a list
+/// with nothing in it, and one `<SID>: <reason>` per account it passed over —
+/// and no one prefix would suit all three.
+///
+/// An account passed over is an account that keeps its menu, so how many there
+/// were is part of the result rather than a detail. The count comes from
+/// `profiles` counting what it skipped, which is why capping the lines below
+/// cannot quietly change it.
 fn account_list_lines(run: &Run, out: &mut Lines) {
-    let troubles = listing_lines(run);
-    if !troubles.is_empty() {
+    if !run.trouble.is_empty() {
         out.say("the account list did not read in full:");
-        for line in &troubles {
-            out.detail(line);
-        }
+        out.capped(&run.trouble);
     }
-    // An account this run had to pass over is an account that keeps its menu,
-    // so how many there were is part of the result rather than a detail. They
-    // are the trouble lines that open with a SID: `profiles::cleanable_dir`
-    // puts the account in front of its own reason, and the other two kinds of
-    // trouble both open with the ProfileList key path.
-    let skipped = troubles
-        .iter()
-        .filter(|line| line.starts_with("S-1-"))
-        .count();
     match run.accounts.len() {
         // Every machine this could be uninstalled from has an account on it, so
         // none at all is the shape of an enumeration that went wrong rather
         // than of a machine with nobody on it.
         0 => out.say(format!(
             "no account to clean, which is not what a machine Kuvatin was installed on looks like; \
-             {skipped} skipped."
+             {} skipped.",
+            run.skipped
         )),
-        n => out.say(format!("{n} account(s) to clean; {skipped} skipped.")),
+        n => out.say(format!("{n} account(s) to clean; {} skipped.", run.skipped)),
     }
-}
-
-/// The account list's trouble, back in the lines it was joined from.
-fn listing_lines(run: &Run) -> Vec<&str> {
-    run.listing
-        .as_deref()
-        .map(|trouble| trouble.split("; ").collect())
-        .unwrap_or_default()
 }
 
 /// One account: how its hive was reached, what came off it, then its files.
@@ -392,8 +413,8 @@ fn file_lines(account: &Account, out: &mut Lines) {
 ///
 /// Exit 0 whenever the run happened, refusals and all — the uninstall does not
 /// stop for them, and the log is where the detail belongs. A non-zero code says
-/// one thing only: nothing was attempted. It is worth telling apart from a run
-/// that attempted everything and was refused, because the answer to it is
+/// one thing only: the accounts were never reached. It is worth telling apart
+/// from a run that reached them and was refused, because the answer to it is
 /// different — run the uninstall as SYSTEM, or find out why the account list
 /// would not read.
 fn footer_lines(run: &Run, out: &mut Lines) -> i32 {
@@ -409,42 +430,28 @@ fn footer_lines(run: &Run, out: &mut Lines) -> i32 {
         return EXIT_NOT_ELEVATED;
     }
     if run.accounts.is_empty() {
+        // Not "nothing was attempted": the package sweep above ran and may well
+        // have removed something. What did not happen is the accounts.
         out.say(
-            "nothing was attempted: no account to clean was listed, so no account's menu was \
-             touched.",
+            "no account could be listed to clean, so no account's menu was touched; the package \
+             above is all that happened.",
         );
         out.say(format!(
-            "exiting {EXIT_NO_ACCOUNTS}: nothing was attempted, because no account could be \
-             listed to clean."
+            "exiting {EXIT_NO_ACCOUNTS}: no account could be listed to clean."
         ));
         return EXIT_NO_ACCOUNTS;
     }
-    let told = run
-        .accounts
-        .iter()
-        .filter(|account| {
-            !account.hive.trouble.is_empty()
-                || !account.dirs.is_empty()
-                || !account.files.trouble.is_empty()
-                || account.hive.sweep.refused > 0
-                || !account.hive.sweep.troubles().is_empty()
-        })
-        .count();
-    let aside = if told > 0 {
-        format!("; {told} account(s) had something to report")
-    } else {
-        String::new()
-    };
     out.say(format!(
-        "done: {} account(s) visited; {} verb key(s) removed and {} refused; {} file(s), \
-         {} folder tree(s) and {} folder(s) pruned; {}{aside}.",
+        "done: {} account(s) visited; {} verb key(s) removed and {} refused; {} file(s) and \
+         {} folder tree(s) removed, {} folder(s) pruned; {}{}.",
         run.accounts.len(),
         total(run, |account| account.hive.sweep.removed),
         total(run, |account| account.hive.sweep.refused),
         total(run, |account| account.files.files_removed),
         total(run, |account| account.files.trees_removed),
         total(run, |account| account.files.pruned),
-        package_total(run)
+        package_total(run),
+        worth_going_back_to(run)
     ));
     out.say(format!(
         "exiting {EXIT_DONE}: the run finished. A refusal above does not stop the uninstall — the \
@@ -457,14 +464,66 @@ fn total(run: &Run, of: impl Fn(&Account) -> usize) -> usize {
     run.accounts.iter().map(of).sum()
 }
 
+/// What is left to go back to, as a clause at the end of the footer: the
+/// accounts with something to report, and the package when it had something of
+/// its own. Empty when the run came up clean, which is the point — a footer
+/// that always ended with a tally would say nothing by saying it every time.
+fn worth_going_back_to(run: &Run) -> String {
+    let accounts = run
+        .accounts
+        .iter()
+        .filter(|account| account_reported(account))
+        .count();
+    let mut said = Vec::new();
+    if accounts > 0 {
+        said.push(format!("{accounts} account(s)"));
+    }
+    // The package's trouble is its own: a machine whose accounts all came clean
+    // but whose registration would not go is not a clean machine.
+    if run
+        .package
+        .as_ref()
+        .is_some_and(|sweep| !sweep.trouble.is_empty())
+    {
+        said.push("the package".to_string());
+    }
+    if said.is_empty() {
+        return String::new();
+    }
+    format!("; {} had something to report", said.join(" and "))
+}
+
+/// Whether one account is worth going back to: anything refused, anything that
+/// would not read, anything that would not go.
+fn account_reported(account: &Account) -> bool {
+    !account.hive.trouble.is_empty()
+        || !account.dirs.is_empty()
+        || !account.files.trouble.is_empty()
+        || account.hive.sweep.refused > 0
+        || !account.hive.sweep.troubles().is_empty()
+}
+
 /// The package's share of the footer, in the same words the section above used
 /// — an unsupported Windows is still not a failure down here.
+///
+/// Clean means nothing to report, not an empty `remaining`. When the second
+/// enumeration fails, `package.rs` has nothing to put in `remaining` and says so
+/// in `trouble` instead, so a footer that counted `remaining` would call a
+/// machine it could not read clean — the one case where the count is worth
+/// least is the one where it looks best.
 fn package_total(run: &Run) -> String {
     match run.package.as_ref().map(|sweep| (sweep.reach, sweep)) {
-        Some((PackageReach::Swept, sweep)) => format!(
-            "the package removed for {} registration(s), {} still registered",
+        Some((PackageReach::Swept, sweep)) if !sweep.trouble.is_empty() => format!(
+            "the package removed for {} registration(s), and what is left is in the {} line(s) \
+             above",
             sweep.removed,
-            sweep.remaining.len()
+            sweep.trouble.len()
+        ),
+        // Nothing to report and so nothing left: every registration that
+        // outlived the removals put a line of its own in `trouble`.
+        Some((PackageReach::Swept, sweep)) => format!(
+            "the package removed for {} registration(s), with nothing left registered",
+            sweep.removed
         ),
         Some((PackageReach::Unsupported, _)) => "no package on this Windows to remove".to_string(),
         Some((PackageReach::Unreachable, _)) | None => {
@@ -510,6 +569,20 @@ mod tests {
     const ALICE: &str = "S-1-5-21-1004336348-1177238915-682003330-1001";
     const BOB: &str = "S-1-5-21-1004336348-1177238915-682003330-1002";
 
+    /// The whole report as the entry point prints it: the opening lines, which
+    /// go out before the work starts, then everything `report` has to say about
+    /// what the work came to. `unregister_all_users` does exactly this, with
+    /// `gather` in between.
+    fn full(run: &Run) -> Report {
+        let mut lines = opening(run.elevated);
+        let rest = report(run);
+        lines.extend(rest.lines);
+        Report {
+            lines,
+            code: rest.code,
+        }
+    }
+
     /// A run that went as well as a run can go: the package gone, two accounts
     /// cleaned, nothing refused.
     fn ordinary_run() -> Run {
@@ -517,7 +590,8 @@ mod tests {
             elevated: true,
             package: Some(swept(1, 0)),
             privileges: None,
-            listing: None,
+            trouble: Vec::new(),
+            skipped: 0,
             accounts: vec![
                 account(ALICE, HiveAccess::Loaded),
                 account(BOB, HiveAccess::Mounted),
@@ -598,7 +672,7 @@ mod tests {
     /// then the footer.
     #[test]
     fn the_report_reads_in_the_order_the_run_happened() {
-        let report = report(&ordinary_run());
+        let report = full(&ordinary_run());
         let l = &report.lines;
         // The account's own heading line, and not merely its SID: the package
         // section above names the same account, which is exactly right there
@@ -636,7 +710,7 @@ mod tests {
     /// uninstall did can still be read for what this mode said.
     #[test]
     fn every_line_says_whose_it_is() {
-        let lines = report(&ordinary_run()).lines;
+        let lines = full(&ordinary_run()).lines;
         assert!(lines.len() > 8, "a thin report proves nothing: {lines:#?}");
         for line in &lines {
             assert!(line.starts_with("Kuvatin: "), "stray line: {line}");
@@ -658,7 +732,7 @@ mod tests {
                     .to_string(),
             )],
         };
-        let lines = report(&run).lines;
+        let lines = full(&run).lines;
 
         let refusals = matching(&lines, r"Directory\shell\Kuvatin");
         assert_eq!(refusals.len(), 1, "{lines:#?}");
@@ -678,11 +752,17 @@ mod tests {
     fn the_count_says_how_many_accounts_were_skipped() {
         let mut run = ordinary_run();
         run.accounts.truncate(1);
-        run.listing = Some(format!(
+        run.trouble = vec![
+            // A reason with a semicolon of its own, which is what `profiles`
+            // hands back one line at a time so that nothing here has to guess
+            // where one reason ends and the next begins.
             "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList: we are not allowed to \
-             open it (error 5); {BOB}: C:\\Users\\bob does not exist"
-        ));
-        let lines = report(&run).lines;
+             open it (error 5); read 6 before it"
+                .to_string(),
+            format!("{BOB}: C:\\Users\\bob does not exist"),
+        ];
+        run.skipped = 1;
+        let lines = full(&run).lines;
 
         assert_eq!(
             matching(&lines, "1 account(s) to clean").len(),
@@ -690,8 +770,17 @@ mod tests {
             "{lines:#?}"
         );
         assert_eq!(matching(&lines, "1 skipped").len(), 1, "{lines:#?}");
-        // One line each, printed as they came, with no hive in front of them.
-        assert_eq!(matching(&lines, "ProfileList: we are not allowed").len(), 1);
+        // One line each, printed as they came, with no hive in front of them
+        // and the semicolon inside the first one left whole.
+        assert_eq!(
+            matching(&lines, "ProfileList: we are not allowed").len(),
+            1,
+            "{lines:#?}"
+        );
+        assert!(
+            matching(&lines, "read 6 before it")[0].contains("error 5"),
+            "a reason must not be cut in half: {lines:#?}"
+        );
         assert_eq!(matching(&lines, "C:\\Users\\bob does not exist").len(), 1);
     }
 
@@ -701,33 +790,39 @@ mod tests {
     fn no_account_at_all_is_suspicious_and_not_a_success() {
         let mut run = ordinary_run();
         run.accounts.clear();
-        run.listing = Some(
+        run.trouble = vec![
             "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList listed no accounts at \
              all, which no Windows machine does"
                 .to_string(),
-        );
-        let report = report(&run);
+        ];
+        let report = full(&run);
 
         assert_eq!(report.code, 2, "{:#?}", report.lines);
         assert!(!matching(&report.lines, "no account to clean").is_empty());
         assert!(
-            !matching(&report.lines, "nothing was attempted").is_empty(),
+            !matching(&report.lines, "no account could be listed to clean").is_empty(),
             "the footer must say why: {:#?}",
+            report.lines
+        );
+        // The package sweep above did run, so the footer must not call the
+        // whole run a thing that never happened.
+        assert!(
+            matching(&report.lines, "nothing was attempted").is_empty(),
+            "the package was attempted: {:#?}",
             report.lines
         );
     }
 
-    /// A hostile hive can refuse hundreds of keys in a hundred different ways.
-    /// The log says three and counts the rest.
-    #[test]
-    fn a_long_list_of_refusals_is_capped() {
+    /// One account whose hive refused `count` keys, each in its own words so
+    /// that no two of them share an obstacle.
+    fn run_refusing(count: usize) -> Run {
         let mut run = ordinary_run();
         run.accounts.truncate(1);
         run.accounts[0].hive.sweep = VerbSweep {
             removed: 0,
             absent: 0,
-            refused: 50,
-            lines: (0..50)
+            refused: count,
+            lines: (0..count)
                 .map(|i| {
                     SweepLine::Refused(format!(
                         r"SystemFileAssociations\.x{i:03}\shell\Kuvatin: we are not allowed to delete it (status 0xc0000022)"
@@ -735,7 +830,14 @@ mod tests {
                 })
                 .collect(),
         };
-        let lines = report(&run).lines;
+        run
+    }
+
+    /// A hostile hive can refuse hundreds of keys in a hundred different ways.
+    /// The log says three and counts the rest.
+    #[test]
+    fn a_long_list_of_refusals_is_capped() {
+        let lines = full(&run_refusing(50)).lines;
 
         assert_eq!(
             matching(&lines, "SystemFileAssociations").len(),
@@ -745,6 +847,80 @@ mod tests {
         assert_eq!(matching(&lines, "and 47 more").len(), 1, "{lines:#?}");
         // The count is still the whole truth, capped list or not.
         assert!(!matching(&lines, "50 refused").is_empty(), "{lines:#?}");
+    }
+
+    /// The cap speaks only when it has left something out. A list of exactly
+    /// three is a whole list, and "and 0 more like it" under one would be a
+    /// line that says nothing about nothing.
+    #[test]
+    fn the_cap_stays_quiet_when_it_has_left_nothing_out() {
+        let whole = full(&run_refusing(CAP)).lines;
+        assert_eq!(matching(&whole, r"shell\Kuvatin").len(), CAP, "{whole:#?}");
+        assert!(matching(&whole, "more like it").is_empty(), "{whole:#?}");
+
+        let one_over = full(&run_refusing(CAP + 1)).lines;
+        assert_eq!(
+            matching(&one_over, r"shell\Kuvatin").len(),
+            CAP,
+            "{one_over:#?}"
+        );
+        assert_eq!(
+            matching(&one_over, "and 1 more like it").len(),
+            1,
+            "{one_over:#?}"
+        );
+    }
+
+    /// A candidate refused when it was read and again when it was deleted is
+    /// two lines about one key; a note the deletion left along the way is a
+    /// third kind of line; and every one of them is named inside the account's
+    /// own hive.
+    #[test]
+    fn every_kind_of_sweep_line_is_named_inside_the_accounts_hive() {
+        let mut run = ordinary_run();
+        run.accounts.truncate(1);
+        let key = r"SystemFileAssociations\.qoi\shell\Kuvatin";
+        run.accounts[0].hive.sweep = VerbSweep {
+            removed: 16,
+            absent: 0,
+            refused: 1,
+            lines: vec![
+                SweepLine::Trouble(format!("{key}: we are not allowed to open it (error 5)")),
+                SweepLine::Note(
+                    r"Directory\shell\Kuvatin: took a REG_LINK's entry without following it"
+                        .to_string(),
+                ),
+                SweepLine::Refused(format!(
+                    "{key}: we are not allowed to delete it (status 0xc0000022)"
+                )),
+            ],
+        };
+        // A hive that was reached and then had something to say about itself.
+        run.accounts[0].hive.trouble = vec![format!(
+            r"HKEY_USERS\{ALICE}_Classes: we are not allowed to open it (error 5)"
+        )];
+        let lines = full(&run).lines;
+        let hive = format!(r"HKEY_USERS\{ALICE}_Classes\");
+
+        let about_the_key = matching(&lines, ".qoi");
+        assert_eq!(about_the_key.len(), 2, "one key, two lines: {lines:#?}");
+        assert!(about_the_key
+            .iter()
+            .any(|line| line.contains("not allowed to open")));
+        assert!(about_the_key
+            .iter()
+            .any(|line| line.contains("not allowed to delete")));
+        for line in &about_the_key {
+            assert!(line.contains(&hive), "not named in its hive: {line}");
+        }
+        let note = matching(&lines, "without following it");
+        assert_eq!(note.len(), 1, "{lines:#?}");
+        assert!(note[0].contains(&hive), "{}", note[0]);
+        // A hive that was already mounted was reached, whatever else went on.
+        assert!(
+            !matching(&lines, "on the way to its hive").is_empty(),
+            "{lines:#?}"
+        );
     }
 
     /// Twelve keys refused because of one planted link is one thing to deal
@@ -767,7 +943,7 @@ mod tests {
                 )))
                 .collect(),
         };
-        let lines = report(&run).lines;
+        let lines = full(&run).lines;
 
         assert_eq!(
             matching(&lines, "carries a REG_LINK").len(),
@@ -795,7 +971,7 @@ mod tests {
             remaining: Vec::new(),
             trouble: Vec::new(),
         });
-        let report = report(&run);
+        let report = full(&run);
 
         assert_eq!(report.code, 0);
         assert_eq!(
@@ -829,7 +1005,7 @@ mod tests {
             remaining: Vec::new(),
             trouble: vec!["the deployment service would not start (0x80070422)".to_string()],
         });
-        let report = report(&run);
+        let report = full(&run);
 
         assert_eq!(report.code, 0, "the accounts were still cleaned");
         assert!(!matching(&report.lines, "would not answer").is_empty());
@@ -854,7 +1030,7 @@ mod tests {
         run.accounts[1].hive.trouble = vec![
             r"HKEY_USERS\S-1-5-21-x_Classes: we are not allowed to open it (error 5)".to_string(),
         ];
-        let report = report(&run);
+        let report = full(&run);
 
         assert_eq!(report.code, 0, "{:#?}", report.lines);
         // Printed as it came: a path and a reason, not reworded.
@@ -882,7 +1058,7 @@ mod tests {
         run.accounts[0].hive.sweep = VerbSweep::default();
         run.accounts[0].hive.trouble =
             vec![r"HKEY_USERS\S-1-5-21-x_Classes: no such key".to_string()];
-        let lines = report(&run).lines;
+        let lines = full(&run).lines;
 
         assert!(!matching(&lines, "never reached").is_empty(), "{lines:#?}");
         assert!(matching(&lines, "around mounting").is_empty(), "{lines:#?}");
@@ -893,7 +1069,7 @@ mod tests {
     /// code says so.
     #[test]
     fn a_run_without_a_full_token_attempts_nothing() {
-        let report = report(&Run::default());
+        let report = full(&Run::default());
 
         assert_eq!(report.code, 1, "{:#?}", report.lines);
         assert!(!matching(&report.lines, "elevated: no").is_empty());
@@ -916,7 +1092,7 @@ mod tests {
              cannot be mounted"
                 .to_string(),
         );
-        let report = report(&run);
+        let report = full(&run);
 
         assert_eq!(report.code, 0);
         assert_eq!(matching(&report.lines, "SeBackupPrivilege").len(), 1);
@@ -931,7 +1107,7 @@ mod tests {
         run.accounts[0].dirs = vec![
             r"C:\Users\alice\AppData\Local\Packages would not be read (os error 5)".to_string(),
         ];
-        let lines = report(&run).lines;
+        let lines = full(&run).lines;
 
         let where_said = at(&lines, "Packages would not be read");
         assert!(at(&lines, &format!("{PREFIX}{ALICE}: ")) < where_said);
@@ -945,7 +1121,7 @@ mod tests {
     /// still knows whether the machine came clean.
     #[test]
     fn the_footer_adds_the_run_up() {
-        let lines = report(&ordinary_run()).lines;
+        let lines = full(&ordinary_run()).lines;
         let footer = lines[at(&lines, "done:")].to_string();
 
         assert!(footer.contains("2 account(s)"), "{footer}");
@@ -954,5 +1130,37 @@ mod tests {
         assert!(footer.contains("4 folder tree(s)"), "{footer}");
         assert!(footer.contains("2 folder(s) pruned"), "{footer}");
         assert!(footer.contains("1 registration(s)"), "{footer}");
+        // Nothing to report is what "clean" means, and a clean run says so
+        // without a tally of who had something to say.
+        assert!(footer.contains("nothing left registered"), "{footer}");
+        assert!(!footer.contains("had something to report"), "{footer}");
+    }
+
+    /// A second enumeration that would not list leaves `remaining` empty and
+    /// says so in `trouble`. "Clean" is an empty `trouble`, never an empty
+    /// `remaining`: the footer must not read a list we could not fetch as a
+    /// machine with nothing left on it.
+    #[test]
+    fn a_package_pass_that_would_not_list_does_not_read_as_nothing_left() {
+        let mut run = ordinary_run();
+        let mut sweep = swept(1, 0);
+        sweep.trouble = vec![
+            "listing the packages after the removals would not start (0x80070422); what is left \
+             is unknown"
+                .to_string(),
+        ];
+        run.package = Some(sweep);
+        let report = full(&run);
+        let footer = report.lines[at(&report.lines, "done:")].to_string();
+
+        assert_eq!(report.code, 0, "{:#?}", report.lines);
+        assert!(!footer.contains("nothing left registered"), "{footer}");
+        assert!(footer.contains("1 line(s) above"), "{footer}");
+        // And the run does not add up to a clean machine, though no account had
+        // anything to say.
+        assert!(
+            footer.contains("the package had something to report"),
+            "{footer}"
+        );
     }
 }

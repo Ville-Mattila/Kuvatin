@@ -223,23 +223,30 @@ fn cleanable_dir(sid: &str) -> Result<PathBuf, String> {
         .map_err(|why| format!("{sid}: {why}"))
 }
 
-/// Every cleanable profile whose directory we can stand behind, plus what went
-/// wrong on the way, when anything did.
+/// Every cleanable profile whose directory we can stand behind, everything that
+/// went wrong on the way, and which accounts that cost us.
 ///
 /// Same shape as `verbs::subkeys_to_delete` and for the same reason: an
 /// all-users uninstall that read a partial `ProfileList` and quietly treated
 /// that as "no profiles" would leave every real account's classes hive
 /// untouched while calling the machine clean. So the caller gets everything
-/// this could read, plus the reason when it is not everything, rather than a
+/// this could read, plus the reasons when it is not everything, rather than a
 /// short list passed off as a complete one.
 ///
-/// The reason gathers three kinds of trouble: an enumeration that would not
-/// read, a list with nothing in it at all, and each individual account this
-/// had to pass over — because an account skipped in silence is precisely the
-/// one that keeps its menu. Accounts that are *meant* to be passed over, the
-/// service SIDs and the `.bak` markers, say nothing: they are not trouble, and
-/// a line each would bury the ones that are.
-pub(super) fn all() -> (Vec<Profile>, Option<String>) {
+/// The trouble gathers three kinds of line: an enumeration that would not read,
+/// a list with nothing in it at all, and each individual account this had to
+/// pass over — because an account skipped in silence is precisely the one that
+/// keeps its menu. Accounts that are *meant* to be passed over, the service SIDs
+/// and the `.bak` markers, say nothing: they are not trouble, and a line each
+/// would bury the ones that are.
+///
+/// One line per entry rather than one joined string, and the skipped SIDs as
+/// SIDs. The caller prints these and counts them, and both go wrong on a joined
+/// string: a reason may carry a `"; "` of its own (`enum_children`'s
+/// `"…(error 5); read 6 before it"` does), so splitting it back apart cuts a
+/// sentence in half, and counting accounts by looking for a SID at the start of
+/// a line is guesswork about text this module already knows the answer to.
+pub(super) fn all() -> (Vec<Profile>, Vec<String>, Vec<String>) {
     let (sids, mut trouble) = match enum_subkeys(HKEY_LOCAL_MACHINE, PROFILE_LIST) {
         Ok(sids) => (sids, Vec::new()),
         Err(why) => (Vec::new(), vec![why]),
@@ -253,16 +260,20 @@ pub(super) fn all() -> (Vec<Profile>, Option<String>) {
         ));
     }
     let mut profiles = Vec::new();
+    let mut skipped = Vec::new();
     for sid in sids {
         if !is_cleanup_sid(&sid) {
             continue;
         }
         match cleanable_dir(&sid) {
             Ok(dir) => profiles.push(Profile { sid, dir }),
-            Err(why) => trouble.push(why),
+            Err(why) => {
+                trouble.push(why);
+                skipped.push(sid);
+            }
         }
     }
-    (profiles, (!trouble.is_empty()).then(|| trouble.join("; ")))
+    (profiles, trouble, skipped)
 }
 
 #[cfg(test)]
@@ -468,9 +479,30 @@ mod tests {
     /// assertion.
     #[test]
     fn enumeration_returns_only_real_user_profiles() {
-        let (profiles, trouble) = all();
-        if let Some(why) = &trouble {
-            eprintln!("ProfileList did not read in full: {why}");
+        let (profiles, trouble, skipped) = all();
+        for why in &trouble {
+            println!("ProfileList did not read in full: {why}");
+        }
+        // An account that was passed over is named as a SID *and* explained in
+        // a line of its own, so the caller can count one and print the other
+        // without reading either out of the other's text.
+        assert!(
+            skipped.len() <= trouble.len(),
+            "every skipped account owes a reason: {skipped:?} against {trouble:?}"
+        );
+        for sid in &skipped {
+            assert!(
+                is_cleanup_sid(sid),
+                "only a cleanable account can be skipped"
+            );
+            assert!(
+                trouble.iter().any(|why| why.starts_with(sid)),
+                "{sid} was skipped without saying why: {trouble:?}"
+            );
+            assert!(
+                !profiles.iter().any(|p| &p.sid == sid),
+                "{sid} was both cleaned and skipped"
+            );
         }
         // Whoever is running this test has a profile, so an empty list means
         // the enumeration found nothing rather than that there is nothing —
