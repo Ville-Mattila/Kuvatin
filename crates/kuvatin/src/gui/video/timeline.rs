@@ -3,7 +3,7 @@
 
 use super::undo::{Recorder, StepKind};
 use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT};
-use crate::gui::{AppWindow, ClipKind, TimelineClip};
+use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -266,6 +266,62 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 }
                 if selected {
                     ui.set_insp_duration_s(geom.duration.as_secs_f32().round().max(1.0) as i32);
+                }
+            }
+        });
+    }
+    // Split the selected clip where the playhead stands (the Split chip, S).
+    {
+        let ui_weak = ui_weak.clone();
+        let project_slot = project_slot.clone();
+        let tl_clips = tl_clips.clone();
+        let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
+        ui.on_timeline_split(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let i = sel_idx.get();
+            if i < 0 {
+                return;
+            }
+            let Some(mut left) = tl_clips.row_data(i as usize) else {
+                return;
+            };
+            let at = std::time::Duration::from_secs_f64(f64::from(ui.get_playhead().max(0.0)));
+            let mut slot = project_slot.borrow_mut();
+            let Some(p) = slot.as_mut() else {
+                return;
+            };
+            let before = rec.before(Some(&*p));
+            let cid = kuvatin_video::ClipId(left.id.to_string());
+            match p.split_clip(&cid, at) {
+                Ok((right_id, lg, rg)) => {
+                    left.duration = lg.duration.as_secs_f32();
+                    // The right half is the same source further on: its row
+                    // is the left's, name and pictures and all, at its place.
+                    let mut right = left.clone();
+                    right.id = right_id.0.clone().into();
+                    right.start = rg.start.as_secs_f32();
+                    right.inpoint = rg.inpoint.as_secs_f32();
+                    right.duration = rg.duration.as_secs_f32();
+                    right.selected = false;
+                    tl_clips.set_row_data(i as usize, left.clone());
+                    tl_clips.push(right);
+                    // After the push: the step keeps the row of a clip it adds.
+                    rec.record(Some(&*p), StepKind::Split, Some(left.id.as_str()), before);
+                    let length = p.duration();
+                    drop(slot);
+                    ui.set_timeline_duration(length.map(|d| d.as_secs_f32()).unwrap_or(0.0));
+                    ui.set_insp_duration_s(lg.duration.as_secs_f32().round().max(1.0) as i32);
+                }
+                Err(e) => {
+                    drop(slot);
+                    show_error(
+                        &ui,
+                        &format!("Could not split {}", left.name),
+                        format!("{e:#}"),
+                    );
                 }
             }
         });

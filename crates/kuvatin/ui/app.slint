@@ -237,6 +237,7 @@ export component AppWindow inherits Window {
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
     callback timeline-clip-removed(int);             // delete the clip at this index
+    callback timeline-split();                       // cut the selected clip in two at the playhead
     callback video-bin-removed(int);                 // remove a media-bin entry
     callback track-reordered(int, int);              // drag a track header: from row → to row
     // Magnetic snapping: given the dragged clip and its proposed slide (seconds),
@@ -466,6 +467,11 @@ export component AppWindow inherits Window {
         }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
         if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
+        // Plain S splits the selected clip at the playhead; Ctrl+S, above, saves.
+        if ((event.text == "s" || event.text == "S") && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && root.timeline-selected >= 0) {
+            root.timeline-split();
+            return EventResult.accept;
+        }
         return root.clip-keys(event);
     }
     function image-keys(event: KeyEvent) -> EventResult {
@@ -1739,6 +1745,14 @@ export component AppWindow inherits Window {
                                     enabled: root.video-can-redo && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.video-redo(); if (!redo-chip.has-focus) { kbd.focus(); } }
+                                }
+                                split-chip := TimelineChip {
+                                    label: "Split";
+                                    wide: true;
+                                    hint: "Split the selected clip at the playhead (S)";
+                                    enabled: root.timeline-selected >= 0 && !root.modal-open() && !root.video-engine-down;
+                                    focus-on-click: false;
+                                    clicked => { root.timeline-split(); if (!split-chip.has-focus) { kbd.focus(); } }
                                 }
                                 // Zoom: discoverable buttons for the wheel gesture, and the
                                 // only way to reach it without a wheel.

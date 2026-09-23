@@ -30,6 +30,7 @@ pub(super) enum StepKind {
     Delete,
     ReorderTracks,
     AddTrack,
+    Split,
 }
 
 impl StepKind {
@@ -166,6 +167,7 @@ impl Step for TimelineStep {
             StepKind::Delete => format!("deleting {name}"),
             StepKind::ReorderTracks => "reordering tracks".into(),
             StepKind::AddTrack => "adding a track".into(),
+            StepKind::Split => format!("splitting {name}"),
         }
     }
 
@@ -828,6 +830,7 @@ mod tests {
             StepKind::Delete,
             StepKind::ReorderTracks,
             StepKind::AddTrack,
+            StepKind::Split,
         ] {
             assert!(
                 !step(kind, "a", &c0, &c1).merges_with(&step(kind, "a", &c1, &c0)),
@@ -894,6 +897,35 @@ mod tests {
             }
         );
         assert_eq!(target_tracks(&s, Direction::Redo), 3);
+    }
+
+    /// Undo removes the right half and writes the left one back whole; redo
+    /// writes the left half again and brings the right one back.
+    #[test]
+    fn a_split_undoes_to_one_clip_and_redoes_to_two() {
+        let whole = rec(0, 0.0, 4.0);
+        let left = rec(0, 0.0, 1.5);
+        let mut right = rec(0, 1.5, 2.5);
+        right.inpoint = 1.5;
+        let before = cap(&[("a", whole.clone())], 2);
+        let after = cap(&[("a", left.clone()), ("b", right.clone())], 2);
+        let s = step(StepKind::Split, "a", &before, &after);
+        assert_eq!(
+            plan(&s, Direction::Undo),
+            Plan {
+                removes: vec!["b".into()],
+                writes: vec![("a".into(), whole)],
+                restores: vec![],
+            }
+        );
+        assert_eq!(
+            plan(&s, Direction::Redo),
+            Plan {
+                removes: vec![],
+                writes: vec![("a".into(), left)],
+                restores: vec![("b".into(), right)],
+            }
+        );
     }
 
     #[test]
@@ -1023,6 +1055,7 @@ mod tests {
         assert_eq!(d(StepKind::Delete), "deleting intro.mp4");
         assert_eq!(d(StepKind::ReorderTracks), "reordering tracks");
         assert_eq!(d(StepKind::AddTrack), "adding a track");
+        assert_eq!(d(StepKind::Split), "splitting intro.mp4");
     }
 
     fn recorder(rows: Vec<TimelineClip>, tracks: usize) -> Recorder {
