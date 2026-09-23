@@ -161,11 +161,38 @@ fn sample_to_frame(sample: &gst::Sample) -> Option<Frame> {
     with_frame_view(sample, |v| v.to_frame())
 }
 
-/// Push one RGBA video sample to the frame callback.
+/// A frame's length until the preview has shown one: 1/25 s.
+const DEFAULT_FRAME_NS: u64 = 40_000_000;
+
+/// The shortest buffer taken as a frame. The composited preview stamps a few
+/// buffers with a duration of 1 ns around a flushing seek (measured, M10); a
+/// "frame" that short would make a frame step invisible.
+const MIN_FRAME_NS: u64 = 1_000_000;
+
+/// The frame length to keep once a buffer lasting `buffer_ns` has arrived: a
+/// buffer with no duration, or one too short to be a frame, leaves the last
+/// good length in place.
+fn next_frame_ns(last_ns: u64, buffer_ns: Option<u64>) -> u64 {
+    match buffer_ns {
+        Some(ns) if ns >= MIN_FRAME_NS => ns,
+        _ => last_ns,
+    }
+}
+
+/// Push one RGBA video sample to the frame callback, noting how long it lasts.
 fn emit_sample(
     sample: &gst::Sample,
     cb: &(dyn Fn(FrameView<'_>) + Send + Sync),
+    frame_ns: &AtomicU64,
 ) -> std::result::Result<gst::FlowSuccess, gst::FlowError> {
+    let lasts = sample
+        .buffer()
+        .and_then(|b| b.duration())
+        .map(|d| d.nseconds());
+    frame_ns.store(
+        next_frame_ns(frame_ns.load(Ordering::Relaxed), lasts),
+        Ordering::Relaxed,
+    );
     with_frame_view(sample, cb).ok_or(gst::FlowError::Error)?;
     Ok(gst::FlowSuccess::Ok)
 }
@@ -777,6 +804,10 @@ pub struct Project {
     /// composition's own thread, never this one, so the counts are atomics
     /// and nothing else is shared with the handler.
     track_commits: Vec<Arc<AtomicU64>>,
+    /// How long the last composited preview frame lasted, in nanoseconds
+    /// (see [`Project::frame_secs`]). Written on the appsink's streaming
+    /// thread, read on the interface's.
+    frame_ns: Arc<AtomicU64>,
 }
 
 impl Project {
@@ -831,22 +862,25 @@ impl Project {
             .drop(true)
             .build();
 
+        let frame_ns = Arc::new(AtomicU64::new(DEFAULT_FRAME_NS));
         let cb: Arc<dyn Fn(FrameView<'_>) + Send + Sync> = Arc::new(on_frame);
         let cb_sample = cb.clone();
         let cb_preroll = cb;
+        let ns_sample = frame_ns.clone();
+        let ns_preroll = frame_ns.clone();
         appsink.set_callbacks(
             AppSinkCallbacks::builder()
                 // Playing: frames arrive as samples.
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    emit_sample(&sample, &*cb_sample)
+                    emit_sample(&sample, &*cb_sample, &ns_sample)
                 })
                 // Paused / after a seek: the current frame arrives as a preroll
                 // buffer, so deliver it too — otherwise edits don't repaint while
                 // the timeline is paused.
                 .new_preroll(move |sink| {
                     let sample = sink.pull_preroll().map_err(|_| gst::FlowError::Eos)?;
-                    emit_sample(&sample, &*cb_preroll)
+                    emit_sample(&sample, &*cb_preroll, &ns_preroll)
                 })
                 .build(),
         );
@@ -868,6 +902,7 @@ impl Project {
             removed: std::cell::RefCell::new(Vec::new()),
             commits: std::cell::Cell::new(0),
             track_commits,
+            frame_ns,
         })
     }
 
@@ -1787,6 +1822,13 @@ impl Project {
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
         )?;
         Ok(())
+    }
+
+    /// How long one composited preview frame lasts, in seconds, from the last
+    /// frame that arrived; 1/25 s until one has. A measurement of what the
+    /// preview produces, which is what a frame step walks past.
+    pub fn frame_secs(&self) -> f64 {
+        self.frame_ns.load(Ordering::Relaxed) as f64 / 1e9
     }
 
     /// Repaint the preview if an edit marked the timeline dirty since the last
@@ -3952,6 +3994,60 @@ mod tests {
         assert_eq!(project.restore_clip(&b, &right).expect("restore"), b);
         assert_same_record(&record_of(&project, &a), &left);
         assert_same_record(&record_of(&project, &b), &right);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A generated image sequence: real source time, unlike a still, and no
+    /// sound. `frames` PNGs at `fps`, so it lasts `frames / fps` seconds.
+    fn sequence_fixture(tag: &str, frames: u32, fps: u32) -> (std::path::PathBuf, String) {
+        let dir = scratch(tag);
+        for i in 1..=frames {
+            image::RgbaImage::from_pixel(64, 36, image::Rgba([(i * 7 % 255) as u8, 90, 200, 255]))
+                .save(dir.join(format!("frame_{i:04}.png")))
+                .expect("write a frame");
+        }
+        let mut spec =
+            crate::sequence::detect_sequence(&dir.join("frame_0001.png")).expect("detect");
+        spec.fps = fps;
+        let uri = spec.uri().expect("uri");
+        (dir, uri)
+    }
+
+    #[test]
+    fn frame_length_ignores_buffers_too_short_to_be_frames() {
+        assert_eq!(next_frame_ns(40_000_000, Some(33_333_333)), 33_333_333);
+        assert_eq!(
+            next_frame_ns(33_333_333, None),
+            33_333_333,
+            "no duration keeps the last"
+        );
+        assert_eq!(
+            next_frame_ns(33_333_333, Some(1)),
+            33_333_333,
+            "the 1 ns buffers a flushing seek leaves"
+        );
+        assert_eq!(next_frame_ns(33_333_333, Some(100_000_000)), 100_000_000);
+    }
+
+    /// The composited preview runs at the source's rate (measured, M10), so a
+    /// 10 fps sequence shows frames a tenth of a second long.
+    #[test]
+    fn frame_length_follows_the_preview() {
+        let (dir, uri) = sequence_fixture("frame-length", 30, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        assert_eq!(
+            project.frame_secs(),
+            0.04,
+            "1/25 s until a frame has arrived"
+        );
+        project.append_clip_uri(&uri, 0, None).expect("append");
+        project.play().expect("play");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while project.frame_secs() == 0.04 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(project.frame_secs(), 0.1);
+        let _ = project.pause();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
