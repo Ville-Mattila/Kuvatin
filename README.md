@@ -54,14 +54,18 @@ preset, **Ctrl+Enter** converts, **Esc** closes the topmost dialog (and
 cancels a running conversion). The quality slider takes focus and answers to
 the arrows, **Home** and **End**.
 
-In Videos mode: **Space** plays and pauses, **Left/Right** walk the clips on
-the timeline, **Ctrl+Left/Right** slide the selected clip by a tenth of a
-second, **Ctrl+Up/Down** move it to another track, **Shift+Left/Right** trim
-its right edge, and **Delete** removes it. **Ctrl+S** saves the project (to
-the file it came from, or asks the first time) and **Ctrl+O** opens one. The
-scrubber and the inspector sliders take focus and answer to the arrows too. The timeline zooms with the
-**- / Fit / +** buttons, **Ctrl+plus / Ctrl+minus / Ctrl+0**, or **Ctrl+wheel**
-over the lane; a plain wheel scrolls it.
+In Videos mode: **Space** plays and pauses, **,** and **.** step one frame
+back and on, and **J / K / L** shuttle: **L** plays and then speeds up to 2×,
+4× and 8×, **J** slows back down and then pauses (Kuvatin does not play
+backwards), and **K** pauses. **Left/Right** walk the clips on the timeline,
+**Ctrl+Left/Right** slide the selected clip by a tenth of a second,
+**Ctrl+Up/Down** move it to another track, **Shift+Left/Right** trim its right
+edge, **S** splits it at the playhead, and **Delete** removes it. **Ctrl+S**
+saves the project (to the file it came from, or asks the first time) and
+**Ctrl+O** opens one. The scrubber and the inspector sliders take focus and
+answer to the arrows too. The timeline zooms with the **- / Fit / +**
+buttons, **Ctrl+plus / Ctrl+minus / Ctrl+0**, or **Ctrl+wheel** over the
+lane; a plain wheel scrolls it.
 
 ## Video features (new in 2.0)
 
@@ -76,9 +80,9 @@ over the lane; a plain wheel scrolls it.
   when the project opens and the rest still opens
 
 - **Layered timeline editor** — drag files straight onto the timeline; slide,
-  edge-trim, and move clips across tracks with magnetic snapping; reorder tracks;
-  drop below the last track to create a new one
-- **Overlays & transforms** — stack videos and still images; position, scale,
+  edge-trim, split at the playhead, and move clips across tracks with magnetic
+  snapping; reorder tracks; drop below the last track to create a new one
+- **Overlays & transforms** — stack videos and still images; position, scale (up to 400 %),
   opacity and per-clip volume via the inspector or by dragging/resizing the clip
   right in the preview
 - **Live composited preview** with scrubbing, repeat, and a master volume
