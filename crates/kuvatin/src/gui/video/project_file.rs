@@ -222,6 +222,8 @@ fn restore_models(
             selected: false,
             thumb: Image::default(),
             rate: rec.rate as f32,
+            wave: Image::default(),
+            wave_secs: 0.0,
         })
         .collect();
     st.tl_clips.set_vec(rows);

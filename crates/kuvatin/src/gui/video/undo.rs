@@ -722,6 +722,8 @@ mod tests {
             selected: false,
             thumb: Image::default(),
             rate: r.rate as f32,
+            wave: Image::default(),
+            wave_secs: 0.0,
         }
     }
 
@@ -1172,6 +1174,24 @@ mod tests {
         assert_eq!(out[0].rate, 2.0, "undo puts the speed back on the row");
         assert_eq!(out[0].duration, 2.0);
         assert_eq!(out[0].thumb.size().width, 3, "and leaves the picture alone");
+    }
+
+    /// The waveform belongs to the source, not the record: an undo moves the
+    /// row and leaves its picture of the sound alone.
+    #[test]
+    fn a_row_keeps_its_waveform_through_an_undo() {
+        let mut shown = row("a", &rec(0, 0.0, 4.0));
+        shown.wave = picture(5);
+        shown.wave_secs = 12.5;
+        let applied = vec![Applied {
+            id: "a".into(),
+            now_id: "a".into(),
+            record: Some(rec(1, 2.0, 3.0)),
+        }];
+        let out = rows_after(&[shown], &applied, &HashMap::new());
+        assert_eq!((out[0].track, out[0].start), (1, 2.0));
+        assert_eq!(out[0].wave.size().width, 5);
+        assert_eq!(out[0].wave_secs, 12.5);
     }
 
     /// A rate-only change is one changed clip, and undoes as one write.

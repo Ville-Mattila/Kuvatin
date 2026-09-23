@@ -33,6 +33,8 @@ export struct TimelineClip {
     selected: bool,
     thumb: image,
     rate: float,       // playback rate: 1 unless the clip's speed was changed
+    wave: image,       // the whole source's waveform, or empty
+    wave-secs: float,  // how many seconds of source that image spans
 }
 
 // A media-bin entry: file name + a generated thumbnail.
@@ -2004,6 +2006,19 @@ export component AppWindow inherits Window {
                                             animate border-color { duration: 130ms; }
                                             // thumbnail (covers the gradient once generated)
                                             Image { source: clip.thumb; image-fit: cover; width: 100%; height: 100%; }
+                                            // The sound: the whole source's waveform, windowed to what
+                                            // this clip plays of it, from its in-point for its duration
+                                            // times its speed. Trims and speed move the window with no
+                                            // work in Rust and no second decode.
+                                            if clip.wave.width > 0 && clip.wave-secs > 0 : Image {
+                                                property <float> speed: clip.rate > 0 ? clip.rate : 1;
+                                                source: clip.wave;
+                                                image-fit: fill;
+                                                x: 0; y: parent.height * 0.6;
+                                                width: parent.width; height: parent.height * 0.4;
+                                                source-clip-x: Math.min(clip.wave.width - 1, Math.max(0, Math.round(clip.inpoint / clip.wave-secs * clip.wave.width)));
+                                                source-clip-width: Math.max(1, Math.min(clip.wave.width - self.source-clip-x, Math.round(clip.duration * self.speed / clip.wave-secs * clip.wave.width)));
+                                            }
                                             // left scrim so the name stays legible over the thumb
                                             Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
                                             Text { text: clip.rate > 0 && clip.rate != 1 ? clip.name + "  " + clip.rate + "×" : clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }

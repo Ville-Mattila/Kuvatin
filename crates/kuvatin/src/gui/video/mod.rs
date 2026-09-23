@@ -551,6 +551,8 @@ fn add_to_timeline(
                 selected: false,
                 thumb,
                 rate: 1.0,
+                wave: Image::default(),
+                wave_secs: 0.0,
             });
             rec.record(
                 Some(&*project),
@@ -612,6 +614,8 @@ fn add_sequence_to_timeline(
                 selected: false,
                 thumb,
                 rate: 1.0,
+                wave: Image::default(),
+                wave_secs: 0.0,
             });
             rec.record(
                 Some(&*project),
