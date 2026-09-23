@@ -284,6 +284,192 @@ pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
     frame
 }
 
+/// Samples per second the waveform decodes at: far more than a 22 px clip
+/// block can show, and cheap on a long source.
+const WAVE_RATE: i32 = 8000;
+/// Samples per peak kept while decoding (10 ms). The picture is drawn from
+/// these once the whole length is known.
+const WAVE_BLOCK: usize = 80;
+/// The waveform's ink: a light blue-white, not quite opaque, over a clear
+/// background so the clip's own colour shows through.
+const WAVE_INK: [u8; 4] = [230, 244, 255, 210];
+
+/// Rasterise block peaks into a `width` × `height` RGBA picture: one column
+/// per pixel, each the loudest block it covers, drawn as a bar symmetric
+/// about the middle. A source shorter than the width is stretched across it.
+fn draw_waveform(peaks: &[u16], width: u32, height: u32) -> Frame {
+    let (w, h) = (width as usize, height as usize);
+    let mut rgba = vec![0u8; w * h * 4];
+    let n = peaks.len();
+    if n > 0 {
+        for x in 0..w {
+            let from = (x * n / w).min(n - 1);
+            let to = ((x + 1) * n / w).clamp(from + 1, n);
+            let peak = peaks[from..to].iter().copied().max().unwrap_or(0);
+            let half = ((f64::from(peak) / 32768.0) * (h as f64 / 2.0)).ceil() as usize;
+            let top = (h / 2).saturating_sub(half);
+            let bottom = (h / 2 + half).min(h);
+            for y in top..bottom {
+                let i = (y * w + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&WAVE_INK);
+            }
+        }
+    }
+    Frame {
+        width,
+        height,
+        rgba,
+    }
+}
+
+/// Peak-per-column audio waveform for a source, rasterised RGBA (see
+/// [`draw_waveform`]), plus the seconds of source it spans: the whole source,
+/// of which a clip shows a window. None when the source has no sound or
+/// cannot be decoded. Its own throwaway pipeline, safe off the UI thread,
+/// like [`thumbnail_uri`].
+pub fn waveform_uri(uri: &str, width: u32, height: u32) -> Option<(Frame, f64)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    gst::init().ok()?;
+    let pipeline = gst::Pipeline::new();
+    let src = gst::ElementFactory::make("uridecodebin")
+        .property("uri", uri)
+        .build()
+        .ok()?;
+    let convert = gst::ElementFactory::make("audioconvert").build().ok()?;
+    let resample = gst::ElementFactory::make("audioresample").build().ok()?;
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("layout", "interleaved")
+        .field("channels", 1i32)
+        .field("rate", WAVE_RATE)
+        .build();
+    let sink = AppSink::builder().caps(&caps).sync(false).build();
+    pipeline
+        .add_many([&src, &convert, &resample, sink.upcast_ref::<gst::Element>()])
+        .ok()?;
+    gst::Element::link_many([&convert, &resample, sink.upcast_ref::<gst::Element>()]).ok()?;
+    // Pictures are not decoded at all: a picture decoder is not plugged and
+    // its stream comes out still encoded, to be thrown away. Decoding a long
+    // video's frames to draw its sound took twice as long on a trivial source
+    // and far more on real footage (M12).
+    src.connect("autoplug-select", false, |values| {
+        let factory = values.get(3)?.get::<gst::ElementFactory>().ok()?;
+        let klass = factory.klass();
+        let picture =
+            klass.contains("Decoder") && (klass.contains("Video") || klass.contains("Image"));
+        let result = gst::glib::EnumClass::with_type(gst::glib::Type::from_name(
+            "GstAutoplugSelectResult",
+        )?)?;
+        // 0 is GST_AUTOPLUG_SELECT_TRY, 1 is GST_AUTOPLUG_SELECT_EXPOSE.
+        result.to_value(if picture { 1 } else { 0 })
+    });
+    let convert_weak = convert.downgrade();
+    let pipeline_weak = pipeline.downgrade();
+    src.connect_pad_added(move |_, pad| {
+        let caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
+        let is_sound = caps
+            .structure(0)
+            .is_some_and(|s| s.name().starts_with("audio/x-raw"));
+        if is_sound {
+            if let Some(sinkpad) = convert_weak.upgrade().and_then(|c| c.static_pad("sink")) {
+                if !sinkpad.is_linked() && pad.link(&sinkpad).is_ok() {
+                    return;
+                }
+            }
+        }
+        // Everything else drains into a fakesink, so a stream nobody reads
+        // can never hold the sound up.
+        let Some(pipeline) = pipeline_weak.upgrade() else {
+            return;
+        };
+        let Ok(drain) = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+        else {
+            return;
+        };
+        if pipeline.add(&drain).is_ok() && drain.sync_state_with_parent().is_ok() {
+            if let Some(sinkpad) = drain.static_pad("sink") {
+                let _ = pad.link(&sinkpad);
+            }
+        }
+    });
+    let no_more_pads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let flag = no_more_pads.clone();
+        src.connect_no_more_pads(move |_| flag.store(true, Ordering::SeqCst));
+    }
+    let stop = |p: &gst::Pipeline| {
+        let _ = p.set_state(gst::State::Null);
+    };
+    if pipeline.set_state(gst::State::Paused).is_err() {
+        stop(&pipeline);
+        return None;
+    }
+    let has_sound = || convert.static_pad("sink").is_some_and(|p| p.is_linked());
+    // Settle, but stop waiting the moment every stream is out and none of
+    // them is sound: a still would otherwise sit out the whole timeout.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let settled = loop {
+        match pipeline.state(gst::ClockTime::from_mseconds(50)).0 {
+            Ok(gst::StateChangeSuccess::Success) | Ok(gst::StateChangeSuccess::NoPreroll) => {
+                break true
+            }
+            Err(_) => break false,
+            _ => {}
+        }
+        if no_more_pads.load(Ordering::SeqCst) && !has_sound() {
+            break false;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+    };
+    if !settled || !has_sound() {
+        stop(&pipeline);
+        return None;
+    }
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        stop(&pipeline);
+        return None;
+    }
+    let mut peaks: Vec<u16> = Vec::new();
+    let mut block_peak: u16 = 0;
+    let mut in_block = 0usize;
+    let mut samples: u64 = 0;
+    while let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_seconds(5)) {
+        let Some(buffer) = sample.buffer() else {
+            continue;
+        };
+        let Ok(map) = buffer.map_readable() else {
+            continue;
+        };
+        for pair in map.as_slice().chunks_exact(2) {
+            let v = i16::from_le_bytes([pair[0], pair[1]]).unsigned_abs();
+            block_peak = block_peak.max(v);
+            in_block += 1;
+            samples += 1;
+            if in_block == WAVE_BLOCK {
+                peaks.push(block_peak);
+                block_peak = 0;
+                in_block = 0;
+            }
+        }
+    }
+    let finished = sink.is_eos();
+    stop(&pipeline);
+    if in_block > 0 {
+        peaks.push(block_peak);
+    }
+    if !finished || peaks.is_empty() {
+        return None;
+    }
+    let secs = samples as f64 / f64::from(WAVE_RATE);
+    Some((draw_waveform(&peaks, width, height), secs))
+}
+
 /// Clips may never be shorter than this (0.2 s) via edge-trimming.
 const MIN_TRIM_NS: i128 = 200_000_000;
 
@@ -4912,5 +5098,140 @@ mod tests {
         assert!(write_back(&mut project, &[(&a, &full)]), "undo the speed");
         assert_same_record(&record_of(&project, &a), &full);
         assert!(project.clips[&a.0].top_effects().is_empty());
+    }
+
+    #[test]
+    fn waveform_draws_one_bar_per_column() {
+        // Four blocks, one of them loud; four columns, four pixels high.
+        let frame = draw_waveform(&[0, 0, 32767, 0], 4, 4);
+        assert_eq!((frame.width, frame.height, frame.rgba.len()), (4, 4, 64));
+        let inked = |x: usize| {
+            (0..4)
+                .filter(|&y| frame.rgba[(y * 4 + x) * 4 + 3] > 0)
+                .count()
+        };
+        assert_eq!([inked(0), inked(1), inked(2), inked(3)], [0, 0, 4, 0]);
+    }
+
+    #[test]
+    fn waveform_stretches_a_short_source_across_the_width() {
+        // One block at half scale, three columns: a bar in every column,
+        // half the height, in the middle.
+        let frame = draw_waveform(&[16384], 3, 4);
+        let alpha = |x: usize, y: usize| frame.rgba[(y * 3 + x) * 4 + 3];
+        for x in 0..3 {
+            assert_eq!(
+                [alpha(x, 0), alpha(x, 1), alpha(x, 2), alpha(x, 3)],
+                [0, 210, 210, 0],
+                "column {x}"
+            );
+        }
+    }
+
+    /// A WAV written by hand, 16-bit mono PCM.
+    fn write_wav(path: &Path, samples: &[i16], rate: u32) {
+        let data_len = (samples.len() * 2) as u32;
+        let mut b: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes()); // bytes per second
+        b.extend_from_slice(&2u16.to_le_bytes()); // bytes per frame
+        b.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data_len.to_le_bytes());
+        for s in samples {
+            b.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(path, b).expect("write the wav");
+    }
+
+    /// A second of silence, then a second of a full-scale square wave, at the
+    /// rate the waveform decodes at, so nothing is resampled and the length
+    /// is exact. No media needed.
+    #[test]
+    fn waveform_of_a_wav_file_shows_where_the_sound_is() {
+        let dir = scratch("waveform-wav");
+        let wav = dir.join("half.wav");
+        let mut samples = vec![0i16; 8000];
+        samples.extend((0..8000).map(|i| {
+            if (i / 4) % 2 == 0 {
+                i16::MAX
+            } else {
+                -i16::MAX
+            }
+        }));
+        write_wav(&wav, &samples, 8000);
+        let uri = gst::glib::filename_to_uri(&wav, None).expect("uri");
+        let (frame, secs) = waveform_uri(&uri, 100, 10).expect("a waveform");
+        assert_eq!(secs, 2.0, "the whole source: 16000 samples at 8 kHz");
+        assert_eq!((frame.width, frame.height), (100, 10));
+        let inked = |x: usize| {
+            (0..10)
+                .filter(|&y| frame.rgba[(y * 100 + x) * 4 + 3] > 0)
+                .count()
+        };
+        assert_eq!((inked(0), inked(49)), (0, 0), "the silent first second");
+        assert_eq!(
+            (inked(50), inked(99)),
+            (10, 10),
+            "the loud one, full height"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn waveform_of_a_still_is_none() {
+        let dir = scratch("waveform-still");
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("write still");
+        let uri = gst::glib::filename_to_uri(&png, None).expect("uri");
+        let started = std::time::Instant::now();
+        assert!(waveform_uri(&uri, 64, 8).is_none());
+        // It knows once every stream is out, not after a timeout (58 ms, M12).
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Self-skips without `GST_TEST_FILE`.
+    #[test]
+    fn the_sound_of_a_real_source_is_drawn() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping the_sound_of_a_real_source_is_drawn: set GST_TEST_FILE");
+            return;
+        };
+        let uri = gst::glib::filename_to_uri(Path::new(&path), None).expect("uri");
+        let worker_uri = uri.to_string();
+        // Off the interface thread, as the waveform worker calls it.
+        let (frame, secs) = std::thread::spawn(move || waveform_uri(&worker_uri, 512, 24))
+            .join()
+            .expect("the worker")
+            .expect("a waveform");
+        assert_eq!((frame.width, frame.height), (512, 24));
+        assert!(
+            frame.rgba.chunks_exact(4).any(|p| p[3] > 0),
+            "the fixture's tone is drawn"
+        );
+        gst::init().expect("gst");
+        ges::init().expect("ges");
+        let length = ges::UriClipAsset::request_sync(&uri)
+            .expect("asset")
+            .duration()
+            .expect("a length");
+        // Measured: 6.982 s drawn for a 6.966 s source, the resampler's tail.
+        assert!(
+            (secs - length.nseconds() as f64 / 1e9).abs() < 0.05,
+            "{secs} vs {length}"
+        );
     }
 }
