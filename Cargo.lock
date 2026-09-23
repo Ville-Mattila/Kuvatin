@@ -3011,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin"
-version = "2.12.0"
+version = "2.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin-core"
-version = "2.12.0"
+version = "2.13.0"
 dependencies = [
  "directories",
  "image",
@@ -3050,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "kuvatin-shellext"
-version = "2.12.0"
+version = "2.13.0"
 dependencies = [
  "kuvatin-core",
  "windows 0.58.0",
@@ -3059,14 +3059,14 @@ dependencies = [
 
 [[package]]
 name = "kuvatin-updater"
-version = "2.12.0"
+version = "2.13.0"
 dependencies = [
  "windows 0.58.0",
 ]
 
 [[package]]
 name = "kuvatin-video"
-version = "2.12.0"
+version = "2.13.0"
 dependencies = [
  "anyhow",
  "gstreamer",

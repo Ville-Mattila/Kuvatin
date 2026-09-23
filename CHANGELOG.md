@@ -14,6 +14,8 @@ the minor number moves when something new appears, the patch number when
 something is fixed.
 
 ## [Unreleased]
+
+## [2.13.0] - 2026-09-23
 The video editor learns to cut. The S key splits a clip at the playhead,
 comma and period step a frame at a time, and J, K and L shuttle. A clip can
 play at its own speed, from a quarter to four times, and a video's sound is
@@ -344,7 +346,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.12.0...HEAD
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.13.0...HEAD
+[2.13.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.13.0
 [2.12.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.12.0
 [2.11.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.11.0
 [2.10.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.10.0
