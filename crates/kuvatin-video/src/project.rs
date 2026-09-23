@@ -39,6 +39,13 @@ pub struct ClipGeom {
     pub duration: Duration,
 }
 
+/// Whether the preview was playing, and where, before a time effect changed.
+#[derive(Clone, Copy, Debug)]
+struct Resume {
+    playing: bool,
+    pos: Duration,
+}
+
 /// Pre-load (discover) a media file into the GES asset cache. Safe to call off
 /// the UI thread; a subsequent `add_clip`/`append_clip` then hits the warm cache
 /// and returns immediately instead of blocking the UI on discovery.
@@ -1545,6 +1552,9 @@ impl Project {
             .unwrap_or(0)
             > 0;
         let layout = if laid_out { self.clip_layout(id) } else { None };
+        // Splitting a clip with a speed puts new time effects on the timeline:
+        // GES copies them to the new half.
+        let was = (clip_rate_of(&clip) != 1.0).then(|| self.before_time_effects());
         let right = clip
             .split_full(at_ns as u64)
             .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -1571,6 +1581,9 @@ impl Project {
             // A change the timeline has not committed is a change the preview
             // never shows: route it through the same commit as every other edit.
             self.commit();
+        }
+        if let Some(was) = was {
+            self.after_time_effects(was);
         }
         self.touched();
         Ok((right_id, clip_geom(&clip), clip_geom(&right)))
@@ -1603,6 +1616,7 @@ impl Project {
         if rate == old_rate {
             return Some(clip_geom(&clip));
         }
+        let was = self.before_time_effects();
         let start = clip.start().nseconds() as i128;
         let dur = clip.duration().nseconds() as i128;
         let room = room_after(start, dur, &self.layer_neighbours(id));
@@ -1635,9 +1649,11 @@ impl Project {
             let _ = apply_rate(&clip, old_rate);
             set_len(old_dur);
             self.commit();
+            self.after_time_effects(was);
             return None;
         }
         self.commit();
+        self.after_time_effects(was);
         self.touched();
         Some(clip_geom(&clip))
     }
@@ -1677,6 +1693,11 @@ impl Project {
                 None => failed.push(id.clone()),
             }
         }
+        // Only a write that changes a clip's speed changes a time effect.
+        let was = found
+            .iter()
+            .any(|(_, record, clip)| record.rate != clip_rate_of(clip))
+            .then(|| self.before_time_effects());
         // Parking layers go below every track a record names, so none of them
         // is also a destination.
         let parking = found
@@ -1757,6 +1778,9 @@ impl Project {
             self.commit();
             self.touched();
         }
+        if let Some(was) = was {
+            self.after_time_effects(was);
+        }
         failed
     }
 
@@ -1796,7 +1820,9 @@ impl Project {
         self.clips.insert(id.0.clone(), clip.upcast());
         self.set_clip_layout(id, record.layout.into());
         if record.rate != 1.0 {
+            let was = self.before_time_effects();
             self.put_rate_back(id, record.rate, record.duration);
+            self.after_time_effects(was);
         }
         self.touched();
         Ok(id.clone())
@@ -2061,6 +2087,9 @@ impl Project {
         if self.rendering.get() {
             anyhow::bail!("a render is in progress");
         }
+        // The old clips' time effects leave with them and the new ones' go on.
+        let was = (self.has_clip_speeds() || doc.clips.iter().any(|r| r.rate != 1.0))
+            .then(|| self.before_time_effects());
         for id in self.clips.keys().cloned().collect::<Vec<_>>() {
             self.remove_clip(&ClipId(id));
         }
@@ -2115,6 +2144,14 @@ impl Project {
         }
         self.commit();
         self.touched();
+        if let Some(was) = was {
+            // A freshly opened project starts at the beginning, not where the
+            // old one was.
+            self.after_time_effects(Resume {
+                pos: Duration::ZERO,
+                ..was
+            });
+        }
         // Just loaded: this is exactly what is on disk. The edits above set the
         // flag on their way through, so this has to come last.
         self.unsaved.set(false);
@@ -2324,6 +2361,16 @@ impl Project {
         if self.rendering.get() {
             return Ok(());
         }
+        // GStreamer cannot carry a rate seek through a time effect: on a
+        // timeline where any clip has its own speed, a flushing seek at a rate
+        // other than 1 never prerolls and the preview freezes for good, and an
+        // instant rate change is accepted and ignored (measured on 1.26.11).
+        // Refusing leaves playback running at normal speed.
+        if rate != 1.0 && self.has_clip_speeds() {
+            anyhow::bail!(
+                "faster playback is not available while a clip on the timeline has its own speed"
+            );
+        }
         let pos = self.position().unwrap_or(Duration::ZERO);
         // A full seek: seek_simple cannot carry a rate.
         self.pipeline.seek(
@@ -2342,6 +2389,48 @@ impl Project {
     /// it since the last ordinary seek.
     pub fn rate(&self) -> f64 {
         self.rate.get()
+    }
+
+    /// Whether any clip on the timeline plays at its own speed, which is to
+    /// say carries a time effect.
+    fn has_clip_speeds(&self) -> bool {
+        self.clips.values().any(|c| clip_rate_of(c) != 1.0)
+    }
+
+    /// Where the preview is, taken before a time effect changes so that
+    /// [`Self::after_time_effects`] can put it back.
+    fn before_time_effects(&self) -> Resume {
+        let (_, current, pending) = self.pipeline.state(gst::ClockTime::ZERO);
+        Resume {
+            playing: current == gst::State::Playing || pending == gst::State::Playing,
+            pos: self.position().unwrap_or(Duration::ZERO),
+        }
+    }
+
+    /// A time effect was added, removed or changed. On a pipeline that has
+    /// already run, GES then leaves the preview frozen for good in one to four
+    /// runs in ten (measured on 1.26.11): playing, paused or shuttling made no
+    /// difference, and waiting for seeks to settle did not help. Effects set
+    /// up before a pipeline first runs never froze, in thirty runs. So the
+    /// pipeline is taken down to READY and brought back up, which is that
+    /// state again, and then put back where it was: zero freezes in thirty
+    /// runs. It also ends any shuttle, since the seek plays at normal speed.
+    fn after_time_effects(&self, was: Resume) {
+        let wait = || {
+            let end = std::time::Instant::now() + Duration::from_secs(3);
+            while settled(&self.pipeline) == Step::Pending && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let _ = self.pipeline.set_state(gst::State::Ready);
+        let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
+        let _ = self.pipeline.set_state(gst::State::Paused);
+        wait();
+        let _ = self.seek(was.pos);
+        wait();
+        if was.playing {
+            let _ = self.play();
+        }
     }
 
     /// Repaint the preview if an edit marked the timeline dirty since the last
@@ -4640,6 +4729,130 @@ mod tests {
         );
         let _ = project.pause();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wait for the pipeline to finish a state change, up to ten seconds.
+    #[cfg(test)]
+    fn wait_settled(project: &Project) {
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while settled(&project.pipeline) == Step::Pending && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Found in the running app, not by any test: GStreamer cannot carry a
+    /// rate seek through a time effect. On a timeline where a clip has its own
+    /// speed, a flushing seek at any rate but 1 never prerolls and the preview
+    /// freezes for good (an instant rate change is accepted and ignored). So a
+    /// faster shuttle is refused there, and playback carries on at normal speed
+    /// instead of stopping. Back at normal speed, the shuttle is available.
+    #[test]
+    fn shuttle_speed_waits_for_every_clip_to_play_at_normal_speed() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping shuttle_speed_waits_for_every_clip_...: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        project.set_clip_rate(&a, 0.5).expect("half speed");
+        project.play().expect("play");
+        wait_settled(&project);
+        assert!(
+            project.set_rate(2.0).is_err(),
+            "a faster shuttle must be refused while a clip has a speed"
+        );
+        assert_eq!(project.rate(), 1.0, "a refused rate changes nothing");
+        let from = project.position().expect("a position");
+        std::thread::sleep(Duration::from_millis(1000));
+        let to = project.position().expect("a position");
+        assert!(
+            to >= from + Duration::from_millis(600),
+            "still playing at normal speed, not frozen: {from:?} -> {to:?}"
+        );
+        let _ = project.pause();
+        project
+            .set_clip_rate(&a, 1.0)
+            .expect("back to normal speed");
+        project.play().expect("play");
+        wait_settled(&project);
+        project
+            .set_rate(2.0)
+            .expect("with no clip speed left, the shuttle is back");
+        let _ = project.pause();
+    }
+
+    /// The other way into the same freeze: a speed effect added while a
+    /// shuttle is running. Whatever adds one brings playback back to normal
+    /// speed first, and the preview keeps moving.
+    #[test]
+    fn a_clip_speed_set_during_a_shuttle_does_not_freeze_the_preview() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping a_clip_speed_set_during_a_shuttle_...: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        project.play().expect("play");
+        wait_settled(&project);
+        project.set_rate(4.0).expect("4x on a clip at normal speed");
+        project.set_clip_rate(&a, 0.5).expect("half speed");
+        assert_eq!(
+            project.rate(),
+            1.0,
+            "the shuttle ends before the effect goes on"
+        );
+        wait_settled(&project);
+        let _ = project.play();
+        wait_settled(&project);
+        let from = project.position().expect("a position");
+        std::thread::sleep(Duration::from_millis(1000));
+        let to = project.position().expect("a position");
+        assert!(to > from + Duration::from_millis(600), "{from:?} -> {to:?}");
+        let _ = project.pause();
+    }
+
+    /// The wider form of the same freeze, with no shuttle at all: GES left the
+    /// preview frozen after a speed change on a pipeline that had been
+    /// playing, in one to four runs in ten. One round would catch a return of
+    /// that about one run in three, so there are six: the first three change
+    /// the speed, the last three undo it, the other way the effects change.
+    /// Playback must carry on by itself afterwards, as it was.
+    #[test]
+    fn a_speed_change_during_playback_leaves_the_preview_playing() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping a_speed_change_during_playback_...: set GST_TEST_FILE");
+            return;
+        };
+        for round in 0..6 {
+            let mut project = Project::new(|_f| {}).expect("project");
+            let a = project
+                .append_clip(Path::new(&path), 0, None)
+                .expect("clip")
+                .id;
+            let full = record_of(&project, &a);
+            project.play().expect("play");
+            wait_settled(&project);
+            project.set_clip_rate(&a, 0.5).expect("half speed");
+            if round >= 3 {
+                wait_settled(&project);
+                assert!(write_back(&mut project, &[(&a, &full)]), "undo the speed");
+            }
+            wait_settled(&project);
+            let from = project.position().expect("a position");
+            std::thread::sleep(Duration::from_millis(800));
+            let to = project.position().expect("a position");
+            assert!(
+                to > from + Duration::from_millis(400),
+                "round {round}: still frozen after the speed change, {from:?} -> {to:?}"
+            );
+            let _ = project.pause();
+        }
     }
 
     /// Not a gate: a measurement of what this GStreamer does with a speed

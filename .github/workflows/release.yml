@@ -295,7 +295,10 @@ jobs:
           $env:RUST_BACKTRACE = "1"
           $names = @("renders_after_preview_eos", "renders_gapped_overlay_timeline",
             "undo_writes_a_left_trim_of_real_media_back", "undo_restores_a_trimmed_clip_of_real_media",
-            "a_sped_up_video_changes_picture_and_sound", "the_sound_of_a_real_source_is_drawn")
+            "a_sped_up_video_changes_picture_and_sound", "the_sound_of_a_real_source_is_drawn",
+            "shuttle_speed_waits_for_every_clip_to_play_at_normal_speed",
+            "a_clip_speed_set_during_a_shuttle_does_not_freeze_the_preview",
+            "a_speed_change_during_playback_leaves_the_preview_playing")
           foreach ($attempt in 1..2) {
             cargo test -p kuvatin-video --release -- --test-threads=1 --exact `
               project::tests::renders_after_preview_eos `
@@ -303,7 +306,10 @@ jobs:
               project::tests::undo_writes_a_left_trim_of_real_media_back `
               project::tests::undo_restores_a_trimmed_clip_of_real_media `
               project::tests::a_sped_up_video_changes_picture_and_sound `
-              project::tests::the_sound_of_a_real_source_is_drawn
+              project::tests::the_sound_of_a_real_source_is_drawn `
+              project::tests::shuttle_speed_waits_for_every_clip_to_play_at_normal_speed `
+              project::tests::a_clip_speed_set_during_a_shuttle_does_not_freeze_the_preview `
+              project::tests::a_speed_change_during_playback_leaves_the_preview_playing
             if ($LASTEXITCODE -eq 0) { break }
             if ($attempt -eq 2) { throw "the live-media regressions failed twice: $($names -join ', ')" }
             Write-Host "::warning::live-media regressions failed once; retrying"
