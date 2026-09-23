@@ -32,6 +32,15 @@ pub(super) fn has_unsaved_changes(slot: &ProjectSlot) -> bool {
         .is_some_and(kuvatin_video::Project::has_unsaved_work)
 }
 
+/// The inspector's Scale range, in percent of the size that fits the canvas.
+/// One place for it: the slider, the preview box's corner drag and the
+/// read-back when a clip is selected all take it from here, because three
+/// copies of it once disagreed with the engine, which has no ceiling at all.
+/// 400 % is where other editors stop, and the position sliders run a whole
+/// canvas either way, so a clip zoomed that far can still be placed anywhere.
+pub(super) const MIN_SCALE_PCT: f32 = 10.0;
+pub(super) const MAX_SCALE_PCT: f32 = 400.0;
+
 /// Everything the Videos mode owns that more than one handler touches.
 pub(super) struct VideoState {
     /// The GES project, created on demand by the first clip (or canvas change).
@@ -68,6 +77,8 @@ impl VideoState {
             SharedString::from("Track 2"),
         ]));
         ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
+        ui.set_insp_scale_min(MIN_SCALE_PCT);
+        ui.set_insp_scale_max(MAX_SCALE_PCT);
         Self {
             project: Rc::new(RefCell::new(None)),
             assets,

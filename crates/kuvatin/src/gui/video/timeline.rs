@@ -2,7 +2,7 @@
 //! magnetic snapping, track rows and clip removal.
 
 use super::undo::{Recorder, StepKind};
-use super::VideoState;
+use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT};
 use crate::gui::{AppWindow, ClipKind, TimelineClip};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
@@ -63,7 +63,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     if let Some(l) = p.clip_layout(&cid) {
                         ui.set_insp_posx(l.posx as f32);
                         ui.set_insp_posy(l.posy as f32);
-                        ui.set_insp_scale(((l.scale * 100.0) as f32).clamp(10.0, 100.0));
+                        ui.set_insp_scale(scale_percent(l.scale));
                         ui.set_insp_alpha((l.alpha as f32 * 100.0).clamp(0.0, 100.0));
                         ui.set_insp_volume((l.volume as f32 * 100.0).clamp(0.0, 100.0));
                     }
@@ -444,6 +444,13 @@ fn selection_after_removal(selected: i32, removed: i32) -> i32 {
     }
 }
 
+/// The inspector's Scale reading, in percent, for an engine scale (1.0 is the
+/// size that fits the canvas). Clamped to the range the slider and the
+/// preview box can reach, and to nothing tighter.
+fn scale_percent(scale: f64) -> f32 {
+    ((scale * 100.0) as f32).clamp(MIN_SCALE_PCT, MAX_SCALE_PCT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +575,21 @@ mod tests {
     #[test]
     fn with_nothing_selected_nothing_becomes_selected() {
         assert_eq!(selection_after_removal(-1, 0), -1);
+    }
+
+    // ---- the inspector's scale reading --------------------------------------
+
+    /// The engine zooms a clip past the canvas. The read-back used to clamp at
+    /// 100 % and snap a zoomed clip back to fit every time it was selected.
+    #[test]
+    fn the_scale_reading_reaches_past_the_canvas() {
+        assert_eq!(scale_percent(1.0), 100.0);
+        assert_eq!(scale_percent(2.5), 250.0);
+        assert_eq!(
+            scale_percent(9.0),
+            MAX_SCALE_PCT,
+            "capped at the slider's end"
+        );
+        assert_eq!(scale_percent(0.01), MIN_SCALE_PCT, "and at its start");
     }
 }

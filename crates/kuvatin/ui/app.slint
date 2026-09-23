@@ -149,6 +149,11 @@ export component AppWindow inherits Window {
     in-out property <float> insp-alpha: 100;   // opacity percent
     in-out property <float> insp-volume: 100;  // percent
     in property <bool> insp-has-audio: true;   // hide volume for stills
+    // The Scale range in percent. Set once at start-up from MIN_SCALE_PCT and
+    // MAX_SCALE_PCT (gui/video/mod.rs): the slider, the preview box's corner
+    // drag and the read-back on select all use the one range. Zero until then.
+    in property <float> insp-scale-min;
+    in property <float> insp-scale-max;
     // Selected clip's aspect-fit size in canvas px (for the preview bounding box).
     in property <float> sel-fit-w: 1280;
     in property <float> sel-fit-h: 720;
@@ -1554,7 +1559,7 @@ export component AppWindow inherits Window {
                                             root.insp-posy = eta.b-posy + (self.mouse-y - self.pressed-y) / edit-layer.ppc;
                                             root.inspector-changed();
                                         } else if (eta.mode == EditMode.resize) {
-                                            root.insp-scale = Math.clamp(Math.abs((self.mouse-x - edit-layer.off-x) / edit-layer.ppc - eta.cen-x) * 2 / root.sel-fit-w * 100, 10, 100);
+                                            root.insp-scale = Math.clamp(Math.abs((self.mouse-x - edit-layer.off-x) / edit-layer.ppc - eta.cen-x) * 2 / root.sel-fit-w * 100, root.insp-scale-min, root.insp-scale-max);
                                             root.insp-posx = eta.cen-x - (root.insp-scale / 100) * root.sel-fit-w / 2;
                                             root.insp-posy = eta.cen-y - (root.insp-scale / 100) * root.sel-fit-h / 2;
                                             root.inspector-changed();
@@ -1675,7 +1680,7 @@ export component AppWindow inherits Window {
                                 spacing: 6px;
                                 InspSlider { label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
                                 InspSlider { label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Scale"; min: 10; max: 100; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
+                                InspSlider { label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
                                 InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
                                 if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
                                 // A still has no source length, so its duration is a free
