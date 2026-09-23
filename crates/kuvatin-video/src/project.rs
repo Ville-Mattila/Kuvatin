@@ -39,11 +39,15 @@ pub struct ClipGeom {
     pub duration: Duration,
 }
 
-/// Whether the preview was playing, and where, before a time effect changed.
+/// Whether the preview was playing, and where, before a time effect changed,
+/// and how far the timeline's commits had got then.
 #[derive(Clone, Copy, Debug)]
 struct Resume {
     playing: bool,
     pos: Duration,
+    /// Commits asked for, and finished by every track, at that moment.
+    asked: u64,
+    done: u64,
 }
 
 /// Pre-load (discover) a media file into the GES asset cache. Safe to call off
@@ -1637,7 +1641,14 @@ impl Project {
         // longer duration, capped at the limit GES now reports, so a
         // nanosecond of rounding cannot get it refused.
         let applied = if rate > old_rate {
-            set_len(new_dur) && apply_rate(&clip, rate).is_ok()
+            // Replacing the effects passes through normal speed, where a
+            // slowed clip longer than its source is cut to the source's
+            // length (M4): from 0.25x to 0.5x that cut half the clip away.
+            // So the length goes on again once the new speed is on.
+            set_len(new_dur) && apply_rate(&clip, rate).is_ok() && {
+                let limit = clip.property::<Option<gst::ClockTime>>("duration-limit");
+                set_len(limit.map_or(new_dur, |l| new_dur.min(l)))
+            }
         } else {
             apply_rate(&clip, rate).is_ok() && {
                 let limit = clip.property::<Option<gst::ClockTime>>("duration-limit");
@@ -2404,6 +2415,8 @@ impl Project {
         Resume {
             playing: current == gst::State::Playing || pending == gst::State::Playing,
             pos: self.position().unwrap_or(Duration::ZERO),
+            asked: self.commits.get(),
+            done: self.commits_done(),
         }
     }
 
@@ -2413,8 +2426,17 @@ impl Project {
     /// difference, and waiting for seeks to settle did not help. Effects set
     /// up before a pipeline first runs never froze, in thirty runs. So the
     /// pipeline is taken down to READY and brought back up, which is that
-    /// state again, and then put back where it was: zero freezes in thirty
-    /// runs. It also ends any shuttle, since the seek plays at normal speed.
+    /// state again, and then put back where it was. It also ends any shuttle,
+    /// since the seek plays at normal speed.
+    ///
+    /// The commit that carried the change finishes first. It takes about a
+    /// tenth of a second, and a reset that cut it short still froze the
+    /// preview in one run in ten of the six-round test; waited for, none of
+    /// forty runs froze. Waiting also keeps the commit from being dropped
+    /// uncounted, which would hold removed clips longer (see
+    /// [`Self::release_removed`]). Below PAUSED no commit runs, so there is
+    /// nothing to wait for. A timeline that lost count of a commit earlier,
+    /// to a render, is waited for by how many it has finished since.
     fn after_time_effects(&self, was: Resume) {
         let wait = || {
             let end = std::time::Instant::now() + Duration::from_secs(3);
@@ -2422,6 +2444,17 @@ impl Project {
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
+        let asked = self.commits.get();
+        let committed = || {
+            let done = self.commits_done();
+            done >= asked || done.saturating_sub(was.done) >= asked - was.asked
+        };
+        if self.pipeline.current_state() >= gst::State::Paused {
+            let end = std::time::Instant::now() + Duration::from_secs(2);
+            while !committed() && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.pipeline.state(gst::ClockTime::from_seconds(3));
         let _ = self.pipeline.set_state(gst::State::Paused);
@@ -5112,6 +5145,40 @@ mod tests {
             clip.top_effects().is_empty(),
             "normal speed carries no effects at all"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Found in the running app: from 0.25x to 0.5x a clip came out the
+    /// length of its source at normal speed, where twice that is right. Each
+    /// speed change replaces the effects, and between taking the old ones off
+    /// and putting the new ones on the clip is briefly at normal speed, where
+    /// GES cuts a slowed clip to what its source lasts (M4). Slowing down set
+    /// the length again afterwards; speeding up between two slow speeds did
+    /// not. Every step between the listed slow speeds is pinned, both ways.
+    #[test]
+    fn speed_between_two_slow_speeds_keeps_the_span_of_source() {
+        // Forty frames at 10 fps: four seconds of source.
+        let (dir, uri) = sequence_fixture("speed-slow-steps", 40, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let id = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        for (from, to) in [
+            (0.25, 0.5),
+            (0.5, 0.25),
+            (0.25, 1.0),
+            (0.5, 1.5),
+            (0.25, 2.0),
+        ] {
+            project.set_clip_rate(&id, from).expect("the first speed");
+            let geom = project.set_clip_rate(&id, to).expect("the second speed");
+            let want = secs(4.0 / to);
+            let off = geom.duration.abs_diff(want);
+            assert!(
+                off < Duration::from_millis(1),
+                "{from}x -> {to}x: {:?}, want {want:?}",
+                geom.duration
+            );
+            project.set_clip_rate(&id, 1.0).expect("back to normal");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
