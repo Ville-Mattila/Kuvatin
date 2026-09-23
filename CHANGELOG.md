@@ -14,6 +14,15 @@ the minor number moves when something new appears, the patch number when
 something is fixed.
 
 ## [Unreleased]
+The video editor learns to cut. The S key splits a clip at the playhead,
+comma and period step a frame at a time, and J, K and L shuttle. A clip can
+play at its own speed, from a quarter to four times, and a video's sound is
+drawn along its block, so a cut can be placed by looking at it. Updates
+install themselves now: clicking the update badge downloads the new version,
+checks it against its published checksum, then closes, installs and reopens
+Kuvatin. The window also opens large enough for the timeline and the
+inspector, and a freeze when nudging a clip that was still starting up is
+fixed.
 
 ### Added
 - **Updates install themselves.** Clicking the update badge now offers to
@@ -53,6 +62,12 @@ something is fixed.
 - The video editor's keys no longer act behind an open dialog. Pressing
   **Delete** while a confirmation such as "Open another project?" was showing
   deleted the selected clip underneath it, and **Space** played the preview.
+
+Checksum: see `kuvatin-2.13.0-x86_64.msi.sha256` (and
+`kuvatin-x86_64.msi.sha256` for the fixed-name copy the site links). The
+installer itself is unsigned, so SmartScreen will ask once — More info, then
+Run anyway. The Windows 11 menu package inside it *is* signed, which is what
+puts "Kuvatin" in the top-level right-click menu.
 
 ## [2.12.0] - 2026-09-16
 Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and
