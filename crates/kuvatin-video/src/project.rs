@@ -808,6 +808,9 @@ pub struct Project {
     /// (see [`Project::frame_secs`]). Written on the appsink's streaming
     /// thread, read on the interface's.
     frame_ns: Arc<AtomicU64>,
+    /// The rate the preview plays at: 1.0, except after [`Project::set_rate`]
+    /// until the next ordinary seek, which plays at normal speed again.
+    rate: std::cell::Cell<f64>,
 }
 
 impl Project {
@@ -903,6 +906,7 @@ impl Project {
             commits: std::cell::Cell::new(0),
             track_commits,
             frame_ns,
+            rate: std::cell::Cell::new(1.0),
         })
     }
 
@@ -1807,6 +1811,8 @@ impl Project {
             gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
         )?;
+        // seek_simple always plays at 1.0.
+        self.rate.set(1.0);
         Ok(())
     }
 
@@ -1821,6 +1827,8 @@ impl Project {
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
             gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
         )?;
+        // seek_simple always plays at 1.0.
+        self.rate.set(1.0);
         Ok(())
     }
 
@@ -1829,6 +1837,37 @@ impl Project {
     /// preview produces, which is what a frame step walks past.
     pub fn frame_secs(&self) -> f64 {
         self.frame_ns.load(Ordering::Relaxed) as f64 / 1e9
+    }
+
+    /// Play forward at `rate` (1.0 = normal) from where the playhead is.
+    /// Refuses a rate that is not finite and greater than zero: this engine
+    /// has no reverse, and a negative rate would fail deep inside GES with
+    /// nothing to show the user. Inert while rendering, like `play`.
+    pub fn set_rate(&self, rate: f64) -> Result<()> {
+        if !(rate.is_finite() && rate > 0.0) {
+            anyhow::bail!("a playback rate must be above zero, not {rate}");
+        }
+        if self.rendering.get() {
+            return Ok(());
+        }
+        let pos = self.position().unwrap_or(Duration::ZERO);
+        // A full seek: seek_simple cannot carry a rate.
+        self.pipeline.seek(
+            rate,
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+            gst::SeekType::Set,
+            gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
+            gst::SeekType::None,
+            gst::ClockTime::NONE,
+        )?;
+        self.rate.set(rate);
+        Ok(())
+    }
+
+    /// The rate the preview plays at: 1.0 unless [`Self::set_rate`] changed
+    /// it since the last ordinary seek.
+    pub fn rate(&self) -> f64 {
+        self.rate.get()
     }
 
     /// Repaint the preview if an edit marked the timeline dirty since the last
@@ -1854,10 +1893,16 @@ impl Project {
         // ACCURATE: this repaints the paused frame after an edit — snapping to
         // the nearest keyframe (KEY_UNIT) showed a frame that could be seconds
         // away from the displayed playhead time on long-GOP media.
-        let _ = self.pipeline.seek_simple(
-            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
-            gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
-        );
+        if self
+            .pipeline
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::ClockTime::from_nseconds(pos.as_nanos() as u64),
+            )
+            .is_ok()
+        {
+            self.rate.set(1.0);
+        }
     }
 
     /// Non-blocking check for a preview-pipeline ERROR (decoder death, missing
@@ -1999,6 +2044,8 @@ impl Project {
             .preview_set_video_sink(Some(self.appsink.upcast_ref::<gst::Element>()));
         self.pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
         self.pipeline.set_state(gst::State::Paused)?;
+        // The pipeline went through NULL: it plays at 1.0 again.
+        self.rate.set(1.0);
         Ok(())
     }
 
@@ -4047,6 +4094,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(project.frame_secs(), 0.1);
+        let _ = project.pause();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shuttle_plays_faster_and_refuses_reverse() {
+        let (dir, png, mut project) = undo_fixture("shuttle");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(20.0))
+            .expect("a");
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(project.set_rate(bad).is_err(), "{bad} must be refused");
+        }
+        assert_eq!(project.rate(), 1.0, "a refused rate changes nothing");
+        project.play().expect("play");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while settled(&project.pipeline) == Step::Pending && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        project.set_rate(4.0).expect("4x");
+        assert_eq!(project.rate(), 4.0);
+        let _ = project.pipeline.state(gst::ClockTime::from_seconds(3));
+        let from = project.position().expect("a position");
+        std::thread::sleep(Duration::from_millis(1000));
+        let to = project.position().expect("a position");
+        // Measured at 3.96 s of timeline per second on a still (M9). Anything
+        // clearly faster than normal proves the rate reached the pipeline.
+        assert!(
+            to > from + Duration::from_millis(2000),
+            "{from:?} -> {to:?}"
+        );
+        project.seek(secs(1.0)).expect("seek");
+        assert_eq!(
+            project.rate(),
+            1.0,
+            "an ordinary seek plays at normal speed again"
+        );
         let _ = project.pause();
         let _ = std::fs::remove_dir_all(&dir);
     }
