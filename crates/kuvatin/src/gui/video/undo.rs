@@ -30,6 +30,8 @@ pub(super) enum StepKind {
     Delete,
     ReorderTracks,
     AddTrack,
+    Split,
+    Speed,
 }
 
 impl StepKind {
@@ -166,6 +168,8 @@ impl Step for TimelineStep {
             StepKind::Delete => format!("deleting {name}"),
             StepKind::ReorderTracks => "reordering tracks".into(),
             StepKind::AddTrack => "adding a track".into(),
+            StepKind::Split => format!("splitting {name}"),
+            StepKind::Speed => format!("changing the speed of {name}"),
         }
     }
 
@@ -294,6 +298,7 @@ fn place(row: &mut TimelineClip, id: &str, record: &ClipRecord) {
     row.start = record.start as f32;
     row.duration = record.duration as f32;
     row.inpoint = record.inpoint as f32;
+    row.rate = record.rate as f32;
 }
 
 /// The row to select after an undo or redo: the step's own clip if it is on
@@ -420,6 +425,7 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
         let active = ex.active.clone();
         let pending = ex.pending.clone();
         let rec = st.recorder(ui);
+        let waves = st.waves.clone();
         let run = move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -432,7 +438,7 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
             // A transform still waiting for the preview tick would be applied,
             // and recorded, after the undo.
             pending_xform.borrow_mut().take();
-            apply_step(&ui, &project, &rec, &sel_idx, dir);
+            apply_step(&ui, &project, &rec, &sel_idx, dir, &waves);
         };
         match dir {
             Direction::Undo => ui.on_video_undo(run),
@@ -448,6 +454,7 @@ fn apply_step(
     rec: &Recorder,
     sel_idx: &Rc<Cell<i32>>,
     dir: Direction,
+    waves: &super::waves::Waves,
 ) {
     let verb = match dir {
         Direction::Undo => "undo",
@@ -631,8 +638,20 @@ fn apply_step(
         })
         .map(|(id, record)| (kuvatin_video::ClipId(id.clone()), record.clone()))
         .collect();
+    // The same for the waveform: from the cache, or decoded again.
+    let without_wave: Vec<(SharedString, String)> = ops
+        .restores
+        .iter()
+        .filter(|(id, _)| {
+            new_rows
+                .iter()
+                .any(|r| r.id.as_str() == id.as_str() && r.wave.size().width == 0)
+        })
+        .map(|(id, record)| (id.as_str().into(), record.uri.clone()))
+        .collect();
     rec.tl_clips.set_vec(new_rows);
     super::project_file::spawn_thumbnails(ui.as_weak(), without_thumb);
+    waves.fill(ui.as_weak(), without_wave);
 
     {
         let mut history = rec.history.borrow_mut();
@@ -683,6 +702,7 @@ mod tests {
             start,
             inpoint: 0.0,
             duration,
+            rate: 1.0,
             layout: LayoutRecord {
                 posx: 0,
                 posy: 0,
@@ -715,6 +735,9 @@ mod tests {
             kind: ClipKind::Video,
             selected: false,
             thumb: Image::default(),
+            rate: r.rate as f32,
+            wave: Image::default(),
+            wave_secs: 0.0,
         }
     }
 
@@ -828,6 +851,8 @@ mod tests {
             StepKind::Delete,
             StepKind::ReorderTracks,
             StepKind::AddTrack,
+            StepKind::Split,
+            StepKind::Speed,
         ] {
             assert!(
                 !step(kind, "a", &c0, &c1).merges_with(&step(kind, "a", &c1, &c0)),
@@ -894,6 +919,35 @@ mod tests {
             }
         );
         assert_eq!(target_tracks(&s, Direction::Redo), 3);
+    }
+
+    /// Undo removes the right half and writes the left one back whole; redo
+    /// writes the left half again and brings the right one back.
+    #[test]
+    fn a_split_undoes_to_one_clip_and_redoes_to_two() {
+        let whole = rec(0, 0.0, 4.0);
+        let left = rec(0, 0.0, 1.5);
+        let mut right = rec(0, 1.5, 2.5);
+        right.inpoint = 1.5;
+        let before = cap(&[("a", whole.clone())], 2);
+        let after = cap(&[("a", left.clone()), ("b", right.clone())], 2);
+        let s = step(StepKind::Split, "a", &before, &after);
+        assert_eq!(
+            plan(&s, Direction::Undo),
+            Plan {
+                removes: vec!["b".into()],
+                writes: vec![("a".into(), whole)],
+                restores: vec![],
+            }
+        );
+        assert_eq!(
+            plan(&s, Direction::Redo),
+            Plan {
+                removes: vec![],
+                writes: vec![("a".into(), left)],
+                restores: vec![("b".into(), right)],
+            }
+        );
     }
 
     #[test]
@@ -1023,6 +1077,8 @@ mod tests {
         assert_eq!(d(StepKind::Delete), "deleting intro.mp4");
         assert_eq!(d(StepKind::ReorderTracks), "reordering tracks");
         assert_eq!(d(StepKind::AddTrack), "adding a track");
+        assert_eq!(d(StepKind::Split), "splitting intro.mp4");
+        assert_eq!(d(StepKind::Speed), "changing the speed of intro.mp4");
     }
 
     fn recorder(rows: Vec<TimelineClip>, tracks: usize) -> Recorder {
@@ -1115,5 +1171,59 @@ mod tests {
         assert_eq!(tracks.row_data(3).unwrap().as_str(), "Track 4");
         set_track_rows(&tracks, 1);
         assert_eq!(tracks.row_count(), 1);
+    }
+
+    #[test]
+    fn a_row_takes_its_speed_from_the_record() {
+        let mut shown = row("a", &rec(0, 0.0, 4.0));
+        shown.thumb = picture(3);
+        let mut fast = rec(0, 0.0, 2.0);
+        fast.rate = 2.0;
+        let applied = vec![Applied {
+            id: "a".into(),
+            now_id: "a".into(),
+            record: Some(fast),
+        }];
+        let out = rows_after(&[shown], &applied, &HashMap::new());
+        assert_eq!(out[0].rate, 2.0, "undo puts the speed back on the row");
+        assert_eq!(out[0].duration, 2.0);
+        assert_eq!(out[0].thumb.size().width, 3, "and leaves the picture alone");
+    }
+
+    /// The waveform belongs to the source, not the record: an undo moves the
+    /// row and leaves its picture of the sound alone.
+    #[test]
+    fn a_row_keeps_its_waveform_through_an_undo() {
+        let mut shown = row("a", &rec(0, 0.0, 4.0));
+        shown.wave = picture(5);
+        shown.wave_secs = 12.5;
+        let applied = vec![Applied {
+            id: "a".into(),
+            now_id: "a".into(),
+            record: Some(rec(1, 2.0, 3.0)),
+        }];
+        let out = rows_after(&[shown], &applied, &HashMap::new());
+        assert_eq!((out[0].track, out[0].start), (1, 2.0));
+        assert_eq!(out[0].wave.size().width, 5);
+        assert_eq!(out[0].wave_secs, 12.5);
+    }
+
+    /// A rate-only change is one changed clip, and undoes as one write.
+    #[test]
+    fn a_speed_change_is_one_changed_clip() {
+        let normal = rec(0, 0.0, 4.0);
+        let mut other = normal.clone();
+        other.rate = 2.0;
+        let c0 = cap(&[("a", normal.clone())], 2);
+        let c1 = cap(&[("a", other)], 2);
+        assert_eq!(diff(&c0, &c1).len(), 1);
+        assert_eq!(
+            plan(&step(StepKind::Speed, "a", &c0, &c1), Direction::Undo),
+            Plan {
+                removes: vec![],
+                writes: vec![("a".into(), normal)],
+                restores: vec![],
+            }
+        );
     }
 }

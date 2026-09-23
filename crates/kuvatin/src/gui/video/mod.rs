@@ -6,7 +6,9 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod transport;
 mod undo;
+mod waves;
 
 use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
 use export::ExportState;
@@ -32,6 +34,20 @@ pub(super) fn has_unsaved_changes(slot: &ProjectSlot) -> bool {
         .is_some_and(kuvatin_video::Project::has_unsaved_work)
 }
 
+/// The inspector's Scale range, in percent of the size that fits the canvas.
+/// One place for it: the slider, the preview box's corner drag and the
+/// read-back when a clip is selected all take it from here, because three
+/// copies of it once disagreed with the engine, which has no ceiling at all.
+/// 400 % is where other editors stop, and the position sliders run a whole
+/// canvas either way, so a clip zoomed that far can still be placed anywhere.
+pub(super) const MIN_SCALE_PCT: f32 = 10.0;
+pub(super) const MAX_SCALE_PCT: f32 = 400.0;
+
+/// The speeds the inspector offers, slowest first. A fixed list, not a
+/// slider: every change re-times the clip and is one undo step. The labels
+/// the window shows are built from it, so the list lives only here.
+pub(super) const SPEEDS: [f64; 6] = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
+
 /// Everything the Videos mode owns that more than one handler touches.
 pub(super) struct VideoState {
     /// The GES project, created on demand by the first clip (or canvas change).
@@ -55,6 +71,9 @@ pub(super) struct VideoState {
     /// Undo and redo for the timeline. Private to the Videos modules: its step
     /// type is.
     history: undo::TimelineHistory,
+    /// The waveform per source, decoded once and shared by every clip of it.
+    /// A view, never saved; see `waves`.
+    waves: waves::Waves,
 }
 
 impl VideoState {
@@ -68,6 +87,10 @@ impl VideoState {
             SharedString::from("Track 2"),
         ]));
         ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
+        ui.set_insp_scale_min(MIN_SCALE_PCT);
+        ui.set_insp_scale_max(MAX_SCALE_PCT);
+        let labels: Vec<SharedString> = SPEEDS.iter().map(|r| format!("{r}×").into()).collect();
+        ui.set_insp_speed_labels(ModelRc::from(Rc::new(VecModel::from(labels))));
         Self {
             project: Rc::new(RefCell::new(None)),
             assets,
@@ -78,6 +101,7 @@ impl VideoState {
             pending_xform: Rc::new(RefCell::new(None)),
             pending_seek: Rc::new(Cell::new(None)),
             history: Rc::new(RefCell::new(crate::gui::history::History::new())),
+            waves: waves::Waves::default(),
         }
     }
 
@@ -108,6 +132,7 @@ pub(super) fn wire(
 ) {
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
+    transport::wire(ui, st);
     export::wire(ui, st, ex, timers);
     project_file::wire(ui, st, im);
     undo::wire(ui, st, ex);
@@ -222,7 +247,11 @@ pub(super) fn wire(
                 ui.set_video_volume(v);
             }
             if let Some(p) = project_slot.borrow().as_ref() {
-                p.set_master_volume(v as f64);
+                // While the shuttle runs faster the sound stays muted; the new
+                // level applies when it is back at normal speed.
+                if p.rate() == 1.0 {
+                    p.set_master_volume(v as f64);
+                }
             }
         });
     }
@@ -364,6 +393,10 @@ pub(super) fn wire(
                         ui.set_video_playing(false);
                     }
                 }
+                // Any ordinary seek plays at normal speed again (a scrub, a
+                // frame step, the loop back to the start): keep the shuttle
+                // readout, and the sound it mutes, in step with the engine.
+                transport::sync_shuttle(&ui, project);
                 ui.set_playhead(pos.as_secs_f32());
                 let frac = if dur.as_secs_f32() > 0.0 {
                     (pos.as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0)
@@ -483,6 +516,7 @@ fn add_to_timeline(
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
     rec: &undo::Recorder,
+    waves: &waves::Waves,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -522,6 +556,9 @@ fn add_to_timeline(
                 },
                 selected: false,
                 thumb,
+                rate: 1.0,
+                wave: Image::default(),
+                wave_secs: 0.0,
             });
             rec.record(
                 Some(&*project),
@@ -529,6 +566,12 @@ fn add_to_timeline(
                 Some(info.id.0.as_str()),
                 before,
             );
+            // Only a video can have sound.
+            if !is_img {
+                if let Some(uri) = project.clip_uri(&info.id) {
+                    waves.fill(ui_weak.clone(), vec![(info.id.0.as_str().into(), uri)]);
+                }
+            }
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_video_playing(true);
@@ -582,6 +625,9 @@ fn add_sequence_to_timeline(
                 kind: ClipKind::Sequence,
                 selected: false,
                 thumb,
+                rate: 1.0,
+                wave: Image::default(),
+                wave_secs: 0.0,
             });
             rec.record(
                 Some(&*project),

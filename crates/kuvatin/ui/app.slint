@@ -32,6 +32,9 @@ export struct TimelineClip {
     kind: ClipKind,
     selected: bool,
     thumb: image,
+    rate: float,       // playback rate: 1 unless the clip's speed was changed
+    wave: image,       // the whole source's waveform, or empty
+    wave-secs: float,  // how many seconds of source that image spans
 }
 
 // A media-bin entry: file name + a generated thumbnail.
@@ -98,6 +101,11 @@ export component AppWindow inherits Window {
     callback video-seek(float);            // fraction 0..1
     callback seek-done();                  // scrub released → land frame-accurately
     callback video-volume-changed(float);  // 0..1
+    // Frame stepping and the shuttle (gui/video/transport.rs).
+    callback video-step(int);              // , and .: one frame back (-1) or on (+1)
+    callback video-shuttle(int);           // J, K, L as -1, 0, +1
+    // The rate the preview plays at, shown beside Play when it is not 1.
+    in property <float> shuttle-rate: 1;
     in-out property <bool> video-repeat: false;  // loop playback at the end
     // The GStreamer engine failed to initialise (set from Rust): the media
     // actions are disabled rather than silently doing nothing.
@@ -149,6 +157,11 @@ export component AppWindow inherits Window {
     in-out property <float> insp-alpha: 100;   // opacity percent
     in-out property <float> insp-volume: 100;  // percent
     in property <bool> insp-has-audio: true;   // hide volume for stills
+    // The Scale range in percent. Set once at start-up from MIN_SCALE_PCT and
+    // MAX_SCALE_PCT (gui/video/mod.rs): the slider, the preview box's corner
+    // drag and the read-back on select all use the one range. Zero until then.
+    in property <float> insp-scale-min;
+    in property <float> insp-scale-max;
     // Selected clip's aspect-fit size in canvas px (for the preview bounding box).
     in property <float> sel-fit-w: 1280;
     in property <float> sel-fit-h: 720;
@@ -215,6 +228,12 @@ export component AppWindow inherits Window {
     callback inspector-duration-changed(int);  // Duration field (stills), whole seconds
     in-out property <int> insp-duration-s: 5;  // selected clip's length, whole seconds
     in property <bool> insp-is-still: false;   // selected clip is a still image (duration is free)
+    // Speed, for videos and image sequences. The labels come from SPEEDS in
+    // gui/video/mod.rs; the index is the entry showing.
+    in property <bool> insp-has-rate: false;
+    in property <[string]> insp-speed-labels;
+    in-out property <int> insp-rate-index: 2;
+    callback inspector-speed-changed(int);     // Speed list: the index picked
     callback timeline-select(int);            // clip index
     // Saving and reopening the timeline. `video-save-project(true)` always
     // asks where; false writes back to the file the project came from.
@@ -232,6 +251,7 @@ export component AppWindow inherits Window {
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
     callback timeline-clip-removed(int);             // delete the clip at this index
+    callback timeline-split();                       // cut the selected clip in two at the playhead
     callback video-bin-removed(int);                 // remove a media-bin entry
     callback track-reordered(int, int);              // drag a track header: from row → to row
     // Magnetic snapping: given the dragged clip and its proposed slide (seconds),
@@ -427,15 +447,31 @@ export component AppWindow inherits Window {
         }
         return EventResult.reject;
     }
+    // , and . step one frame; J, K and L shuttle. J is not reverse play: the
+    // engine has none, so it slows down and then pauses. Its own function for
+    // the reason clip-keys is.
+    function transport-keys(event: KeyEvent) -> EventResult {
+        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || root.exporting) { return EventResult.reject; }
+        if (event.text == ",") { root.video-step(-1); return EventResult.accept; }
+        if (event.text == ".") { root.video-step(1); return EventResult.accept; }
+        if (event.text == "j" || event.text == "J") { root.video-shuttle(-1); return EventResult.accept; }
+        if (event.text == "k" || event.text == "K") { root.video-shuttle(0); return EventResult.accept; }
+        if (event.text == "l" || event.text == "L") { root.video-shuttle(1); return EventResult.accept; }
+        return EventResult.reject;
+    }
     function video-keys(event: KeyEvent) -> EventResult {
         // A drag in progress holds the rows and the selection: only play/pause
         // gets through. This also keeps an arrow key from destroying a dragged
         // slider, which would end the drag without the release that clears
         // Gesture.held.
         if (Gesture.held && event.text != " ") { return EventResult.reject; }
-        // Transport/edit keys are dead during an export (the engine ignores
-        // them too — this just keeps the play icon from flipping).
-        if (root.exporting) { return EventResult.reject; }
+        // Transport and edit keys are dead behind any dialog, as undo already
+        // is: a key pressed behind a dialog must never change the edit
+        // underneath it. This used to cover only the export, so Delete behind
+        // a confirmation deleted the selected clip, and Space played. Esc and
+        // Return still reach the dialog: modal-keys and the Modal take them
+        // first.
+        if (root.modal-open()) { return EventResult.reject; }
         // Zoom, on the keys every editor uses for it.
         if (event.modifiers.control && (event.text == "+" || event.text == "=")) {
             root.zoom-at(1.4, root.tl-view-w / 2);
@@ -461,6 +497,12 @@ export component AppWindow inherits Window {
         }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
         if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
+        // Plain S splits the selected clip at the playhead; Ctrl+S, above, saves.
+        if ((event.text == "s" || event.text == "S") && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta && root.timeline-selected >= 0) {
+            root.timeline-split();
+            return EventResult.accept;
+        }
+        if (root.transport-keys(event) == EventResult.accept) { return EventResult.accept; }
         return root.clip-keys(event);
     }
     function image-keys(event: KeyEvent) -> EventResult {
@@ -1554,7 +1596,7 @@ export component AppWindow inherits Window {
                                             root.insp-posy = eta.b-posy + (self.mouse-y - self.pressed-y) / edit-layer.ppc;
                                             root.inspector-changed();
                                         } else if (eta.mode == EditMode.resize) {
-                                            root.insp-scale = Math.clamp(Math.abs((self.mouse-x - edit-layer.off-x) / edit-layer.ppc - eta.cen-x) * 2 / root.sel-fit-w * 100, 10, 100);
+                                            root.insp-scale = Math.clamp(Math.abs((self.mouse-x - edit-layer.off-x) / edit-layer.ppc - eta.cen-x) * 2 / root.sel-fit-w * 100, root.insp-scale-min, root.insp-scale-max);
                                             root.insp-posx = eta.cen-x - (root.insp-scale / 100) * root.sel-fit-w / 2;
                                             root.insp-posy = eta.cen-y - (root.insp-scale / 100) * root.sel-fit-h / 2;
                                             root.inspector-changed();
@@ -1587,6 +1629,12 @@ export component AppWindow inherits Window {
                                     animate opacity { duration: 120ms; }
                                 }
                                 pp-ta := TouchArea { clicked => { root.video-playpause(); } }
+                            }
+                            // The shuttle's speed (J / K / L), when it is not normal.
+                            if root.shuttle-rate != 1 : Text {
+                                text: root.shuttle-rate + "×";
+                                color: Theme.accent; font-size: 11px; font-weight: 700;
+                                vertical-alignment: center;
                             }
                             // Repeat / loop toggle.
                             Rectangle {
@@ -1669,15 +1717,33 @@ export component AppWindow inherits Window {
                                 init => { self.opacity = 1; }
                             }
                             if root.inspector-name != "" : VerticalLayout {
+                                // The spare height below the controls belongs to the filler
+                                // after this layout. Without this the layout took a share of
+                                // it and handed it to the one child that can grow, the Speed
+                                // block, which drew its list as a tall box adrift from its
+                                // label.
+                                vertical-stretch: 0;
                                 opacity: 0;
                                 animate opacity { duration: 180ms; easing: ease-out; }
                                 init => { self.opacity = 1; }
                                 spacing: 6px;
                                 InspSlider { label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
                                 InspSlider { label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Scale"; min: 10; max: 100; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
+                                InspSlider { label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
                                 InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
                                 if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
+                                // Speed, for clips with source time to stretch: videos and
+                                // image sequences, not stills.
+                                if root.insp-has-rate : VerticalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Speed"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; }
+                                    ComboBox {
+                                        model: root.insp-speed-labels;
+                                        current-index <=> root.insp-rate-index;
+                                        accessible-label: "Speed";
+                                        selected(t) => { root.inspector-speed-changed(self.current-index); }
+                                    }
+                                }
                                 // A still has no source length, so its duration is a free
                                 // choice; a real clip's is set by trimming on the timeline.
                                 if root.insp-is-still : VerticalLayout {
@@ -1734,6 +1800,14 @@ export component AppWindow inherits Window {
                                     enabled: root.video-can-redo && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.video-redo(); if (!redo-chip.has-focus) { kbd.focus(); } }
+                                }
+                                split-chip := TimelineChip {
+                                    label: "Split";
+                                    wide: true;
+                                    hint: "Split the selected clip at the playhead (S)";
+                                    enabled: root.timeline-selected >= 0 && !root.modal-open() && !root.video-engine-down;
+                                    focus-on-click: false;
+                                    clicked => { root.timeline-split(); if (!split-chip.has-focus) { kbd.focus(); } }
                                 }
                                 // Zoom: discoverable buttons for the wheel gesture, and the
                                 // only way to reach it without a wheel.
@@ -1885,7 +1959,8 @@ export component AppWindow inherits Window {
                                         accessible-role: list-item;
                                         accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
                                             + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
-                                            + Math.round(clip.duration * 10) / 10 + " s long";
+                                            + Math.round(clip.duration * 10) / 10 + " s long"
+                                            + (clip.rate > 0 && clip.rate != 1 ? ", plays at " + clip.rate + "×" : "");
                                         accessible-item-selected: clip.selected;
                                         x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                         // track 0 = GES layer 0 = top (both on-screen and composited).
@@ -1937,9 +2012,22 @@ export component AppWindow inherits Window {
                                             animate border-color { duration: 130ms; }
                                             // thumbnail (covers the gradient once generated)
                                             Image { source: clip.thumb; image-fit: cover; width: 100%; height: 100%; }
+                                            // The sound: the whole source's waveform, windowed to what
+                                            // this clip plays of it, from its in-point for its duration
+                                            // times its speed. Trims and speed move the window with no
+                                            // work in Rust and no second decode.
+                                            if clip.wave.width > 0 && clip.wave-secs > 0 : Image {
+                                                property <float> speed: clip.rate > 0 ? clip.rate : 1;
+                                                source: clip.wave;
+                                                image-fit: fill;
+                                                x: 0; y: parent.height * 0.6;
+                                                width: parent.width; height: parent.height * 0.4;
+                                                source-clip-x: Math.min(clip.wave.width - 1, Math.max(0, Math.round(clip.inpoint / clip.wave-secs * clip.wave.width)));
+                                                source-clip-width: Math.max(1, Math.min(clip.wave.width - self.source-clip-x, Math.round(clip.duration * self.speed / clip.wave-secs * clip.wave.width)));
+                                            }
                                             // left scrim so the name stays legible over the thumb
                                             Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
-                                            Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
+                                            Text { text: clip.rate > 0 && clip.rate != 1 ? clip.name + "  " + clip.rate + "×" : clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
                                             Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
                                             Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
                                             // Delete affordance on the selected clip (also Delete key).

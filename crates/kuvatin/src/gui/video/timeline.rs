@@ -2,8 +2,8 @@
 //! magnetic snapping, track rows and clip removal.
 
 use super::undo::{Recorder, StepKind};
-use super::VideoState;
-use crate::gui::{AppWindow, ClipKind, TimelineClip};
+use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT, SPEEDS};
+use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -53,6 +53,8 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             // Stills get a free Duration field; real media is trimmed instead.
             ui.set_insp_is_still(sel_kind == ClipKind::Image);
             ui.set_insp_duration_s(sel_dur.round().max(1.0) as i32);
+            // Speed is for clips with source time to stretch.
+            ui.set_insp_has_rate(matches!(sel_kind, ClipKind::Video | ClipKind::Sequence));
             // Give a fresh clip an aspect-correct default, then reflect its
             // current layout into the sliders.
             {
@@ -63,10 +65,11 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     if let Some(l) = p.clip_layout(&cid) {
                         ui.set_insp_posx(l.posx as f32);
                         ui.set_insp_posy(l.posy as f32);
-                        ui.set_insp_scale(((l.scale * 100.0) as f32).clamp(10.0, 100.0));
+                        ui.set_insp_scale(scale_percent(l.scale));
                         ui.set_insp_alpha((l.alpha as f32 * 100.0).clamp(0.0, 100.0));
                         ui.set_insp_volume((l.volume as f32 * 100.0).clamp(0.0, 100.0));
                     }
+                    ui.set_insp_rate_index(speed_index(p.clip_rate(&cid)));
                     // Fit size drives the preview bounding box dimensions.
                     let (fw, fh) = p.clip_fit_size(&cid).unwrap_or((
                         kuvatin_video::CANVAS_W as u32,
@@ -270,6 +273,72 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             }
         });
     }
+    // Split the selected clip where the playhead stands (the Split chip, S).
+    {
+        let ui_weak = ui_weak.clone();
+        let project_slot = project_slot.clone();
+        let tl_clips = tl_clips.clone();
+        let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
+        let waves = st.waves.clone();
+        ui.on_timeline_split(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let i = sel_idx.get();
+            if i < 0 {
+                return;
+            }
+            let Some(mut left) = tl_clips.row_data(i as usize) else {
+                return;
+            };
+            let at = std::time::Duration::from_secs_f64(f64::from(ui.get_playhead().max(0.0)));
+            let mut slot = project_slot.borrow_mut();
+            let Some(p) = slot.as_mut() else {
+                return;
+            };
+            let before = rec.before(Some(&*p));
+            let cid = kuvatin_video::ClipId(left.id.to_string());
+            match p.split_clip(&cid, at) {
+                Ok((right_id, lg, rg)) => {
+                    left.duration = lg.duration.as_secs_f32();
+                    // The right half is the same source further on: its row
+                    // is the left's, name and pictures and all, at its place.
+                    let mut right = left.clone();
+                    right.id = right_id.0.clone().into();
+                    right.start = rg.start.as_secs_f32();
+                    right.inpoint = rg.inpoint.as_secs_f32();
+                    right.duration = rg.duration.as_secs_f32();
+                    right.selected = false;
+                    tl_clips.set_row_data(i as usize, left.clone());
+                    tl_clips.push(right);
+                    // After the push: the step keeps the row of a clip it adds.
+                    rec.record(Some(&*p), StepKind::Split, Some(left.id.as_str()), before);
+                    let length = p.duration();
+                    let right_uri = p.clip_uri(&right_id);
+                    drop(slot);
+                    // The right half copied the left's row, waveform and all.
+                    // If the waveform was still decoding, the copy had none and
+                    // no one would ever bring it: ask the cache, which answers
+                    // at once when the source is done and otherwise adds this
+                    // clip to the wait, never decoding the source twice.
+                    if let Some(uri) = right_uri {
+                        waves.fill(ui.as_weak(), vec![(right_id.0.as_str().into(), uri)]);
+                    }
+                    ui.set_timeline_duration(length.map(|d| d.as_secs_f32()).unwrap_or(0.0));
+                    ui.set_insp_duration_s(lg.duration.as_secs_f32().round().max(1.0) as i32);
+                }
+                Err(e) => {
+                    drop(slot);
+                    show_error(
+                        &ui,
+                        &format!("Could not split {}", left.name),
+                        format!("{e:#}"),
+                    );
+                }
+            }
+        });
+    }
     // Inspector Duration field (stills): set the selected clip's length outright.
     {
         let ui_weak = ui_weak.clone();
@@ -303,6 +372,59 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 }
                 // The engine may have clamped; show what it actually applied.
                 ui.set_insp_duration_s(geom.duration.as_secs_f32().round().max(1.0) as i32);
+            }
+        });
+    }
+    // Inspector Speed: play the selected clip faster or slower.
+    {
+        let ui_weak = ui_weak.clone();
+        let project_slot = project_slot.clone();
+        let tl_clips = tl_clips.clone();
+        let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
+        ui.on_inspector_speed_changed(move |index| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let Some(&rate) = usize::try_from(index).ok().and_then(|i| SPEEDS.get(i)) else {
+                return;
+            };
+            let i = sel_idx.get();
+            if i < 0 {
+                return;
+            }
+            let Some(mut row) = tl_clips.row_data(i as usize) else {
+                return;
+            };
+            let cid = kuvatin_video::ClipId(row.id.to_string());
+            let done = project_slot.borrow_mut().as_mut().and_then(|p| {
+                let before = rec.before(Some(&*p));
+                let geom = p.set_clip_rate(&cid, rate)?;
+                rec.record(Some(&*p), StepKind::Speed, Some(row.id.as_str()), before);
+                Some((geom, p.clip_rate(&cid), p.duration()))
+            });
+            match done {
+                Some((geom, now, length)) => {
+                    row.start = geom.start.as_secs_f32();
+                    row.inpoint = geom.inpoint.as_secs_f32();
+                    row.duration = geom.duration.as_secs_f32();
+                    row.rate = now as f32;
+                    tl_clips.set_row_data(i as usize, row);
+                    ui.set_timeline_duration(length.map(|d| d.as_secs_f32()).unwrap_or(0.0));
+                    ui.set_insp_rate_index(speed_index(now));
+                }
+                None => {
+                    // The clip plays as it did: show that.
+                    ui.set_insp_rate_index(speed_index(f64::from(row.rate)));
+                    show_error(
+                        &ui,
+                        "Could not change the speed",
+                        format!(
+                            "Could not change the speed of {}. It plays as it did.",
+                            row.name
+                        ),
+                    );
+                }
             }
         });
     }
@@ -444,6 +566,24 @@ fn selection_after_removal(selected: i32, removed: i32) -> i32 {
     }
 }
 
+/// The inspector's Scale reading, in percent, for an engine scale (1.0 is the
+/// size that fits the canvas). Clamped to the range the slider and the
+/// preview box can reach, and to nothing tighter.
+fn scale_percent(scale: f64) -> f32 {
+    ((scale * 100.0) as f32).clamp(MIN_SCALE_PCT, MAX_SCALE_PCT)
+}
+
+/// The Speed list entry nearest `rate`, so a rate from outside the list (a
+/// file edited by hand) still shows the closest one. On a tie, the slower.
+fn speed_index(rate: f64) -> i32 {
+    SPEEDS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - rate).abs().total_cmp(&(*b - rate).abs()))
+        .map(|(i, _)| i as i32)
+        .unwrap_or(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +708,50 @@ mod tests {
     #[test]
     fn with_nothing_selected_nothing_becomes_selected() {
         assert_eq!(selection_after_removal(-1, 0), -1);
+    }
+
+    // ---- the inspector's scale reading --------------------------------------
+
+    /// The engine zooms a clip past the canvas. The read-back used to clamp at
+    /// 100 % and snap a zoomed clip back to fit every time it was selected.
+    #[test]
+    fn the_scale_reading_reaches_past_the_canvas() {
+        assert_eq!(scale_percent(1.0), 100.0);
+        assert_eq!(scale_percent(2.5), 250.0);
+        assert_eq!(
+            scale_percent(9.0),
+            MAX_SCALE_PCT,
+            "capped at the slider's end"
+        );
+        assert_eq!(scale_percent(0.01), MIN_SCALE_PCT, "and at its start");
+    }
+
+    // ---- the Speed list -----------------------------------------------------
+
+    #[test]
+    fn each_speed_finds_its_own_entry_and_others_the_nearest() {
+        for (i, &r) in SPEEDS.iter().enumerate() {
+            assert_eq!(speed_index(r), i as i32, "{r}");
+        }
+        assert_eq!(
+            speed_index(3.0),
+            4,
+            "between 2x and 4x: the first of the two"
+        );
+        assert_eq!(speed_index(0.1), 0);
+        assert_eq!(speed_index(9.0), 5);
+    }
+
+    #[test]
+    fn every_speed_offered_is_one_the_engine_keeps_exactly() {
+        use kuvatin_video::project::{RATE_MAX, RATE_MIN};
+        for r in SPEEDS {
+            assert!((RATE_MIN..=RATE_MAX).contains(&r), "{r}");
+            assert_eq!(
+                f64::from(r as f32),
+                r,
+                "{r} survives the engine's f32 rounding"
+            );
+        }
     }
 }

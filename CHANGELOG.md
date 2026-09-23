@@ -21,6 +21,27 @@ something is fixed.
   installer, checks it against the checksum published with it, then closes,
   installs and opens again. The update check is still opt-in and still the
   only thing that reaches the network unless you ask.
+- **Split at the playhead.** The Split button in the timeline toolbar, or
+  **S**, cuts the selected clip in two where the playhead stands; undo puts
+  it back as one.
+- **Frame stepping and shuttle keys.** **,** and **.** step one frame back
+  and on. **L** plays and then speeds up to 2×, 4× and 8×, **J** slows back
+  down and then pauses, and **K** pauses. Kuvatin has no reverse play, so
+  **J** never plays backwards as it does in some editors. The sound is muted
+  while the shuttle runs faster than normal. While any clip on the timeline
+  has a speed of its own, **L** plays at normal speed and goes no faster:
+  GStreamer cannot play faster through a speed change, and tried, the preview
+  froze.
+- **Zoom a clip past the canvas.** Scale now reaches 400 %, from the
+  inspector or by dragging the corner of the box in the preview.
+- **Clip speed.** The inspector's Speed list plays a video or an image
+  sequence at 0.25× to 4×; the clip's length follows, and stops at the next
+  clip. Saved with the project and undoable like any other edit. A project
+  that uses it opens in 2.12 and earlier with the clip at its saved place and
+  length, playing at normal speed.
+- **The sound is drawn on the clip.** A video's waveform runs along the
+  bottom of its block on the timeline and follows trims and speed changes, so
+  a cut can be placed by looking at the sound.
 
 ### Fixed
 - Moving or scaling a clip while it is still starting up, as when a
@@ -29,6 +50,9 @@ something is fixed.
 - The window opens larger, so the timeline and the inspector both fit without
   resizing it first. On a screen too small for that it opens as large as the
   desktop allows.
+- The video editor's keys no longer act behind an open dialog. Pressing
+  **Delete** while a confirmation such as "Open another project?" was showing
+  deleted the selected clip underneath it, and **Space** played the preview.
 
 ## [2.12.0] - 2026-09-16
 Undo arrives. Ctrl+Z takes back the last thing you did, in both modes, and
