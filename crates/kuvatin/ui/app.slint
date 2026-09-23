@@ -32,6 +32,7 @@ export struct TimelineClip {
     kind: ClipKind,
     selected: bool,
     thumb: image,
+    rate: float,       // playback rate: 1 unless the clip's speed was changed
 }
 
 // A media-bin entry: file name + a generated thumbnail.
@@ -1932,7 +1933,8 @@ export component AppWindow inherits Window {
                                         accessible-role: list-item;
                                         accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
                                             + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
-                                            + Math.round(clip.duration * 10) / 10 + " s long";
+                                            + Math.round(clip.duration * 10) / 10 + " s long"
+                                            + (clip.rate > 0 && clip.rate != 1 ? ", plays at " + clip.rate + "×" : "");
                                         accessible-item-selected: clip.selected;
                                         x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                         // track 0 = GES layer 0 = top (both on-screen and composited).
@@ -1986,7 +1988,7 @@ export component AppWindow inherits Window {
                                             Image { source: clip.thumb; image-fit: cover; width: 100%; height: 100%; }
                                             // left scrim so the name stays legible over the thumb
                                             Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
-                                            Text { text: clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
+                                            Text { text: clip.rate > 0 && clip.rate != 1 ? clip.name + "  " + clip.rate + "×" : clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
                                             Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
                                             Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
                                             // Delete affordance on the selected clip (also Delete key).

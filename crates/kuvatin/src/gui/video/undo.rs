@@ -296,6 +296,7 @@ fn place(row: &mut TimelineClip, id: &str, record: &ClipRecord) {
     row.start = record.start as f32;
     row.duration = record.duration as f32;
     row.inpoint = record.inpoint as f32;
+    row.rate = record.rate as f32;
 }
 
 /// The row to select after an undo or redo: the step's own clip if it is on
@@ -718,6 +719,7 @@ mod tests {
             kind: ClipKind::Video,
             selected: false,
             thumb: Image::default(),
+            rate: r.rate as f32,
         }
     }
 
@@ -1149,5 +1151,41 @@ mod tests {
         assert_eq!(tracks.row_data(3).unwrap().as_str(), "Track 4");
         set_track_rows(&tracks, 1);
         assert_eq!(tracks.row_count(), 1);
+    }
+
+    #[test]
+    fn a_row_takes_its_speed_from_the_record() {
+        let mut shown = row("a", &rec(0, 0.0, 4.0));
+        shown.thumb = picture(3);
+        let mut fast = rec(0, 0.0, 2.0);
+        fast.rate = 2.0;
+        let applied = vec![Applied {
+            id: "a".into(),
+            now_id: "a".into(),
+            record: Some(fast),
+        }];
+        let out = rows_after(&[shown], &applied, &HashMap::new());
+        assert_eq!(out[0].rate, 2.0, "undo puts the speed back on the row");
+        assert_eq!(out[0].duration, 2.0);
+        assert_eq!(out[0].thumb.size().width, 3, "and leaves the picture alone");
+    }
+
+    /// A rate-only change is one changed clip, and undoes as one write.
+    #[test]
+    fn a_speed_change_is_one_changed_clip() {
+        let normal = rec(0, 0.0, 4.0);
+        let mut other = normal.clone();
+        other.rate = 2.0;
+        let c0 = cap(&[("a", normal.clone())], 2);
+        let c1 = cap(&[("a", other)], 2);
+        assert_eq!(diff(&c0, &c1).len(), 1);
+        assert_eq!(
+            plan(&step(StepKind::Move, "a", &c0, &c1), Direction::Undo),
+            Plan {
+                removes: vec![],
+                writes: vec![("a".into(), normal)],
+                restores: vec![],
+            }
+        );
     }
 }

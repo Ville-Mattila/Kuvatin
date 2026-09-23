@@ -543,6 +543,7 @@ fn add_to_timeline(
                 },
                 selected: false,
                 thumb,
+                rate: 1.0,
             });
             rec.record(
                 Some(&*project),
@@ -603,6 +604,7 @@ fn add_sequence_to_timeline(
                 kind: ClipKind::Sequence,
                 selected: false,
                 thumb,
+                rate: 1.0,
             });
             rec.record(
                 Some(&*project),

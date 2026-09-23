@@ -221,6 +221,7 @@ fn restore_models(
             kind: kind_of(&rec.uri),
             selected: false,
             thumb: Image::default(),
+            rate: rec.rate as f32,
         })
         .collect();
     st.tl_clips.set_vec(rows);
