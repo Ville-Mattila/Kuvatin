@@ -280,6 +280,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let tl_clips = tl_clips.clone();
         let sel_idx = sel_idx.clone();
         let rec = rec.clone();
+        let waves = st.waves.clone();
         ui.on_timeline_split(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -314,7 +315,16 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     // After the push: the step keeps the row of a clip it adds.
                     rec.record(Some(&*p), StepKind::Split, Some(left.id.as_str()), before);
                     let length = p.duration();
+                    let right_uri = p.clip_uri(&right_id);
                     drop(slot);
+                    // The right half copied the left's row, waveform and all.
+                    // If the waveform was still decoding, the copy had none and
+                    // no one would ever bring it: ask the cache, which answers
+                    // at once when the source is done and otherwise adds this
+                    // clip to the wait, never decoding the source twice.
+                    if let Some(uri) = right_uri {
+                        waves.fill(ui.as_weak(), vec![(right_id.0.as_str().into(), uri)]);
+                    }
                     ui.set_timeline_duration(length.map(|d| d.as_secs_f32()).unwrap_or(0.0));
                     ui.set_insp_duration_s(lg.duration.as_secs_f32().round().max(1.0) as i32);
                 }

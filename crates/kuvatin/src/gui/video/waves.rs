@@ -87,19 +87,29 @@ impl Waves {
             return;
         }
         let inner = self.0.clone();
-        let _ = std::thread::Builder::new()
+        let to_decode = decode.clone();
+        let spawned = std::thread::Builder::new()
             .name("kuvatin-waveforms".into())
             .spawn(move || {
-                for uri in decode {
-                    let wave =
-                        kuvatin_video::waveform_uri(&uri, WAVE_W, WAVE_H).map(|(f, secs)| {
-                            (
-                                SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                    &f.rgba, f.width, f.height,
-                                ),
-                                secs as f32,
-                            )
-                        });
+                for uri in to_decode {
+                    // A decoder that panics must still end its source's wait,
+                    // or every clip on that source waits out the session. The
+                    // panic hook has already written the crash log by the time
+                    // this sees it; the source is then kept as having no sound
+                    // so it is not tried, and does not panic, again.
+                    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        kuvatin_video::waveform_uri(&uri, WAVE_W, WAVE_H)
+                    }))
+                    .ok()
+                    .flatten();
+                    let wave = decoded.map(|(f, secs)| {
+                        (
+                            SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                                &f.rgba, f.width, f.height,
+                            ),
+                            secs as f32,
+                        )
+                    });
                     let Ok(ids) = inner.lock().map(|mut i| i.finish(&uri, wave.clone())) else {
                         continue;
                     };
@@ -116,6 +126,16 @@ impl Waves {
                     });
                 }
             });
+        if spawned.is_err() {
+            // No worker, so nothing will end these waits. Clear them rather
+            // than cache "no sound", so the next request for the source tries
+            // again instead of joining a wait that never ends.
+            if let Ok(mut inner) = self.0.lock() {
+                for uri in &decode {
+                    inner.waiting.remove(uri);
+                }
+            }
+        }
     }
 }
 
