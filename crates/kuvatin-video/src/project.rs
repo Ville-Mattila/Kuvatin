@@ -431,12 +431,13 @@ fn clock_time(secs: f64) -> gst::ClockTime {
 }
 
 /// Whether a clip already sits where `record` puts it: its times to the
-/// nanosecond, and its track.
+/// nanosecond, its track, and its speed.
 fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> bool {
     clip.start() == clock_time(record.start)
         && clip.inpoint() == clock_time(record.inpoint)
         && clip.duration() == clock_time(record.duration)
         && clip.layer().map(|l| l.priority() as usize) == Some(record.track)
+        && clip_rate_of(clip) == record.rate
 }
 
 /// A clip's time effects: its speed change, when it has one.
@@ -509,22 +510,30 @@ fn apply_rate(clip: &ges::Clip, rate: f64) -> Result<()> {
     Ok(())
 }
 
-/// Set a clip's times, the shrinking one of in-point and duration first (the
-/// order `trim_clip` uses), so in-point plus duration never passes the
-/// source's max-duration on the way, which GES refuses.
-fn set_clip_times(
+/// Set a clip's times and speed so that, at every step on the way, the source
+/// is never asked for more than it has, which GES refuses: the duration goes
+/// down first if it is going down at all; then the speed and the in-point,
+/// whichever lowers the source used first; then the final duration; then the
+/// start. With the speed unchanged this is the order `trim_clip` uses.
+fn set_clip_placement(
     clip: &ges::Clip,
     start: gst::ClockTime,
     inpoint: gst::ClockTime,
     duration: gst::ClockTime,
+    rate: f64,
 ) {
-    if duration <= clip.duration() {
-        clip.set_duration(duration);
+    let current = clip_rate_of(clip);
+    clip.set_duration(duration.min(clip.duration()));
+    if rate < current {
+        let _ = apply_rate(clip, rate);
         clip.set_inpoint(inpoint);
     } else {
         clip.set_inpoint(inpoint);
-        clip.set_duration(duration);
+        if rate != current {
+            let _ = apply_rate(clip, rate);
+        }
     }
+    clip.set_duration(duration);
     clip.set_start(start);
 }
 
@@ -1367,6 +1376,13 @@ impl Project {
         if let Some(l) = layout {
             self.set_clip_layout(&right_id, l);
         }
+        // GES copies the time effects to the new half and translates its
+        // in-point through them (M6). Were a runtime not to, the right half
+        // would play at normal speed and run past its source.
+        let rate = clip_rate_of(&clip);
+        if clip_rate_of(&right) != rate {
+            let _ = apply_rate(&right, rate);
+        }
         self.touched();
         Ok((right_id, clip_geom(&clip), clip_geom(&right)))
     }
@@ -1437,10 +1453,11 @@ impl Project {
         Some(clip_geom(&clip))
     }
 
-    /// Write clips' start, in-point, duration, track and transform exactly as
-    /// their records give them. Nothing is clamped: this puts back a state the
-    /// engine already accepted, which is what undo needs — a slide or trim
-    /// replayed in reverse would be clamped again and land somewhere else.
+    /// Write clips' start, in-point, duration, speed, track and transform
+    /// exactly as their records give them. Nothing is clamped: this puts back
+    /// a state the engine already accepted, which is what undo needs — a
+    /// slide or trim replayed in reverse would be clamped again and land
+    /// somewhere else.
     ///
     /// GES refuses, without an error, any moment where one clip sits fully on
     /// top of another, even when the end state is fine, so clips that trade
@@ -1484,7 +1501,15 @@ impl Project {
         // Where each moving clip was, so one that cannot land can go back.
         let origins: Vec<_> = moving
             .iter()
-            .map(|(_, _, clip)| (clip.layer(), clip.start(), clip.inpoint(), clip.duration()))
+            .map(|(_, _, clip)| {
+                (
+                    clip.layer(),
+                    clip.start(),
+                    clip.inpoint(),
+                    clip.duration(),
+                    clip_rate_of(clip),
+                )
+            })
             .collect();
         for (k, (_, _, clip)) in moving.iter().enumerate() {
             let layer = self.layer(parking + k);
@@ -1493,11 +1518,12 @@ impl Project {
             let _ = clip.move_to_layer(&layer);
         }
         for (_, record, clip) in &moving {
-            set_clip_times(
+            set_clip_placement(
                 clip,
                 clock_time(record.start),
                 clock_time(record.inpoint),
                 clock_time(record.duration),
+                record.rate,
             );
             let target = self.layer(record.track);
             let _ = clip.move_to_layer(&target);
@@ -1511,14 +1537,14 @@ impl Project {
         // land has taken its old place, it stays parked, packed onto the first
         // parking layers so no empty track is left above it.
         let mut stuck = 0;
-        for (k, ((_, record, clip), (layer, start, inpoint, duration))) in
+        for (k, ((_, record, clip), (layer, start, inpoint, duration, rate))) in
             moving.iter().zip(origins).enumerate()
         {
             if clip_placed_as(clip, record) {
                 continue;
             }
             let _ = clip.move_to_layer(&self.layers[parking + k]);
-            set_clip_times(clip, start, inpoint, duration);
+            set_clip_placement(clip, start, inpoint, duration, rate);
             if layer.is_some_and(|l| clip.move_to_layer(&l).is_ok()) {
                 continue;
             }
@@ -1566,13 +1592,40 @@ impl Project {
         let clip = ges::UriClip::new(&record.uri)?;
         clip.set_start(clock_time(record.start));
         clip.set_inpoint(clock_time(record.inpoint));
-        clip.set_duration(clock_time(record.duration));
+        // Slower than normal, a clip can be longer than its source lasts at
+        // 1×, and it goes onto the layer at 1×: at the length the source
+        // allows, until its speed is back on.
+        let mut length = clock_time(record.duration);
+        if record.rate < 1.0 {
+            if let Some(max) = clip.max_duration() {
+                length = length.min(max.saturating_sub(clock_time(record.inpoint)));
+            }
+        }
+        clip.set_duration(length);
         self.layer(record.track).add_clip(&clip)?;
         self.commit();
         self.clips.insert(id.0.clone(), clip.upcast());
         self.set_clip_layout(id, record.layout.into());
+        if record.rate != 1.0 {
+            self.put_rate_back(id, record.rate, record.duration);
+        }
         self.touched();
         Ok(id.clone())
+    }
+
+    /// The last step of restoring or loading a clip whose speed was changed:
+    /// its time effects go on, then it takes its length, which at a slow
+    /// speed only fits once they are on (M4). A refusal shows in the
+    /// read-back, as any other write's does.
+    fn put_rate_back(&mut self, id: &ClipId, rate: f64, duration: f64) {
+        let Some(clip) = self.clips.get(&id.0).cloned() else {
+            return;
+        };
+        let length = clock_time(duration);
+        if apply_rate(&clip, rate).is_ok() && clip.duration() != length {
+            clip.set_duration(length);
+        }
+        self.commit();
     }
 
     /// Whether the source at `uri` is there to bring back: the check undo
@@ -1826,19 +1879,37 @@ impl Project {
                     rec.name.clone()
                 }
             };
-            if ges::UriClipAsset::request_sync(&rec.uri).is_err() {
-                missing.push(name());
-                continue;
+            let asset = match ges::UriClipAsset::request_sync(&rec.uri) {
+                Ok(asset) => asset,
+                Err(_) => {
+                    missing.push(name());
+                    continue;
+                }
+            };
+            // Slower than normal, a clip can be longer than its source lasts
+            // at 1×: it goes on at the length the source allows, and takes
+            // the rest once its speed is back on.
+            let mut length = Duration::from_secs_f64(rec.duration.max(0.0));
+            if rec.rate < 1.0 {
+                if let Some(source) = asset.duration() {
+                    let fits = source.saturating_sub(clock_time(rec.inpoint)).nseconds();
+                    length = length.min(Duration::from_nanos(fits));
+                }
             }
             let placed = self.add_clip_uri(
                 &rec.uri,
                 rec.track,
                 Duration::from_secs_f64(rec.start.max(0.0)),
                 Duration::from_secs_f64(rec.inpoint.max(0.0)),
-                Duration::from_secs_f64(rec.duration.max(0.0)),
+                length,
             );
             match placed {
-                Ok(id) => self.set_clip_layout(&id, rec.layout.into()),
+                Ok(id) => {
+                    self.set_clip_layout(&id, rec.layout.into());
+                    if rec.rate != 1.0 {
+                        self.put_rate_back(&id, rec.rate, rec.duration);
+                    }
+                }
                 Err(_) => missing.push(name()),
             }
         }
@@ -4708,6 +4779,103 @@ mod tests {
             0.5,
         );
         assert_eq!(ours, limit.nseconds() as i128);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_writes_a_speed_change_back_both_ways() {
+        let (dir, uri) = sequence_fixture("undo-speed", 40, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        let normal = record_of(&project, &a);
+        project.set_clip_rate(&a, 2.0).expect("2x");
+        let fast = record_of(&project, &a);
+        assert_eq!((fast.rate, fast.duration), (2.0, 2.0));
+        assert!(
+            write_back(&mut project, &[(&a, &normal)]),
+            "undo: slower, longer"
+        );
+        assert_same_record(&record_of(&project, &a), &normal);
+        assert!(
+            write_back(&mut project, &[(&a, &fast)]),
+            "redo: faster, shorter"
+        );
+        assert_same_record(&record_of(&project, &a), &fast);
+        // A slow clip is longer than its source: the other order entirely.
+        project.set_clip_rate(&a, 0.5).expect("0.5x");
+        let slow = record_of(&project, &a);
+        assert_eq!((slow.rate, slow.duration), (0.5, 8.0));
+        assert!(write_back(&mut project, &[(&a, &fast)]));
+        assert_same_record(&record_of(&project, &a), &fast);
+        assert!(write_back(&mut project, &[(&a, &slow)]));
+        assert_same_record(&record_of(&project, &a), &slow);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_restores_a_slowed_clip_longer_than_its_source() {
+        // Two seconds of source at 0.5x: four on the timeline.
+        let (dir, uri) = sequence_fixture("undo-restore-speed", 20, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        project.set_clip_rate(&a, 0.5).expect("0.5x");
+        let before = record_of(&project, &a);
+        assert_eq!(before.duration, 4.0, "twice as long as the source");
+        assert!(project.remove_clip(&a));
+        project.restore_clip(&a, &before).expect("restore");
+        assert_same_record(&record_of(&project, &a), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speed_survives_a_save_and_a_load() {
+        let (dir, uri) = sequence_fixture("speed-save", 20, 10);
+        let file = dir.join("cut.kuvatin");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let slow = project.append_clip_uri(&uri, 0, None).expect("slow").id;
+        project.set_clip_rate(&slow, 0.5).expect("0.5x");
+        let fast = project
+            .add_clip_uri(&uri, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("fast");
+        project.set_clip_rate(&fast, 4.0).expect("4x");
+        project.to_document().save(&file).expect("save");
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let doc = crate::document::ProjectFile::load(&file).expect("load");
+        reopened.apply_document(&doc).expect("apply");
+        let got: Vec<(f64, f64)> = reopened
+            .to_document()
+            .clips
+            .iter()
+            .map(|c| (c.rate, c.duration))
+            .collect();
+        assert_eq!(got, vec![(0.5, 4.0), (4.0, 0.5)]);
+        assert!(
+            !reopened.has_unsaved_work(),
+            "putting the speed back is part of the load, not an edit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_keeps_the_speed_on_both_halves() {
+        // Four seconds of source at 2x: two on the timeline.
+        let (dir, uri) = sequence_fixture("split-speed", 40, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        project.set_clip_rate(&a, 2.0).expect("2x");
+        let (b, left, right) = project.split_clip(&a, secs(0.5)).expect("split");
+        assert_eq!((project.clip_rate(&a), project.clip_rate(&b)), (2.0, 2.0));
+        assert_eq!(
+            right.inpoint,
+            secs(1.0),
+            "half a second at 2x is a second of source"
+        );
+        assert_eq!(left.duration + right.duration, secs(2.0));
+        assert_eq!(
+            time_effects(&project.clips[&b.0]).len(),
+            1,
+            "one effect on the new half, not two"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
