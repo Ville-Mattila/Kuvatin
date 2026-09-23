@@ -1382,6 +1382,9 @@ impl Project {
         let rate = clip_rate_of(&clip);
         if clip_rate_of(&right) != rate {
             let _ = apply_rate(&right, rate);
+            // A change the timeline has not committed is a change the preview
+            // never shows: route it through the same commit as every other edit.
+            self.commit();
         }
         self.touched();
         Ok((right_id, clip_geom(&clip), clip_geom(&right)))
