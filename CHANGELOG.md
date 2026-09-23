@@ -31,6 +31,11 @@ something is fixed.
   while the shuttle runs faster than normal.
 - **Zoom a clip past the canvas.** Scale now reaches 400 %, from the
   inspector or by dragging the corner of the box in the preview.
+- **Clip speed.** The inspector's Speed list plays a video or an image
+  sequence at 0.25× to 4×; the clip's length follows, and stops at the next
+  clip. Saved with the project and undoable like any other edit. A project
+  that uses it opens in 2.12 and earlier with the clip at its saved place and
+  length, playing at normal speed.
 
 ### Fixed
 - Moving or scaling a clip while it is still starting up, as when a

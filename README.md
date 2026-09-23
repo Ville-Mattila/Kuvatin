@@ -85,6 +85,8 @@ lane; a plain wheel scrolls it.
 - **Overlays & transforms** — stack videos and still images; position, scale (up to 400 %),
   opacity and per-clip volume via the inspector or by dragging/resizing the clip
   right in the preview
+- **Clip speed** — play a video or an image sequence at 0.25× to 4× from the
+  inspector; trims follow the speed, and it is saved with the project
 - **Live composited preview** with scrubbing, repeat, and a master volume
 - **Configurable canvas** — pick the project resolution (16:9, vertical, square,
   4K, or custom) independently of the export size
