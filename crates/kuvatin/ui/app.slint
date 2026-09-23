@@ -226,6 +226,12 @@ export component AppWindow inherits Window {
     callback inspector-duration-changed(int);  // Duration field (stills), whole seconds
     in-out property <int> insp-duration-s: 5;  // selected clip's length, whole seconds
     in property <bool> insp-is-still: false;   // selected clip is a still image (duration is free)
+    // Speed, for videos and image sequences. The labels come from SPEEDS in
+    // gui/video/mod.rs; the index is the entry showing.
+    in property <bool> insp-has-rate: false;
+    in property <[string]> insp-speed-labels;
+    in-out property <int> insp-rate-index: 2;
+    callback inspector-speed-changed(int);     // Speed list: the index picked
     callback timeline-select(int);            // clip index
     // Saving and reopening the timeline. `video-save-project(true)` always
     // asks where; false writes back to the file the project came from.
@@ -1718,6 +1724,18 @@ export component AppWindow inherits Window {
                                 InspSlider { label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
                                 InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
                                 if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
+                                // Speed, for clips with source time to stretch: videos and
+                                // image sequences, not stills.
+                                if root.insp-has-rate : VerticalLayout {
+                                    spacing: 4px;
+                                    Text { text: "Speed"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; }
+                                    ComboBox {
+                                        model: root.insp-speed-labels;
+                                        current-index <=> root.insp-rate-index;
+                                        accessible-label: "Speed";
+                                        selected(t) => { root.inspector-speed-changed(self.current-index); }
+                                    }
+                                }
                                 // A still has no source length, so its duration is a free
                                 // choice; a real clip's is set by trimming on the timeline.
                                 if root.insp-is-still : VerticalLayout {

@@ -2,7 +2,7 @@
 //! magnetic snapping, track rows and clip removal.
 
 use super::undo::{Recorder, StepKind};
-use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT};
+use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT, SPEEDS};
 use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
@@ -53,6 +53,8 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             // Stills get a free Duration field; real media is trimmed instead.
             ui.set_insp_is_still(sel_kind == ClipKind::Image);
             ui.set_insp_duration_s(sel_dur.round().max(1.0) as i32);
+            // Speed is for clips with source time to stretch.
+            ui.set_insp_has_rate(matches!(sel_kind, ClipKind::Video | ClipKind::Sequence));
             // Give a fresh clip an aspect-correct default, then reflect its
             // current layout into the sliders.
             {
@@ -67,6 +69,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                         ui.set_insp_alpha((l.alpha as f32 * 100.0).clamp(0.0, 100.0));
                         ui.set_insp_volume((l.volume as f32 * 100.0).clamp(0.0, 100.0));
                     }
+                    ui.set_insp_rate_index(speed_index(p.clip_rate(&cid)));
                     // Fit size drives the preview bounding box dimensions.
                     let (fw, fh) = p.clip_fit_size(&cid).unwrap_or((
                         kuvatin_video::CANVAS_W as u32,
@@ -362,6 +365,59 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             }
         });
     }
+    // Inspector Speed: play the selected clip faster or slower.
+    {
+        let ui_weak = ui_weak.clone();
+        let project_slot = project_slot.clone();
+        let tl_clips = tl_clips.clone();
+        let sel_idx = sel_idx.clone();
+        let rec = rec.clone();
+        ui.on_inspector_speed_changed(move |index| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let Some(&rate) = usize::try_from(index).ok().and_then(|i| SPEEDS.get(i)) else {
+                return;
+            };
+            let i = sel_idx.get();
+            if i < 0 {
+                return;
+            }
+            let Some(mut row) = tl_clips.row_data(i as usize) else {
+                return;
+            };
+            let cid = kuvatin_video::ClipId(row.id.to_string());
+            let done = project_slot.borrow_mut().as_mut().and_then(|p| {
+                let before = rec.before(Some(&*p));
+                let geom = p.set_clip_rate(&cid, rate)?;
+                rec.record(Some(&*p), StepKind::Speed, Some(row.id.as_str()), before);
+                Some((geom, p.clip_rate(&cid), p.duration()))
+            });
+            match done {
+                Some((geom, now, length)) => {
+                    row.start = geom.start.as_secs_f32();
+                    row.inpoint = geom.inpoint.as_secs_f32();
+                    row.duration = geom.duration.as_secs_f32();
+                    row.rate = now as f32;
+                    tl_clips.set_row_data(i as usize, row);
+                    ui.set_timeline_duration(length.map(|d| d.as_secs_f32()).unwrap_or(0.0));
+                    ui.set_insp_rate_index(speed_index(now));
+                }
+                None => {
+                    // The clip plays as it did: show that.
+                    ui.set_insp_rate_index(speed_index(f64::from(row.rate)));
+                    show_error(
+                        &ui,
+                        "Could not change the speed",
+                        format!(
+                            "Could not change the speed of {}. It plays as it did.",
+                            row.name
+                        ),
+                    );
+                }
+            }
+        });
+    }
     // Delete a timeline clip: the × on the selected clip.
     {
         let ui_weak = ui_weak.clone();
@@ -507,6 +563,17 @@ fn scale_percent(scale: f64) -> f32 {
     ((scale * 100.0) as f32).clamp(MIN_SCALE_PCT, MAX_SCALE_PCT)
 }
 
+/// The Speed list entry nearest `rate`, so a rate from outside the list (a
+/// file edited by hand) still shows the closest one. On a tie, the slower.
+fn speed_index(rate: f64) -> i32 {
+    SPEEDS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| (*a - rate).abs().total_cmp(&(*b - rate).abs()))
+        .map(|(i, _)| i as i32)
+        .unwrap_or(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +714,34 @@ mod tests {
             "capped at the slider's end"
         );
         assert_eq!(scale_percent(0.01), MIN_SCALE_PCT, "and at its start");
+    }
+
+    // ---- the Speed list -----------------------------------------------------
+
+    #[test]
+    fn each_speed_finds_its_own_entry_and_others_the_nearest() {
+        for (i, &r) in SPEEDS.iter().enumerate() {
+            assert_eq!(speed_index(r), i as i32, "{r}");
+        }
+        assert_eq!(
+            speed_index(3.0),
+            4,
+            "between 2x and 4x: the first of the two"
+        );
+        assert_eq!(speed_index(0.1), 0);
+        assert_eq!(speed_index(9.0), 5);
+    }
+
+    #[test]
+    fn every_speed_offered_is_one_the_engine_keeps_exactly() {
+        use kuvatin_video::project::{RATE_MAX, RATE_MIN};
+        for r in SPEEDS {
+            assert!((RATE_MIN..=RATE_MAX).contains(&r), "{r}");
+            assert_eq!(
+                f64::from(r as f32),
+                r,
+                "{r} survives the engine's f32 rounding"
+            );
+        }
     }
 }

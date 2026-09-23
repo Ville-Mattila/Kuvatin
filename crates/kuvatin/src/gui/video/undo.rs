@@ -31,6 +31,7 @@ pub(super) enum StepKind {
     ReorderTracks,
     AddTrack,
     Split,
+    Speed,
 }
 
 impl StepKind {
@@ -168,6 +169,7 @@ impl Step for TimelineStep {
             StepKind::ReorderTracks => "reordering tracks".into(),
             StepKind::AddTrack => "adding a track".into(),
             StepKind::Split => format!("splitting {name}"),
+            StepKind::Speed => format!("changing the speed of {name}"),
         }
     }
 
@@ -834,6 +836,7 @@ mod tests {
             StepKind::ReorderTracks,
             StepKind::AddTrack,
             StepKind::Split,
+            StepKind::Speed,
         ] {
             assert!(
                 !step(kind, "a", &c0, &c1).merges_with(&step(kind, "a", &c1, &c0)),
@@ -1059,6 +1062,7 @@ mod tests {
         assert_eq!(d(StepKind::ReorderTracks), "reordering tracks");
         assert_eq!(d(StepKind::AddTrack), "adding a track");
         assert_eq!(d(StepKind::Split), "splitting intro.mp4");
+        assert_eq!(d(StepKind::Speed), "changing the speed of intro.mp4");
     }
 
     fn recorder(rows: Vec<TimelineClip>, tracks: usize) -> Recorder {
@@ -1180,7 +1184,7 @@ mod tests {
         let c1 = cap(&[("a", other)], 2);
         assert_eq!(diff(&c0, &c1).len(), 1);
         assert_eq!(
-            plan(&step(StepKind::Move, "a", &c0, &c1), Direction::Undo),
+            plan(&step(StepKind::Speed, "a", &c0, &c1), Direction::Undo),
             Plan {
                 removes: vec![],
                 writes: vec![("a".into(), normal)],

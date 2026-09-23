@@ -42,6 +42,11 @@ pub(super) fn has_unsaved_changes(slot: &ProjectSlot) -> bool {
 pub(super) const MIN_SCALE_PCT: f32 = 10.0;
 pub(super) const MAX_SCALE_PCT: f32 = 400.0;
 
+/// The speeds the inspector offers, slowest first. A fixed list, not a
+/// slider: every change re-times the clip and is one undo step. The labels
+/// the window shows are built from it, so the list lives only here.
+pub(super) const SPEEDS: [f64; 6] = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0];
+
 /// Everything the Videos mode owns that more than one handler touches.
 pub(super) struct VideoState {
     /// The GES project, created on demand by the first clip (or canvas change).
@@ -80,6 +85,8 @@ impl VideoState {
         ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
         ui.set_insp_scale_min(MIN_SCALE_PCT);
         ui.set_insp_scale_max(MAX_SCALE_PCT);
+        let labels: Vec<SharedString> = SPEEDS.iter().map(|r| format!("{r}×").into()).collect();
+        ui.set_insp_speed_labels(ModelRc::from(Rc::new(VecModel::from(labels))));
         Self {
             project: Rc::new(RefCell::new(None)),
             assets,
