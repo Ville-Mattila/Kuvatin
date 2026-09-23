@@ -36,6 +36,9 @@ something is fixed.
   clip. Saved with the project and undoable like any other edit. A project
   that uses it opens in 2.12 and earlier with the clip at its saved place and
   length, playing at normal speed.
+- **The sound is drawn on the clip.** A video's waveform runs along the
+  bottom of its block on the timeline and follows trims and speed changes, so
+  a cut can be placed by looking at the sound.
 
 ### Fixed
 - Moving or scaling a clip while it is still starting up, as when a

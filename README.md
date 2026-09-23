@@ -81,7 +81,8 @@ lane; a plain wheel scrolls it.
 
 - **Layered timeline editor** — drag files straight onto the timeline; slide,
   edge-trim, split at the playhead, and move clips across tracks with magnetic
-  snapping; reorder tracks; drop below the last track to create a new one
+  snapping; waveforms on video clips; reorder tracks; drop below the last
+  track to create a new one
 - **Overlays & transforms** — stack videos and still images; position, scale (up to 400 %),
   opacity and per-clip volume via the inspector or by dragging/resizing the clip
   right in the preview
