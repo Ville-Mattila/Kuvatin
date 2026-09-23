@@ -317,6 +317,59 @@ fn split_fits(start: i128, dur: i128, at: i128) -> bool {
     at >= start + MIN_TRIM_NS && at <= start + dur - MIN_TRIM_NS
 }
 
+/// The slowest and the fastest a clip plays (see [`Project::set_clip_rate`]).
+pub const RATE_MIN: f64 = 0.25;
+pub const RATE_MAX: f64 = 4.0;
+
+/// Which of `pitch`'s properties carries a clip's speed. `rate` changes speed
+/// and pitch together, as `videorate` does the picture; `tempo` would keep
+/// the pitch. GES knows both as time properties (M1, M11), so choosing the
+/// other is this one line.
+const PITCH_PROPERTY: &str = "rate";
+
+/// A rate as the engine keeps it: clamped to [`RATE_MIN`, `RATE_MAX`] and
+/// rounded to the nearest `f32`. `pitch` stores its rate as a float (M3), and
+/// undo compares records exactly, so a rate that did not survive that trip
+/// would never read back as the record it came from.
+fn snap_rate(rate: f64) -> f64 {
+    f64::from(rate.clamp(RATE_MIN, RATE_MAX) as f32)
+}
+
+/// How long a clip lasts at `new_rate`, from `dur` at `old_rate`: the same
+/// span of source, played at the new rate. Then, as a right-edge trim would
+/// be: at least the trim minimum, never more than the source can still supply
+/// from `inpoint` at the new rate (which wins over the minimum where they
+/// conflict), and never more than `room`, the space before the next clip.
+fn rate_change_math(
+    inpoint: i128,
+    dur: i128,
+    old_rate: f64,
+    new_rate: f64,
+    max_ns: Option<i128>,
+    room: Option<i128>,
+) -> i128 {
+    let mut nd = ((dur as f64 * old_rate / new_rate).round() as i128).max(MIN_TRIM_NS);
+    if let Some(m) = max_ns {
+        nd = nd.min(((m - inpoint) as f64 / new_rate) as i128);
+    }
+    if let Some(r) = room {
+        nd = nd.min(r);
+    }
+    nd.max(0)
+}
+
+/// The room a clip at `start` lasting `dur` has to grow into: from its start
+/// to the nearest neighbour that begins at or after its end. `neighbours` are
+/// the other clips on its layer as `(start, end)`. None when nothing follows.
+fn room_after(start: i128, dur: i128, neighbours: &[(i128, i128)]) -> Option<i128> {
+    let end = start + dur;
+    neighbours
+        .iter()
+        .filter(|&&(n_start, _)| n_start >= end)
+        .map(|&(n_start, _)| n_start - start)
+        .min()
+}
+
 /// Read a GES clip's current timeline geometry.
 /// Where a slid clip may actually land on its layer.
 ///
@@ -372,6 +425,76 @@ fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> boo
         && clip.inpoint() == clock_time(record.inpoint)
         && clip.duration() == clock_time(record.duration)
         && clip.layer().map(|l| l.priority() as usize) == Some(record.track)
+}
+
+/// A clip's time effects: its speed change, when it has one.
+fn time_effects(clip: &ges::Clip) -> Vec<ges::BaseEffect> {
+    clip.top_effects()
+        .into_iter()
+        .filter_map(|e| e.downcast::<ges::BaseEffect>().ok())
+        .filter(|e| e.is_time_effect())
+        .collect()
+}
+
+/// A clip's playback rate: what its time effects play at, or 1.0 when it has
+/// none. `videorate` keeps its rate as a double and `pitch` as a float (M3),
+/// so either is read.
+fn clip_rate_of(clip: &ges::Clip) -> f64 {
+    time_effects(clip)
+        .iter()
+        .find_map(|e| {
+            let name = if e.track_type() == ges::TrackType::AUDIO {
+                PITCH_PROPERTY
+            } else {
+                "rate"
+            };
+            let value = TimelineElementExt::child_property(e, name)?;
+            value
+                .get::<f64>()
+                .ok()
+                .or_else(|| value.get::<f32>().ok().map(f64::from))
+        })
+        .unwrap_or(1.0)
+}
+
+/// Replace a clip's time effects with ones playing at `rate`, or with none at
+/// 1.0, so a clip at normal speed carries no effects at all. The picture and
+/// the sound get one each, but only a stream the clip has: an audio effect on
+/// a clip with no sound fails inside GES without an error, which the bindings
+/// turn into a panic in a debug build (M5). Refused for a still, which has no
+/// source time to stretch.
+fn apply_rate(clip: &ges::Clip, rate: f64) -> Result<()> {
+    if rate != 1.0
+        && clip
+            .property::<Option<gst::ClockTime>>("max-duration")
+            .is_none()
+    {
+        anyhow::bail!("a still has no source time to play faster or slower");
+    }
+    for effect in time_effects(clip) {
+        clip.remove_top_effect(&effect)?;
+    }
+    if rate == 1.0 {
+        return Ok(());
+    }
+    let has = |kind: gst::glib::Type| clip.find_track_element(None::<&ges::Track>, kind).is_some();
+    let mut wanted = Vec::new();
+    if has(ges::VideoSource::static_type()) {
+        wanted.push(format!("videorate rate={rate}"));
+    }
+    if has(ges::AudioSource::static_type()) {
+        wanted.push(format!("pitch {PITCH_PROPERTY}={rate}"));
+    }
+    for description in wanted {
+        let effect = ges::Effect::new(&description)?;
+        // A runtime that does not re-time the clip for this effect would give
+        // a clip whose length no longer matches its sound: stop here instead.
+        if !effect.is_time_effect() {
+            anyhow::bail!("this GStreamer does not treat {description:?} as a speed change");
+        }
+        clip.add_top_effect(&effect, -1)?;
+    }
+    Ok(())
 }
 
 /// Set a clip's times, the shrinking one of in-point and duration first (the
@@ -1233,6 +1356,72 @@ impl Project {
         }
         self.touched();
         Ok((right_id, clip_geom(&clip), clip_geom(&right)))
+    }
+
+    /// The clip's playback rate: what its time effects play at, or 1.0 when
+    /// it has none or is not on the timeline.
+    pub fn clip_rate(&self, id: &ClipId) -> f64 {
+        self.clips.get(&id.0).map(clip_rate_of).unwrap_or(1.0)
+    }
+
+    /// Set the clip's playback rate, clamped to [`RATE_MIN`, `RATE_MAX`]. The
+    /// clip keeps its start and in-point; its duration becomes the same span
+    /// of source at the new rate, clamped to the trim minimum, to what the
+    /// source can still supply, and to the gap before the next clip on its
+    /// track (see [`rate_change_math`]). Returns the resulting geometry;
+    /// None for an unknown clip, a still, a rate that is not a number, or a
+    /// change GES refused, which leaves the clip as it was.
+    pub fn set_clip_rate(&mut self, id: &ClipId, rate: f64) -> Option<ClipGeom> {
+        if self.rendering.get() || !rate.is_finite() {
+            return None;
+        }
+        let clip = self.clips.get(&id.0)?.clone();
+        // A still has no source length and no source time to stretch.
+        let max_ns = clip
+            .property::<Option<gst::ClockTime>>("max-duration")?
+            .nseconds() as i128;
+        let rate = snap_rate(rate);
+        let old_rate = clip_rate_of(&clip);
+        if rate == old_rate {
+            return Some(clip_geom(&clip));
+        }
+        let start = clip.start().nseconds() as i128;
+        let dur = clip.duration().nseconds() as i128;
+        let room = room_after(start, dur, &self.layer_neighbours(id));
+        let nd = rate_change_math(
+            clip.inpoint().nseconds() as i128,
+            dur,
+            old_rate,
+            rate,
+            Some(max_ns),
+            room,
+        );
+        let new_dur = gst::ClockTime::from_nseconds(nd as u64);
+        let old_dur = clip.duration();
+        let set_len = |d: gst::ClockTime| clip.duration() == d || clip.set_duration(d);
+        // Whichever change lowers the clip's duration-limit goes first, the
+        // way `trim_clip` orders in-point and duration. Faster: the
+        // shorter duration, then the effects. Slower: the effects, then the
+        // longer duration, capped at the limit GES now reports, so a
+        // nanosecond of rounding cannot get it refused.
+        let applied = if rate > old_rate {
+            set_len(new_dur) && apply_rate(&clip, rate).is_ok()
+        } else {
+            apply_rate(&clip, rate).is_ok() && {
+                let limit = clip.property::<Option<gst::ClockTime>>("duration-limit");
+                set_len(limit.map_or(new_dur, |l| new_dur.min(l)))
+            }
+        };
+        if !applied || clip_rate_of(&clip) != rate {
+            // Back as it was: the old effects, then the old length.
+            let _ = apply_rate(&clip, old_rate);
+            set_len(old_dur);
+            self.commit();
+            return None;
+        }
+        self.commit();
+        self.touched();
+        Some(clip_geom(&clip))
     }
 
     /// Write clips' start, in-point, duration, track and transform exactly as
@@ -4295,6 +4484,140 @@ mod tests {
             bc.add_top_effect(&t, -1),
             limit(&bc)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speed_rates_snap_to_what_the_engine_can_hold() {
+        for r in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] {
+            assert_eq!(
+                snap_rate(r),
+                r,
+                "every rate the inspector offers is kept exactly"
+            );
+        }
+        assert_eq!(snap_rate(0.1), RATE_MIN);
+        assert_eq!(snap_rate(9.0), RATE_MAX);
+        assert_eq!(
+            snap_rate(1.1),
+            f64::from(1.1f32),
+            "rounded to what pitch can store"
+        );
+    }
+
+    #[test]
+    fn speed_change_keeps_the_span_of_source() {
+        // Four seconds at 1x are two at 2x, and back.
+        assert_eq!(
+            rate_change_math(0, 4 * S, 1.0, 2.0, Some(10 * S), None),
+            2 * S
+        );
+        assert_eq!(
+            rate_change_math(0, 2 * S, 2.0, 1.0, Some(10 * S), None),
+            4 * S
+        );
+        // A source with no length has nothing to run out of.
+        assert_eq!(rate_change_math(0, 4 * S, 1.0, 0.5, None, None), 8 * S);
+        // Slowing down stops at the next clip.
+        assert_eq!(
+            rate_change_math(0, 2 * S, 1.0, 0.5, Some(10 * S), Some(3 * S)),
+            3 * S
+        );
+        // The minimum holds a very fast clip up...
+        assert_eq!(
+            rate_change_math(0, 400_000_000, 1.0, 4.0, Some(10 * S), None),
+            MIN_TRIM_NS
+        );
+        // ...but the source wins where they conflict: 0.5 s of source left
+        // is 0.125 s at 4x.
+        assert_eq!(
+            rate_change_math(9_500_000_000, 400_000_000, 1.0, 4.0, Some(10 * S), None),
+            125_000_000
+        );
+    }
+
+    #[test]
+    fn speed_room_is_the_gap_before_the_next_clip() {
+        // A clip at [2 s, 3 s).
+        assert_eq!(room_after(2 * S, S, &[]), None, "nothing after it");
+        assert_eq!(room_after(2 * S, S, &[(5 * S, 8 * S)]), Some(3 * S));
+        assert_eq!(
+            room_after(2 * S, S, &[(0, S), (9 * S, 10 * S), (5 * S, 8 * S)]),
+            Some(3 * S),
+            "the nearest, in any order; a clip before it does not count"
+        );
+        assert_eq!(
+            room_after(2 * S, S, &[(3 * S, 4 * S)]),
+            Some(S),
+            "a clip butting up against it leaves no room to grow"
+        );
+    }
+
+    #[test]
+    fn speed_halves_a_sequence_and_brings_it_back() {
+        // Forty frames at 10 fps: four seconds of source.
+        let (dir, uri) = sequence_fixture("speed-seq", 40, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let id = project.append_clip_uri(&uri, 0, None).expect("append").id;
+        assert_eq!(project.clip_rate(&id), 1.0);
+        let geom = project.set_clip_rate(&id, 2.0).expect("2x");
+        assert_eq!(
+            geom.duration,
+            secs(2.0),
+            "the same four seconds, twice as fast"
+        );
+        assert_eq!(project.clip_rate(&id), 2.0);
+        let clip = project.clips[&id.0].clone();
+        let effects = time_effects(&clip);
+        assert_eq!(
+            effects.len(),
+            1,
+            "the picture only: a sequence has no sound"
+        );
+        assert!(effects.iter().all(|e| e.is_time_effect()));
+        let back = project.set_clip_rate(&id, 1.0).expect("1x");
+        assert_eq!(back.duration, secs(4.0));
+        assert!(
+            clip.top_effects().is_empty(),
+            "normal speed carries no effects at all"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The spec puts this test on a clip sped up; speeding up shortens a
+    /// clip, so it is slowing down that runs into a neighbour.
+    #[test]
+    fn speed_stops_at_the_next_clip() {
+        // Twenty frames at 10 fps: two seconds, with a neighbour 1 s after it.
+        let (dir, uri) = sequence_fixture("speed-gap", 20, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .add_clip_uri(&uri, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project
+            .add_clip_uri(&uri, 0, secs(3.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let geom = project.set_clip_rate(&a, 0.5).expect("0.5x");
+        assert_eq!(
+            geom.duration,
+            secs(3.0),
+            "four seconds wanted, three of room"
+        );
+        assert_eq!(project.clip_rate(&a), 0.5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speed_is_refused_for_a_still() {
+        let (dir, png, mut project) = undo_fixture("speed-still");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        assert!(project.set_clip_rate(&a, 2.0).is_none());
+        assert_eq!(project.clip_rate(&a), 1.0);
+        assert!(project.clips[&a.0].top_effects().is_empty());
+        assert!(project.set_clip_rate(&a, f64::NAN).is_none());
+        assert!(project.set_clip_rate(&ClipId("nope".into()), 2.0).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
