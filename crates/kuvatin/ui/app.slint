@@ -98,6 +98,11 @@ export component AppWindow inherits Window {
     callback video-seek(float);            // fraction 0..1
     callback seek-done();                  // scrub released → land frame-accurately
     callback video-volume-changed(float);  // 0..1
+    // Frame stepping and the shuttle (gui/video/transport.rs).
+    callback video-step(int);              // , and .: one frame back (-1) or on (+1)
+    callback video-shuttle(int);           // J, K, L as -1, 0, +1
+    // The rate the preview plays at, shown beside Play when it is not 1.
+    in property <float> shuttle-rate: 1;
     in-out property <bool> video-repeat: false;  // loop playback at the end
     // The GStreamer engine failed to initialise (set from Rust): the media
     // actions are disabled rather than silently doing nothing.
@@ -433,15 +438,31 @@ export component AppWindow inherits Window {
         }
         return EventResult.reject;
     }
+    // , and . step one frame; J, K and L shuttle. J is not reverse play: the
+    // engine has none, so it slows down and then pauses. Its own function for
+    // the reason clip-keys is.
+    function transport-keys(event: KeyEvent) -> EventResult {
+        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta || root.exporting) { return EventResult.reject; }
+        if (event.text == ",") { root.video-step(-1); return EventResult.accept; }
+        if (event.text == ".") { root.video-step(1); return EventResult.accept; }
+        if (event.text == "j" || event.text == "J") { root.video-shuttle(-1); return EventResult.accept; }
+        if (event.text == "k" || event.text == "K") { root.video-shuttle(0); return EventResult.accept; }
+        if (event.text == "l" || event.text == "L") { root.video-shuttle(1); return EventResult.accept; }
+        return EventResult.reject;
+    }
     function video-keys(event: KeyEvent) -> EventResult {
         // A drag in progress holds the rows and the selection: only play/pause
         // gets through. This also keeps an arrow key from destroying a dragged
         // slider, which would end the drag without the release that clears
         // Gesture.held.
         if (Gesture.held && event.text != " ") { return EventResult.reject; }
-        // Transport/edit keys are dead during an export (the engine ignores
-        // them too — this just keeps the play icon from flipping).
-        if (root.exporting) { return EventResult.reject; }
+        // Transport and edit keys are dead behind any dialog, as undo already
+        // is: a key pressed behind a dialog must never change the edit
+        // underneath it. This used to cover only the export, so Delete behind
+        // a confirmation deleted the selected clip, and Space played. Esc and
+        // Return still reach the dialog: modal-keys and the Modal take them
+        // first.
+        if (root.modal-open()) { return EventResult.reject; }
         // Zoom, on the keys every editor uses for it.
         if (event.modifiers.control && (event.text == "+" || event.text == "=")) {
             root.zoom-at(1.4, root.tl-view-w / 2);
@@ -472,6 +493,7 @@ export component AppWindow inherits Window {
             root.timeline-split();
             return EventResult.accept;
         }
+        if (root.transport-keys(event) == EventResult.accept) { return EventResult.accept; }
         return root.clip-keys(event);
     }
     function image-keys(event: KeyEvent) -> EventResult {
@@ -1598,6 +1620,12 @@ export component AppWindow inherits Window {
                                     animate opacity { duration: 120ms; }
                                 }
                                 pp-ta := TouchArea { clicked => { root.video-playpause(); } }
+                            }
+                            // The shuttle's speed (J / K / L), when it is not normal.
+                            if root.shuttle-rate != 1 : Text {
+                                text: root.shuttle-rate + "×";
+                                color: Theme.accent; font-size: 11px; font-weight: 700;
+                                vertical-alignment: center;
                             }
                             // Repeat / loop toggle.
                             Rectangle {

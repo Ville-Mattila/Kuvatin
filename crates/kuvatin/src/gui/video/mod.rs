@@ -6,6 +6,7 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod transport;
 mod undo;
 
 use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
@@ -119,6 +120,7 @@ pub(super) fn wire(
 ) {
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
+    transport::wire(ui, st);
     export::wire(ui, st, ex, timers);
     project_file::wire(ui, st, im);
     undo::wire(ui, st, ex);
@@ -233,7 +235,11 @@ pub(super) fn wire(
                 ui.set_video_volume(v);
             }
             if let Some(p) = project_slot.borrow().as_ref() {
-                p.set_master_volume(v as f64);
+                // While the shuttle runs faster the sound stays muted; the new
+                // level applies when it is back at normal speed.
+                if p.rate() == 1.0 {
+                    p.set_master_volume(v as f64);
+                }
             }
         });
     }
@@ -375,6 +381,10 @@ pub(super) fn wire(
                         ui.set_video_playing(false);
                     }
                 }
+                // Any ordinary seek plays at normal speed again (a scrub, a
+                // frame step, the loop back to the start): keep the shuttle
+                // readout, and the sound it mutes, in step with the engine.
+                transport::sync_shuttle(&ui, project);
                 ui.set_playhead(pos.as_secs_f32());
                 let frac = if dur.as_secs_f32() > 0.0 {
                     (pos.as_secs_f32() / dur.as_secs_f32()).clamp(0.0, 1.0)
