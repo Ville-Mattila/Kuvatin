@@ -57,7 +57,9 @@ the arrows, **Home** and **End**.
 In Videos mode: **Space** plays and pauses, **,** and **.** step one frame
 back and on, and **J / K / L** shuttle: **L** plays and then speeds up to 2×,
 4× and 8×, **J** slows back down and then pauses (Kuvatin does not play
-backwards), and **K** pauses. **Left/Right** walk the clips on the timeline,
+backwards), and **K** pauses. While any clip has a speed of its own, **L**
+goes no faster than normal: GStreamer cannot play faster through a speed
+change. **Left/Right** walk the clips on the timeline,
 **Ctrl+Left/Right** slide the selected clip by a tenth of a second,
 **Ctrl+Up/Down** move it to another track, **Shift+Left/Right** trim its right
 edge, **S** splits it at the playhead, and **Delete** removes it. **Ctrl+S**

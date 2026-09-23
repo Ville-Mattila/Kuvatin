@@ -28,7 +28,10 @@ something is fixed.
   and on. **L** plays and then speeds up to 2×, 4× and 8×, **J** slows back
   down and then pauses, and **K** pauses. Kuvatin has no reverse play, so
   **J** never plays backwards as it does in some editors. The sound is muted
-  while the shuttle runs faster than normal.
+  while the shuttle runs faster than normal. While any clip on the timeline
+  has a speed of its own, **L** plays at normal speed and goes no faster:
+  GStreamer cannot play faster through a speed change, and tried, the preview
+  froze.
 - **Zoom a clip past the canvas.** Scale now reaches 400 %, from the
   inspector or by dragging the corner of the box in the preview.
 - **Clip speed.** The inspector's Speed list plays a video or an image
