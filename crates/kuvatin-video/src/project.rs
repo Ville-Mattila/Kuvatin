@@ -4881,4 +4881,36 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Real media has picture and sound, so a speed change is two time
+    /// effects, and both must be ones GES re-times the clip for. Self-skips
+    /// without `GST_TEST_FILE`.
+    #[test]
+    fn a_sped_up_video_changes_picture_and_sound() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping a_sped_up_video_changes_picture_and_sound: set GST_TEST_FILE");
+            return;
+        };
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .append_clip(Path::new(&path), 0, None)
+            .expect("clip")
+            .id;
+        let full = record_of(&project, &a);
+        let geom = project.set_clip_rate(&a, 2.0).expect("2x");
+        let effects = time_effects(&project.clips[&a.0]);
+        let kinds: Vec<ges::TrackType> = effects.iter().map(|e| e.track_type()).collect();
+        assert_eq!(effects.len(), 2, "{kinds:?}");
+        assert!(
+            kinds.contains(&ges::TrackType::VIDEO) && kinds.contains(&ges::TrackType::AUDIO),
+            "{kinds:?}"
+        );
+        assert!((geom.duration.as_secs_f64() - full.duration / 2.0).abs() < 1e-6);
+        // Pulled right as far as it goes: the source runs out twice as fast.
+        let long = project.trim_clip(&a, 1, 60.0).expect("trim");
+        assert!((long.duration.as_secs_f64() - full.duration / 2.0).abs() < 1e-6);
+        assert!(write_back(&mut project, &[(&a, &full)]), "undo the speed");
+        assert_same_record(&record_of(&project, &a), &full);
+        assert!(project.clips[&a.0].top_effects().is_empty());
+    }
 }

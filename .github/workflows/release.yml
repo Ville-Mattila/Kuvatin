@@ -284,21 +284,24 @@ jobs:
       # inside the advisory step, where a failure was a line in a log nobody
       # reads. The other two guard undo: a left trim of real media written back,
       # which pins the order of in-point and duration writes, and a trimmed clip
-      # restored with its in-point. One retry before it counts, because
-      # asset-URI resolution on the hosted runner is occasionally flaky — a
-      # second failure in a row is the code, not the runner.
+      # restored with its in-point. One more proves a speed change on real media
+      # is two time effects, picture and sound. One retry before it counts,
+      # because asset-URI resolution on the hosted runner is occasionally flaky
+      # — a second failure in a row is the code, not the runner.
       - name: Test (live-media regressions — gates the release)
         shell: pwsh
         run: |
           $env:RUST_BACKTRACE = "1"
           $names = @("renders_after_preview_eos", "renders_gapped_overlay_timeline",
-            "undo_writes_a_left_trim_of_real_media_back", "undo_restores_a_trimmed_clip_of_real_media")
+            "undo_writes_a_left_trim_of_real_media_back", "undo_restores_a_trimmed_clip_of_real_media",
+            "a_sped_up_video_changes_picture_and_sound")
           foreach ($attempt in 1..2) {
             cargo test -p kuvatin-video --release -- --test-threads=1 --exact `
               project::tests::renders_after_preview_eos `
               project::tests::renders_gapped_overlay_timeline `
               project::tests::undo_writes_a_left_trim_of_real_media_back `
-              project::tests::undo_restores_a_trimmed_clip_of_real_media
+              project::tests::undo_restores_a_trimmed_clip_of_real_media `
+              project::tests::a_sped_up_video_changes_picture_and_sound
             if ($LASTEXITCODE -eq 0) { break }
             if ($attempt -eq 2) { throw "the live-media regressions failed twice: $($names -join ', ')" }
             Write-Host "::warning::live-media regressions failed once; retrying"
