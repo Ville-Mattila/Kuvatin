@@ -4134,4 +4134,167 @@ mod tests {
         let _ = project.pause();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Not a gate: a measurement of what this GStreamer does with a speed
+    /// change, which the speed work was built on (see the Amendments of
+    /// `docs/superpowers/plans/2026-09-23-editor-clip-edits.md`). Run it by
+    /// hand after a GStreamer upgrade, with `GST_TEST_FILE` naming a video
+    /// with sound:
+    /// `cargo test -p kuvatin-video -- --ignored --nocapture --test-threads=1 speed_measure_the_runtime`
+    #[test]
+    #[ignore]
+    fn speed_measure_the_runtime() {
+        gst::init().expect("gst");
+        ges::init().expect("ges");
+        println!("M0 {}", gst::version_string());
+
+        for desc in [
+            "videorate",
+            "pitch",
+            "videorate rate=2",
+            "pitch rate=2",
+            "pitch tempo=2",
+        ] {
+            let e = ges::Effect::new(desc).expect("effect");
+            println!("M1 {desc:?}: is_time_effect = {}", e.is_time_effect());
+        }
+        for (desc, name) in [
+            ("videorate", "rate"),
+            ("videorate", "GstVideoRate::rate"),
+            ("pitch", "rate"),
+            ("pitch", "GstPitch::rate"),
+            ("pitch", "tempo"),
+        ] {
+            let e = ges::Effect::new(desc).expect("effect");
+            let took = e.register_time_property(name);
+            println!(
+                "M2 {desc} register_time_property({name:?}) = {took}, is_time_effect = {}",
+                e.is_time_effect()
+            );
+        }
+
+        let (dir, seq_uri) = sequence_fixture("speed-measure", 20, 10);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let seq = project
+            .append_clip_uri(&seq_uri, 0, None)
+            .expect("sequence")
+            .id;
+        let still = project
+            .append_clip(&png, 1, Some(Duration::from_secs(4)))
+            .expect("still")
+            .id;
+        let seq_clip = project.clips[&seq.0].clone();
+        let still_clip = project.clips[&still.0].clone();
+        let limit = |c: &ges::Clip| c.property::<Option<gst::ClockTime>>("duration-limit");
+
+        let caught =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| still_clip.duration_limit()));
+        println!(
+            "M7 still: duration_limit() panics = {}; the property reads {:?}",
+            caught.is_err(),
+            limit(&still_clip)
+        );
+
+        let pitch = ges::Effect::new("pitch rate=2").expect("pitch");
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            seq_clip.add_top_effect(&pitch, -1)
+        }));
+        let said = match &caught {
+            Ok(Ok(())) => "Ok(())".to_string(),
+            Ok(Err(e)) => format!("Err({e})"),
+            Err(_) => "panicked: GES returned FALSE without a GError".to_string(),
+        };
+        println!("M5 pitch on a sequence, which has no sound: {said}");
+
+        let video = ges::Effect::new("videorate rate=2").expect("videorate");
+        println!(
+            "M8 videorate on a still: {:?}",
+            still_clip.add_top_effect(&video, -1)
+        );
+
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            println!("M3, M4, M6 and M11 need GST_TEST_FILE: a video with sound");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let a = project
+            .append_clip(Path::new(&path), 2, None)
+            .expect("media")
+            .id;
+        let clip = project.clips[&a.0].clone();
+        println!(
+            "M4 full length {} limit {:?}",
+            clip.duration(),
+            limit(&clip)
+        );
+        let v = ges::Effect::new("videorate rate=2").expect("videorate");
+        let added = clip.add_top_effect(&v, -1);
+        println!(
+            "M4 videorate=2 on the full-length clip: {added:?}; duration now {} limit {:?}",
+            clip.duration(),
+            limit(&clip)
+        );
+        let grew = clip.set_duration(clip.duration() + gst::ClockTime::from_seconds(1));
+        println!("M4 growing past the limit: set_duration = {grew}");
+        let p = ges::Effect::new("pitch rate=2").expect("pitch");
+        println!("M4 pitch=2: {:?}", clip.add_top_effect(&p, -1));
+        for e in clip.top_effects() {
+            println!(
+                "M3 {:?} {:?}: rate = {:?}, tempo = {:?}",
+                e.track_type(),
+                TimelineElementExt::name(&e),
+                TimelineElementExt::child_property(&e, "rate"),
+                TimelineElementExt::child_property(&e, "tempo")
+            );
+        }
+
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 40,
+                posy: 0,
+                scale: 0.5,
+                alpha: 0.5,
+                volume: 0.25,
+            },
+        );
+        let right = clip
+            .split_full(clip.start().nseconds() + 1_000_000_000)
+            .expect("split")
+            .expect("a new clip");
+        println!(
+            "M6 right half: start {} inpoint {} duration {} effects {} posx {:?} width {:?} alpha {:?} volume {:?}",
+            right.start(),
+            right.inpoint(),
+            right.duration(),
+            right.top_effects().len(),
+            right.child_property("posx"),
+            right.child_property("width"),
+            right.child_property("alpha"),
+            right.child_property("volume")
+        );
+        println!(
+            "M6 split at the clip's own start: {:?}",
+            clip.split_full(clip.start().nseconds())
+                .map(|c| c.is_some())
+        );
+
+        let b = project
+            .append_clip(Path::new(&path), 3, None)
+            .expect("media")
+            .id;
+        let bc = project.clips[&b.0].clone();
+        bc.set_duration(gst::ClockTime::from_nseconds(bc.duration().nseconds() / 2));
+        let t = ges::Effect::new("pitch tempo=2").expect("tempo");
+        println!(
+            "M11 pitch tempo=2 on a half-length clip: {:?}, limit {:?}",
+            bc.add_top_effect(&t, -1),
+            limit(&bc)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -4135,4 +4135,58 @@ Each of these was found by reading the current code or by running GES, and each 
 
 ### Task 9 measurement
 
-(Paste the output of `speed_measure_the_runtime` here, with the date and the `M0` line, and note every difference from the table "What running GES showed" and the contingency taken.)
+Run 2026-09-23 on the development machine (Windows 11, GStreamer 1.26.11 MSVC x86_64, `gstreamer-editing-services` 0.23.5, debug build), against the fixture from "Before you start" (`gst-discoverer-1.0` gives it 0:00:06.965986394, VP8 and Vorbis):
+`cargo test -p kuvatin-video -- --ignored --nocapture --test-threads=1 speed_measure_the_runtime` gave `1 passed` and printed:
+
+```text
+M0 GStreamer 1.26.11
+M1 "videorate": is_time_effect = true
+M1 "pitch": is_time_effect = true
+M1 "videorate rate=2": is_time_effect = true
+M1 "pitch rate=2": is_time_effect = true
+M1 "pitch tempo=2": is_time_effect = true
+M2 videorate register_time_property("rate") = false, is_time_effect = true
+M2 videorate register_time_property("GstVideoRate::rate") = false, is_time_effect = true
+M2 pitch register_time_property("rate") = false, is_time_effect = true
+M2 pitch register_time_property("GstPitch::rate") = false, is_time_effect = true
+M2 pitch register_time_property("tempo") = false, is_time_effect = true
+thread '…' panicked at …\gstreamer-editing-services-0.23.5\src\auto\clip.rs:137:14:
+mandatory glib value is None: GlibNoneError
+M7 still: duration_limit() panics = true; the property reads None
+thread '…' panicked at …\gstreamer-editing-services-0.23.5\src\auto\clip.rs:86:13:
+assertion `left == right` failed
+  left: true
+ right: false
+M5 pitch on a sequence, which has no sound: panicked: GES returned FALSE without a GError
+M8 videorate on a still: Ok(())
+M4 full length 0:00:06.965986394 limit Some(0:00:06.965986394)
+M4 videorate=2 on the full-length clip: Ok(()); duration now 0:00:03.482993197 limit Some(0:00:03.482993197)
+M4 growing past the limit: set_duration = false
+M4 pitch=2: Ok(())
+M3 TrackType(VIDEO) Some("effect12"): rate = Some((gdouble) 2.000000), tempo = None
+M3 TrackType(AUDIO) Some("effect13"): rate = Some((gfloat) 2.000000), tempo = Some((gfloat) 1.000000)
+M6 right half: start 0:00:01.000000000 inpoint 0:00:02.000000000 duration 0:00:02.482993197 effects 2 posx Some((gint) 40) width Some((gint) 640) alpha Some((gdouble) 0.500000) volume Some((gdouble) 0.250000)
+M6 split at the clip's own start: Ok(false)
+M11 pitch tempo=2 on a half-length clip: Ok(()), limit Some(0:00:03.482993197)
+```
+
+The two `panicked at` blocks are the panic hook's output for the panics the test catches on purpose: the binding's `expect` in `duration_limit()` (M7) and its `debug_assert` on a FALSE return with no GError (M5).
+
+**Against the table, fact by fact:**
+
+| # | Measured here | Same as the table? |
+| --- | --- | --- |
+| M1 | All five descriptions are time effects as created | Yes |
+| M2 | All five `register_time_property` calls return `false` | Yes |
+| M3 | Unqualified `"rate"` answers on both; `videorate` a `gdouble`, `pitch` a `gfloat` | Yes |
+| M4 | Accepted, and the clip shortened from 6.965986394 s to 3.482993197 s; growing past the limit refused (`false`) | Yes. The sub-fact "raising the rate on a live effect does the same" is not in the measurement; Task 10 removes and re-adds effects and never raises a live one |
+| M5 | Panics in this debug build: FALSE without a GError | Yes |
+| M6 | In-point 2 s after 1 s of timeline at 2×, both effects and the transform copied; `Ok(None)` at the clip's own start | Yes. "Outside the clip" is not in the measurement |
+| M7 | `duration_limit()` panics on a still; the property reads `None` | Yes |
+| M8 | `videorate` on a still: `Ok(())` | Yes |
+| M9 | Not in this measurement. Held on this machine by Phase 1's gate `shuttle_plays_faster_and_refuses_reverse` | Not re-measured |
+| M10 | Not in this measurement. Held on this machine by Phase 1's gates `frame_length_follows_the_preview` and `frame_length_ignores_buffers_too_short_to_be_frames` | Not re-measured |
+| M11 | `pitch tempo=2` accepted on a half-length clip, limit 3.482993197 s, the same as `rate=2` gives | Yes |
+| M12 | Not in this measurement: the waveform decoder is Phase 3 (Task 18) | Not re-measured |
+
+No measured fact differs, so no contingency is taken: Task 10 goes ahead as written, with no `register_time_property` call, the name `"rate"` in `clip_rate_of`, and the `AudioSource` guard in `apply_rate`.
