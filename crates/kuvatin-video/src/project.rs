@@ -1887,6 +1887,17 @@ impl Project {
             .map(|l| l.priority() as usize)
     }
 
+    /// The source a clip plays, as its record would name it.
+    pub fn clip_uri(&self, id: &ClipId) -> Option<String> {
+        Some(
+            self.clips
+                .get(&id.0)?
+                .downcast_ref::<ges::UriClip>()?
+                .uri()
+                .to_string(),
+        )
+    }
+
     /// Remove a clip from the timeline entirely. Returns whether it existed.
     /// Empty TRAILING layers are pruned (never populated or middle ones, so
     /// remaining track indices stay stable); at least one layer always remains.
@@ -5200,6 +5211,18 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn waveform_source_of_a_clip_is_its_uri() {
+        let (dir, png, mut project) = undo_fixture("waveform-uri");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(1.0))
+            .expect("a");
+        let uri = gst::glib::filename_to_uri(&png, None).expect("uri");
+        assert_eq!(project.clip_uri(&a).as_deref(), Some(uri.as_str()));
+        assert_eq!(project.clip_uri(&ClipId("nope".into())), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

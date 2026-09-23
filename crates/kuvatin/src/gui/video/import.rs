@@ -364,6 +364,7 @@ pub(super) fn wire(
         let bin_paths = bin_paths.clone();
         let tl_clips = tl_clips.clone();
         let rec = rec.clone();
+        let waves = st.waves.clone();
         let ready = import_ready.clone();
         let import_q = import_q.clone();
         let seq_ready = seq_ready.clone();
@@ -412,7 +413,15 @@ pub(super) fn wire(
                     // Only the first file (when the timeline is empty) goes on
                     // the timeline; the rest wait in the bin for the user.
                     if tl_clips.row_count() == 0 {
-                        add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb, &rec);
+                        add_to_timeline(
+                            &path,
+                            &ui_weak,
+                            &project_slot,
+                            &tl_clips,
+                            thumb,
+                            &rec,
+                            &waves,
+                        );
                     }
                 }
                 // Finished sequence imports (at most one in flight): land the
@@ -511,6 +520,7 @@ pub(super) fn wire(
         let bin_paths = bin_paths.clone();
         let seq_by_path = seq_by_path.clone();
         let rec = rec.clone();
+        let waves = st.waves.clone();
         ui.on_video_add(move |i| {
             let Some(path) = bin_paths.borrow().get(i as usize).cloned() else {
                 return;
@@ -534,7 +544,15 @@ pub(super) fn wire(
                 );
                 return;
             }
-            add_to_timeline(&path, &ui_weak, &project_slot, &tl_clips, thumb, &rec);
+            add_to_timeline(
+                &path,
+                &ui_weak,
+                &project_slot,
+                &tl_clips,
+                thumb,
+                &rec,
+                &waves,
+            );
         });
     }
     // Remove a media-bin entry (× on hover). Keeps bin_paths in lockstep and

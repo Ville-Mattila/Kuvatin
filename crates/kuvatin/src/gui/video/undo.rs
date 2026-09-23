@@ -425,6 +425,7 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
         let active = ex.active.clone();
         let pending = ex.pending.clone();
         let rec = st.recorder(ui);
+        let waves = st.waves.clone();
         let run = move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -437,7 +438,7 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
             // A transform still waiting for the preview tick would be applied,
             // and recorded, after the undo.
             pending_xform.borrow_mut().take();
-            apply_step(&ui, &project, &rec, &sel_idx, dir);
+            apply_step(&ui, &project, &rec, &sel_idx, dir, &waves);
         };
         match dir {
             Direction::Undo => ui.on_video_undo(run),
@@ -453,6 +454,7 @@ fn apply_step(
     rec: &Recorder,
     sel_idx: &Rc<Cell<i32>>,
     dir: Direction,
+    waves: &super::waves::Waves,
 ) {
     let verb = match dir {
         Direction::Undo => "undo",
@@ -636,8 +638,20 @@ fn apply_step(
         })
         .map(|(id, record)| (kuvatin_video::ClipId(id.clone()), record.clone()))
         .collect();
+    // The same for the waveform: from the cache, or decoded again.
+    let without_wave: Vec<(SharedString, String)> = ops
+        .restores
+        .iter()
+        .filter(|(id, _)| {
+            new_rows
+                .iter()
+                .any(|r| r.id.as_str() == id.as_str() && r.wave.size().width == 0)
+        })
+        .map(|(id, record)| (id.as_str().into(), record.uri.clone()))
+        .collect();
     rec.tl_clips.set_vec(new_rows);
     super::project_file::spawn_thumbnails(ui.as_weak(), without_thumb);
+    waves.fill(ui.as_weak(), without_wave);
 
     {
         let mut history = rec.history.borrow_mut();

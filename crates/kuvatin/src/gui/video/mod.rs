@@ -8,6 +8,7 @@ mod project_file;
 mod timeline;
 mod transport;
 mod undo;
+mod waves;
 
 use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
 use export::ExportState;
@@ -70,6 +71,9 @@ pub(super) struct VideoState {
     /// Undo and redo for the timeline. Private to the Videos modules: its step
     /// type is.
     history: undo::TimelineHistory,
+    /// The waveform per source, decoded once and shared by every clip of it.
+    /// A view, never saved; see `waves`.
+    waves: waves::Waves,
 }
 
 impl VideoState {
@@ -97,6 +101,7 @@ impl VideoState {
             pending_xform: Rc::new(RefCell::new(None)),
             pending_seek: Rc::new(Cell::new(None)),
             history: Rc::new(RefCell::new(crate::gui::history::History::new())),
+            waves: waves::Waves::default(),
         }
     }
 
@@ -511,6 +516,7 @@ fn add_to_timeline(
     tl_clips: &Rc<VecModel<TimelineClip>>,
     thumb: Image,
     rec: &undo::Recorder,
+    waves: &waves::Waves,
 ) {
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
@@ -560,6 +566,12 @@ fn add_to_timeline(
                 Some(info.id.0.as_str()),
                 before,
             );
+            // Only a video can have sound.
+            if !is_img {
+                if let Some(uri) = project.clip_uri(&info.id) {
+                    waves.fill(ui_weak.clone(), vec![(info.id.0.as_str().into(), uri)]);
+                }
+            }
             let _ = project.play();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_video_playing(true);

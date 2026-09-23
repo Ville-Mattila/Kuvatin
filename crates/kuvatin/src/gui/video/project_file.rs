@@ -284,6 +284,11 @@ fn restore_models(
     ui.set_video_playing(false);
     ui.set_playhead(0.0);
 
+    let sources: Vec<(SharedString, String)> = records
+        .iter()
+        .map(|(id, rec)| (id.0.as_str().into(), rec.uri.clone()))
+        .collect();
+    st.waves.fill(ui.as_weak(), sources);
     spawn_thumbnails(ui.as_weak(), records);
 }
 
@@ -361,6 +366,7 @@ pub(super) struct VideoHandles {
     pub(super) tracks: Rc<VecModel<SharedString>>,
     pub(super) sel_idx: Rc<std::cell::Cell<i32>>,
     pub(super) history: super::undo::TimelineHistory,
+    pub(super) waves: super::waves::Waves,
 }
 
 impl VideoState {
@@ -373,6 +379,7 @@ impl VideoState {
             tracks: self.tracks.clone(),
             sel_idx: self.sel_idx.clone(),
             history: self.history.clone(),
+            waves: self.waves.clone(),
         }
     }
 }
