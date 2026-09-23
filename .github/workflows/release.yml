@@ -253,7 +253,7 @@ jobs:
             slid neighbour confined_to_the_gap already_overlapping discovery_gives_up `
             without_blocking_the_caller document:: survives_being_saved missing_source encoder undo_ `
             removing_a_clip_straight_after_adding_it_does_not_crash removing_a_clip_added_while_playing_does_not_crash `
-            removing_two_clips_back_to_back_while_playing_does_not_crash
+            removing_two_clips_back_to_back_while_playing_does_not_crash a_zoomed_clip_keeps_its_scale
 
       # Fixtures for everything that needs real media. They live under the
       # workspace (a clean long path — the runner's %TEMP% is an 8.3 short path

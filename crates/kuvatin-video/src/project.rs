@@ -646,9 +646,10 @@ fn encoding_profile(s: ExportSettings) -> gst_pbutils::EncodingContainerProfile 
         .build()
 }
 
-/// A clip's transform + audio level for the inspector. `scale` is 0..1 relative
-/// to the largest size that fits the canvas WITHOUT distorting the source, so a
-/// non-16:9 clip keeps its aspect ratio.
+/// A clip's transform + audio level for the inspector. `scale` is relative to
+/// the largest size that fits the canvas WITHOUT distorting the source, so a
+/// non-16:9 clip keeps its aspect ratio: 1.0 fits, above 1.0 zooms past the
+/// canvas edges, and nothing in the engine caps it.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub posx: i32,
@@ -3736,6 +3737,40 @@ mod tests {
         project.prune_tracks(0);
         assert_eq!(project.track_count(), 1);
         assert_eq!(project.timeline.layers().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The engine zooms a clip past the canvas and the read-back must say so:
+    /// a 1.0 ceiling in `clip_layout` once snapped every zoomed clip back to
+    /// fit whenever the inspector refreshed. Through a save and a load too.
+    #[test]
+    fn a_zoomed_clip_keeps_its_scale() {
+        let (dir, png, mut project) = undo_fixture("zoomed");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: -320,
+                posy: -180,
+                scale: 2.5,
+                alpha: 1.0,
+                volume: 1.0,
+            },
+        );
+        let read = project.clip_layout(&a).expect("a layout");
+        assert!((read.scale - 2.5).abs() < 1e-3, "read back {}", read.scale);
+        let doc = project.to_document();
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        reopened.apply_document(&doc).expect("apply");
+        let again = &reopened.to_document().clips[0];
+        assert!(
+            (again.layout.scale - 2.5).abs() < 1e-3,
+            "after a load {}",
+            again.layout.scale
+        );
+        assert_eq!((again.layout.posx, again.layout.posy), (-320, -180));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
