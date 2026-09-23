@@ -287,26 +287,38 @@ pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
 /// Clips may never be shorter than this (0.2 s) via edge-trimming.
 const MIN_TRIM_NS: i128 = 200_000_000;
 
-/// Left-edge trim math: the clip's END stays fixed; start and inpoint move by
-/// the (clamped) delta and the duration shrinks/grows to match. All results are
-/// guaranteed non-negative — the previous version applied the min-duration
-/// override AFTER the >=0 clamps, so a clip already shorter than the minimum
-/// could push inpoint/start negative and wrap through the u64 cast into a
-/// ~10^5-hour ClockTime. Precedence here: never-negative beats min-duration.
-fn trim_left_math(start: i128, inpoint: i128, dur: i128, delta: i128) -> (i128, i128, i128) {
+/// Left-edge trim math: the clip's END stays fixed; start moves by the
+/// (clamped) delta, the in-point by `rate` times as much (one second of
+/// timeline is `rate` seconds of source), and the duration shrinks or grows
+/// to match. All results are guaranteed non-negative — the previous version
+/// applied the min-duration override AFTER the >=0 clamps, so a clip already
+/// shorter than the minimum could push inpoint/start negative and wrap
+/// through the u64 cast into a ~10^5-hour ClockTime. Precedence here:
+/// never-negative beats min-duration. The in-point is rounded down, so the
+/// source position of the fixed end never moves past where it was.
+fn trim_left_math(
+    start: i128,
+    inpoint: i128,
+    dur: i128,
+    delta: i128,
+    rate: f64,
+) -> (i128, i128, i128) {
     let mut d = delta;
     d = d.min(dur - MIN_TRIM_NS); // keep at least the minimum (may go negative)
-    d = d.max(-inpoint).max(-start); // never trim before the source/timeline origin
-    ((start + d).max(0), (inpoint + d).max(0), (dur - d).max(0))
+                                  // Never before the source origin (in timeline time), nor the timeline's.
+    d = d.max(-((inpoint as f64 / rate) as i128)).max(-start);
+    let di = (d as f64 * rate).floor() as i128;
+    ((start + d).max(0), (inpoint + di).max(0), (dur - d).max(0))
 }
 
 /// Right-edge trim math: only the duration changes. Clamped to the minimum,
-/// then capped by the source's max-duration (which wins over the minimum when
-/// the two conflict, e.g. `inpoint` near the end of the media), floored at 0.
-fn trim_right_math(inpoint: i128, dur: i128, delta: i128, max_ns: Option<i128>) -> i128 {
+/// then capped by what the source can still supply from `inpoint` at `rate`
+/// (which wins over the minimum when the two conflict, e.g. `inpoint` near
+/// the end of the media), floored at 0.
+fn trim_right_math(inpoint: i128, dur: i128, delta: i128, max_ns: Option<i128>, rate: f64) -> i128 {
     let mut nd = (dur + delta).max(MIN_TRIM_NS);
     if let Some(m) = max_ns {
-        nd = nd.min(m - inpoint);
+        nd = nd.min(((m - inpoint) as f64 / rate) as i128);
     }
     nd.max(0)
 }
@@ -1262,9 +1274,10 @@ impl Project {
             .property::<Option<gst::ClockTime>>("max-duration")
             .map(|m| m.nseconds() as i128);
         let delta = (delta_secs * 1e9) as i128;
+        let rate = clip_rate_of(&clip);
 
         if edge < 0 {
-            let (ns, ni, nd) = trim_left_math(start, inpoint, dur, delta);
+            let (ns, ni, nd) = trim_left_math(start, inpoint, dur, delta, rate);
             let new_start = gst::ClockTime::from_nseconds(ns as u64);
             let new_inp = gst::ClockTime::from_nseconds(ni as u64);
             let new_dur = gst::ClockTime::from_nseconds(nd as u64);
@@ -1279,7 +1292,7 @@ impl Project {
             }
             clip.set_start(new_start);
         } else {
-            let nd = trim_right_math(inpoint, dur, delta, max_ns);
+            let nd = trim_right_math(inpoint, dur, delta, max_ns, rate);
             clip.set_duration(gst::ClockTime::from_nseconds(nd as u64));
         }
         self.commit();
@@ -2398,26 +2411,59 @@ mod tests {
 
         // Left edge, clip already SHORTER than the 0.2 s minimum at the origin:
         // the min-duration override used to push inpoint/start negative.
-        let (ns, ni, nd) = trim_left_math(0, 0, 100_000_000, 50_000_000);
+        let (ns, ni, nd) = trim_left_math(0, 0, 100_000_000, 50_000_000, 1.0);
         assert!(ns >= 0 && ni >= 0 && nd >= 0, "wrapped: {ns} {ni} {nd}");
 
         // Left edge, ordinary trim: end stays fixed.
-        let (ns, ni, nd) = trim_left_math(2 * s, s, 5 * s, s);
+        let (ns, ni, nd) = trim_left_math(2 * s, s, 5 * s, s, 1.0);
         assert_eq!((ns, ni, nd), (3 * s, 2 * s, 4 * s));
         assert_eq!(ns + nd, 2 * s + 5 * s, "right end moved");
 
         // Left edge can't trim before the source origin.
-        let (ns, ni, nd) = trim_left_math(3 * s, s, 5 * s, -2 * s);
+        let (ns, ni, nd) = trim_left_math(3 * s, s, 5 * s, -2 * s, 1.0);
         assert_eq!(ni, 0, "inpoint clamped to source start");
         assert!(ns >= 0 && nd >= 0);
 
         // Right edge: inpoint at/past max-duration used to underflow.
-        let nd = trim_right_math(10 * s, 5 * s, s, Some(8 * s));
+        let nd = trim_right_math(10 * s, 5 * s, s, Some(8 * s), 1.0);
         assert!(nd >= 0, "wrapped: {nd}");
 
         // Right edge respects the minimum when there's room.
-        let nd = trim_right_math(0, s, -10 * s, Some(100 * s));
+        let nd = trim_right_math(0, s, -10 * s, Some(100 * s), 1.0);
         assert_eq!(nd, MIN_TRIM_NS);
+    }
+
+    #[test]
+    fn trim_math_follows_the_rate() {
+        // Right edge at 2x: a 10 s source from its head fills 5 s of timeline.
+        assert_eq!(trim_right_math(0, 2 * S, 20 * S, Some(10 * S), 2.0), 5 * S);
+        // At 0.5x the same source fills 20 s.
+        assert_eq!(trim_right_math(0, 2 * S, 30 * S, Some(10 * S), 0.5), 20 * S);
+        // The source still wins over the minimum: 0.1 s of source left is
+        // 0.05 s at 2x.
+        assert_eq!(
+            trim_right_math(9_900_000_000, 50_000_000, -S, Some(10 * S), 2.0),
+            50_000_000
+        );
+        // Left edge at 2x: the in-point moves twice as far as the start.
+        assert_eq!(
+            trim_left_math(2 * S, S, 5 * S, S, 2.0),
+            (3 * S, 3 * S, 4 * S)
+        );
+        // Out past the source origin: it stops where the in-point reaches
+        // zero, half a second of timeline for one second of source.
+        assert_eq!(
+            trim_left_math(3 * S, S, 5 * S, -2 * S, 2.0),
+            (3 * S - S / 2, 0, 5 * S + S / 2)
+        );
+        // Never negative at any rate.
+        let (ns, ni, nd) = trim_left_math(0, 0, 100_000_000, 50_000_000, 2.0);
+        assert!(ns >= 0 && ni >= 0 && nd >= 0, "wrapped: {ns} {ni} {nd}");
+        // At 1x nothing changed.
+        assert_eq!(
+            trim_left_math(2 * S, S, 5 * S, S, 1.0),
+            (3 * S, 2 * S, 4 * S)
+        );
     }
 
     #[test]
@@ -4618,6 +4664,49 @@ mod tests {
         assert!(project.clips[&a.0].top_effects().is_empty());
         assert!(project.set_clip_rate(&a, f64::NAN).is_none());
         assert!(project.set_clip_rate(&ClipId("nope".into()), 2.0).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speed_trims_a_slowed_clip_from_both_edges() {
+        // Four seconds of source at 0.5x: eight on the timeline, from 2 s.
+        let (dir, uri) = sequence_fixture("speed-trim", 40, 10);
+        let mut project = Project::new(|_f| {}).expect("project");
+        let a = project
+            .add_clip_uri(&uri, 0, secs(2.0), Duration::ZERO, secs(4.0))
+            .expect("a");
+        project.set_clip_rate(&a, 0.5).expect("0.5x");
+        // In by a second of timeline: half a second of source.
+        let g = project.trim_clip(&a, -1, 1.0).expect("left in");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(3.0), secs(0.5), secs(7.0))
+        );
+        // Out as far as it goes: 3.5 s of source left is 7 s at 0.5x.
+        let g = project.trim_clip(&a, 1, 30.0).expect("right out");
+        assert_eq!(g.duration, secs(7.0), "the source is used up exactly");
+        // Back out past the start of the source: it stops there.
+        let g = project.trim_clip(&a, -1, -5.0).expect("left out");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(2.0), Duration::ZERO, secs(8.0))
+        );
+        // The pure maths and GES agree on how long the clip may be.
+        let clip = project.clips[&a.0].clone();
+        let limit = clip
+            .property::<Option<gst::ClockTime>>("duration-limit")
+            .expect("a sequence has a length");
+        let max = clip
+            .property::<Option<gst::ClockTime>>("max-duration")
+            .expect("a sequence has a length");
+        let ours = trim_right_math(
+            clip.inpoint().nseconds() as i128,
+            clip.duration().nseconds() as i128,
+            60 * S,
+            Some(max.nseconds() as i128),
+            0.5,
+        );
+        assert_eq!(ours, limit.nseconds() as i128);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
