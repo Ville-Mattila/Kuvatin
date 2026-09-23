@@ -52,8 +52,10 @@ build with the staging path passed to the compiler. Pass `-AllPlugins` to the
 script to bundle the entire distribution instead (the pre-2.7 behaviour).
 
 ```pwsh
-# 0. The release exe seeds the DLL closure.
-cargo build --release -p kuvatin
+# 0. The release exe seeds the DLL closure. The updater ships beside it
+#    (main.wxs takes both from the same target\release folder), so build it here
+#    too or `light` stops on a file it cannot find.
+cargo build --release -p kuvatin -p kuvatin-updater
 
 # 1. Stage the trimmed GStreamer runtime + licenses; generate wix/gstreamer.wxs (gitignored).
 crates\kuvatin\wix\bundle-gstreamer.ps1 -StageDir "$PWD\target\gst-staging"

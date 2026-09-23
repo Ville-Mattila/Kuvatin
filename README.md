@@ -260,8 +260,16 @@ is off by default; Kuvatin makes no network request unless you turn it on.
 When on, it sends one `HEAD` request a day to
 `github.com/Ville-Mattila/Kuvatin/releases/latest` (User-Agent
 `Kuvatin/<version>`) and reads the redirect target for the latest tag. Nothing
-else is sent. A newer version shows as a badge that opens the releases page.
-The setting lives in `%APPDATA%\Kuvatin\settings.toml`.
+else is sent. A newer version shows as a badge; clicking it asks whether to
+update, and nothing is downloaded until you say yes. Kuvatin then fetches the
+installer, closes, installs it — Windows asks for administrator rights once —
+and opens again; *Not now* leaves everything as it was. The setting lives in
+`%APPDATA%\Kuvatin\settings.toml`.
+
+The installer is downloaded over HTTPS and checked against the `.sha256`
+published beside it. That proves the download arrived intact. It is not proof
+that the release is genuine: the installer is unsigned and the checksum sits
+beside it on the same server. Signing the installer is a separate job.
 
 ## Architecture
 

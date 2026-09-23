@@ -3058,6 +3058,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kuvatin-updater"
+version = "2.12.0"
+dependencies = [
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "kuvatin-video"
 version = "2.12.0"
 dependencies = [
