@@ -68,12 +68,26 @@ pub struct ClipRecord {
     pub start: f64,
     pub inpoint: f64,
     pub duration: f64,
+    /// Playback rate: 1.0 is normal, 2.0 twice as fast. Optional, and left
+    /// out of the file at 1.0, so a project that never changes a clip's speed
+    /// is written exactly as before and every file from 2.12 and earlier
+    /// still loads. `#[serde(default)]` alone would read a missing one as 0.
+    #[serde(default = "unit_rate", skip_serializing_if = "is_unit_rate")]
+    pub rate: f64,
     pub layout: LayoutRecord,
     /// Set when the clip is an image sequence. The URI is enough to put the
     /// sequence back on the timeline; this is what lets the media bin re-add
     /// it afterwards, which the URI alone cannot describe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<crate::sequence::SequenceSpec>,
+}
+
+fn unit_rate() -> f64 {
+    1.0
+}
+
+fn is_unit_rate(rate: &f64) -> bool {
+    *rate == 1.0
 }
 
 /// The file a `file://` URI names, or None for anything else (an
@@ -165,6 +179,7 @@ mod tests {
                     start: 0.0,
                     inpoint: 1.5,
                     duration: 4.25,
+                    rate: 1.0,
                     layout: layout(),
                     sequence: None,
                 },
@@ -175,6 +190,7 @@ mod tests {
                     start: 2.0,
                     inpoint: 0.0,
                     duration: 2.0,
+                    rate: 1.0,
                     layout: layout(),
                     sequence: Some(crate::sequence::SequenceSpec {
                         dir: std::path::PathBuf::from("C:/render"),
@@ -244,5 +260,56 @@ mod tests {
         let missing = dir.path().join("gone.kuvatin");
         let err = ProjectFile::load(&missing).unwrap_err().to_string();
         assert!(err.contains("could not read"), "{err}");
+    }
+
+    /// A project that never changes a speed is written exactly as before.
+    #[test]
+    fn a_clip_at_normal_speed_writes_no_rate_and_reads_back_at_one() {
+        let text = toml::to_string_pretty(&sample()).unwrap();
+        assert!(
+            !text.lines().any(|l| l.trim_start().starts_with("rate =")),
+            "{text}"
+        );
+        let back: ProjectFile = toml::from_str(&text).unwrap();
+        assert!(back.clips.iter().all(|c| c.rate == 1.0));
+    }
+
+    #[test]
+    fn a_clip_at_another_speed_keeps_it_and_the_format_stays_one() {
+        let mut doc = sample();
+        doc.clips[0].rate = 2.0;
+        let text = toml::to_string_pretty(&doc).unwrap();
+        assert!(text.lines().any(|l| l.trim() == "rate = 2.0"), "{text}");
+        assert!(text.contains("version = 1"), "{text}");
+        let back: ProjectFile = toml::from_str(&text).unwrap();
+        assert_eq!(back, doc);
+    }
+
+    /// What 2.12 wrote: no rate anywhere.
+    #[test]
+    fn a_file_written_before_speed_existed_still_opens() {
+        let text = r#"version = 1
+canvas_w = 1280
+canvas_h = 720
+
+[[clips]]
+uri = "file:///C:/shots/take1.mp4"
+name = "take1.mp4"
+track = 0
+start = 0.0
+inpoint = 1.5
+duration = 4.25
+
+[clips.layout]
+posx = 12
+posy = -4
+scale = 0.75
+alpha = 0.5
+volume = 1.0
+"#;
+        let doc: ProjectFile = toml::from_str(text).unwrap();
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.clips[0].rate, 1.0);
+        assert_eq!(doc.clips[0].duration, 4.25);
     }
 }

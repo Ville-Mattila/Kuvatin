@@ -685,6 +685,7 @@ mod tests {
             start,
             inpoint: 0.0,
             duration,
+            rate: 1.0,
             layout: LayoutRecord {
                 posx: 0,
                 posy: 0,

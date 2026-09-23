@@ -1772,6 +1772,7 @@ impl Project {
                         start: secs(clip.start()),
                         inpoint: secs(clip.inpoint()),
                         duration: secs(clip.duration()),
+                        rate: clip_rate_of(clip),
                         layout: self
                             .clip_layout(&ClipId(name.clone()))
                             .map(Into::into)
