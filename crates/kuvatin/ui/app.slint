@@ -1717,6 +1717,12 @@ export component AppWindow inherits Window {
                                 init => { self.opacity = 1; }
                             }
                             if root.inspector-name != "" : VerticalLayout {
+                                // The spare height below the controls belongs to the filler
+                                // after this layout. Without this the layout took a share of
+                                // it and handed it to the one child that can grow, the Speed
+                                // block, which drew its list as a tall box adrift from its
+                                // label.
+                                vertical-stretch: 0;
                                 opacity: 0;
                                 animate opacity { duration: 180ms; easing: ease-out; }
                                 init => { self.opacity = 1; }
