@@ -284,6 +284,12 @@ fn trim_right_math(inpoint: i128, dur: i128, delta: i128, max_ns: Option<i128>) 
     nd.max(0)
 }
 
+/// Whether a clip at `start` lasting `dur` can be cut at `at`, all in
+/// nanoseconds: only where both halves keep at least [`MIN_TRIM_NS`].
+fn split_fits(start: i128, dur: i128, at: i128) -> bool {
+    at >= start + MIN_TRIM_NS && at <= start + dur - MIN_TRIM_NS
+}
+
 /// Read a GES clip's current timeline geometry.
 /// Where a slid clip may actually land on its layer.
 ///
@@ -1129,6 +1135,65 @@ impl Project {
         }
         let current = self.clips.get(&id.0)?.duration().nseconds() as f64 / 1e9;
         self.trim_clip(id, 1, secs - current)
+    }
+
+    /// Cut the clip in two at timeline position `at`. The clip keeps its ID,
+    /// start and in-point and ends at `at`; the returned clip begins there,
+    /// with the in-point that follows (GES translates it through any speed
+    /// change). Refused unless both halves keep at least 0.2 s. Returns the
+    /// new clip's ID and both halves' geometry, left first.
+    pub fn split_clip(
+        &mut self,
+        id: &ClipId,
+        at: Duration,
+    ) -> Result<(ClipId, ClipGeom, ClipGeom)> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
+        let clip = self
+            .clips
+            .get(&id.0)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("clip {} is not on the timeline", id.0))?;
+        let start = clip.start().nseconds() as i128;
+        let dur = clip.duration().nseconds() as i128;
+        let at_ns = at.as_nanos() as i128;
+        if !split_fits(start, dur, at_ns) {
+            anyhow::bail!(
+                "a split leaves at least {:.1} s of the clip on each side of the playhead",
+                MIN_TRIM_NS as f64 / 1e9
+            );
+        }
+        // GES copies the transform to the new half (measured, M6), but this
+        // does not lean on it: the right half gets it written explicitly.
+        // Only once the clip has one: a clip never laid out still has GES's
+        // stretch-to-fill, and writing back the read-back of that would turn
+        // it into a fitted frame in the corner.
+        let laid_out = clip
+            .child_property("width")
+            .and_then(|v| v.get::<i32>().ok())
+            .unwrap_or(0)
+            > 0;
+        let layout = if laid_out { self.clip_layout(id) } else { None };
+        let right = clip
+            .split_full(at_ns as u64)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("GES did not split the clip"))?;
+        self.commit();
+        // Named the way `add_clip_uri` names a clip: a nameless one would
+        // collide on the "" key and orphan whatever was there.
+        let name = right
+            .name()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
+        self.clips.insert(name.clone(), right.clone());
+        let right_id = ClipId(name);
+        if let Some(l) = layout {
+            self.set_clip_layout(&right_id, l);
+        }
+        self.touched();
+        Ok((right_id, clip_geom(&clip), clip_geom(&right)))
     }
 
     /// Write clips' start, in-point, duration, track and transform exactly as
@@ -2075,6 +2140,32 @@ mod tests {
         // Right edge respects the minimum when there's room.
         let nd = trim_right_math(0, s, -10 * s, Some(100 * s));
         assert_eq!(nd, MIN_TRIM_NS);
+    }
+
+    #[test]
+    fn split_needs_the_minimum_on_both_sides() {
+        // A clip at [1 s, 3 s).
+        assert!(!split_fits(S, 2 * S, S), "at its start");
+        assert!(
+            !split_fits(S, 2 * S, S + MIN_TRIM_NS - 1),
+            "a nanosecond too close to the start"
+        );
+        assert!(
+            split_fits(S, 2 * S, S + MIN_TRIM_NS),
+            "the minimum from the start"
+        );
+        assert!(split_fits(S, 2 * S, 2 * S), "the middle");
+        assert!(
+            split_fits(S, 2 * S, 3 * S - MIN_TRIM_NS),
+            "the minimum from the end"
+        );
+        assert!(
+            !split_fits(S, 2 * S, 3 * S - MIN_TRIM_NS + 1),
+            "a nanosecond too close to the end"
+        );
+        assert!(!split_fits(S, 2 * S, 5 * S), "outside it");
+        // 0.3 s cannot leave 0.2 s on both sides.
+        assert!(!split_fits(0, 300_000_000, 150_000_000));
     }
 
     /// remove_clip deletes from GES + the map, prunes empty trailing layers,
@@ -3771,6 +3862,96 @@ mod tests {
             again.layout.scale
         );
         assert_eq!((again.layout.posx, again.layout.posy), (-320, -180));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_cuts_a_clip_in_two_where_asked() {
+        let (dir, png, mut project) = undo_fixture("split-middle");
+        let a = project
+            .add_clip(&png, 0, secs(1.0), Duration::ZERO, secs(4.0))
+            .expect("a");
+        project.set_clip_layout(
+            &a,
+            Layout {
+                posx: 12,
+                posy: 34,
+                scale: 0.6,
+                alpha: 0.5,
+                volume: 1.0,
+            },
+        );
+        let before = record_of(&project, &a);
+        let (b, left, right) = project.split_clip(&a, secs(2.5)).expect("split");
+        assert_ne!(b, a, "the right half is a new clip");
+        assert_eq!((left.start, left.duration), (secs(1.0), secs(1.5)));
+        assert_eq!((right.start, right.duration), (secs(2.5), secs(2.5)));
+        assert_eq!(
+            left.start + left.duration,
+            right.start,
+            "they touch exactly"
+        );
+        assert_eq!(
+            right.inpoint,
+            left.inpoint + left.duration,
+            "the right half carries on where the left stops"
+        );
+        let (ra, rb) = (record_of(&project, &a), record_of(&project, &b));
+        assert_eq!(ra.layout, before.layout, "the left keeps its transform");
+        assert_eq!(rb.layout, before.layout, "and the right half has it too");
+        assert_eq!((ra.track, rb.track), (0, 0));
+        assert_eq!(project.clip_records().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_refuses_within_the_minimum_of_either_edge() {
+        let (dir, png, mut project) = undo_fixture("split-edges");
+        // A clip at [1 s, 3 s).
+        let a = project
+            .add_clip(&png, 0, secs(1.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let before = record_of(&project, &a);
+        for at in [0.5, 1.0, 1.1, 2.9, 3.0, 4.0] {
+            let err = project.split_clip(&a, secs(at)).expect_err("refused");
+            assert!(format!("{err:#}").contains("0.2 s"), "at {at}: {err:#}");
+        }
+        assert_eq!(project.clip_records().len(), 1, "nothing was cut");
+        assert_same_record(&record_of(&project, &a), &before);
+        // Exactly the minimum is allowed.
+        let (_, left, right) = project
+            .split_clip(&a, Duration::from_millis(1200))
+            .expect("at 1.2 s");
+        assert_eq!(
+            (left.duration, right.duration),
+            (Duration::from_millis(200), Duration::from_millis(1800))
+        );
+        // The playhead now sits on the cut, where cutting again is refused.
+        assert!(project.split_clip(&a, Duration::from_millis(1200)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undo writes the left half's old record and removes the right half;
+    /// redo writes the left half again and restores the right half under the
+    /// ID the step holds. No split is replayed: these are the operations
+    /// `undo::plan` already produces.
+    #[test]
+    fn undo_puts_a_split_clip_back_as_one_and_redo_cuts_it_again() {
+        let (dir, png, mut project) = undo_fixture("undo-split");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(4.0))
+            .expect("a");
+        let whole = record_of(&project, &a);
+        let (b, _, _) = project.split_clip(&a, secs(1.5)).expect("split");
+        let (left, right) = (record_of(&project, &a), record_of(&project, &b));
+        assert!(project.remove_clip(&b));
+        assert!(write_back(&mut project, &[(&a, &whole)]));
+        assert_eq!(project.clip_records().len(), 1, "one clip again");
+        assert_same_record(&record_of(&project, &a), &whole);
+        assert!(write_back(&mut project, &[(&a, &left)]));
+        assert_eq!(project.restore_clip(&b, &right).expect("restore"), b);
+        assert_same_record(&record_of(&project, &a), &left);
+        assert_same_record(&record_of(&project, &b), &right);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
