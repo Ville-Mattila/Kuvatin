@@ -7,6 +7,11 @@
 > **It cannot be built until the undo design is amended** — see "The amendment
 > the undo design needs", which gives the exact wording. The next step after
 > that amendment is the `writing-plans` skill.
+>
+> **Planned 2026-09-25:** `docs/superpowers/plans/2026-09-25-editor-track-controls.md`.
+> The undo design is amended as below. The plan departs from this spec in
+> ten places, each with its reason, under "Where this plan departs from the
+> spec"; where they disagree, the plan is the one that was built and tested.
 
 ## Goal
 

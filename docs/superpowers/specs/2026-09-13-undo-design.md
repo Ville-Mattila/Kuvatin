@@ -118,8 +118,9 @@ these hold:
 
 The merged step keeps the older "before" and takes the newer "after", and its
 time becomes the newer one. One slider drag, one mouse drag, or a held
-Ctrl+arrow therefore becomes one step. Add, Delete, Reorder tracks and Add track
-never merge, and nothing in Images mode merges.
+Ctrl+arrow therefore becomes one step. Add, Delete, Reorder tracks, Add track,
+Split, Speed, Mute track and Lock track never merge, and nothing in Images mode
+merges. Rename track merges, so the keystrokes of one renaming are one step.
 
 A merged step that ends up changing nothing (a drag back to where it began) is
 removed, and that seals the history too, so the next change cannot merge into
@@ -161,19 +162,27 @@ the step beneath it.
 A `TimelineStep` holds:
 
 - its kind (Move, Trim, Transform, Duration, Add, Delete, Reorder tracks, Add
-  track), the clip it is about if it is about one clip, and that clip's display
-  name, which its description uses ("trimming intro.mp4");
+  track, Split, Speed, Mute track, Lock track, Rename track), the clip **or
+  track** it is about if it is about one of them, and that clip's display name
+  or that track's label, which its description uses ("trimming intro.mp4",
+  "muting Dialogue");
 - for each affected clip, its record **before** and **after**, where "none"
   means the clip did not exist on that side;
 - the timeline row of every clip that exists on only one side, so a clip that
   comes back gets its row as it was, without decoding: its name (the engine's
   record spells one from the URI), kind and thumbnail;
-- the timeline's track-row count before and after.
+- the timeline's **track table** before and after: one record per track row,
+  in order, holding its name, whether it is muted and whether it is locked. A
+  step that changes nothing but the table — a rename, a mute, a lock — is
+  still a step; a step that moves tracks carries the table permuted with them;
+  and a step that adds or removes a track row carries that row's record on the
+  side it exists. Solo is not in the table: it is a way of listening, neither
+  saved nor undone.
 
 **Comparing.** A pure function takes the records before and after an edit,
 keyed by `ClipId`, and returns the clips whose record changed, appeared or
 disappeared. Records are compared exactly: an unchanged clip reads back
-identical values. No differing clips and an unchanged track-row count means no
+identical values. No differing clips and an unchanged track table means no
 step.
 
 **Recording.** One helper wraps every edit: read the records and the track-row
@@ -190,6 +199,11 @@ called from:
 | `on_add_track` | Add track (track rows only) |
 | `remove_timeline_clip` (× button and Delete key) | Delete |
 | `add_to_timeline`, `add_sequence_to_timeline` | Add |
+| `on_timeline_split` | Split |
+| `on_inspector_speed_changed` | Speed |
+| `on_track_muted` | Mute track (track rows only) |
+| `on_track_locked` | Lock track (track rows only) |
+| `on_track_renamed` | Rename track (track rows only) |
 
 Keyboard nudges and trims reach the same callbacks, so they need no hook of
 their own.
@@ -204,8 +218,9 @@ their own.
    `set_clip_records`, then restores. After the removals and writes every clip
    is where the "before" side has it, so a restored clip never lands on one
    that has yet to move away.
-3. Prune layers to the step's "before" track count, and set the timeline's
-   track rows to that count.
+3. Prune layers to the length of the step's "before" track table, set the
+   timeline's track rows to that table (each row keeping its solo), and tell
+   the engine which tracks to silence.
 4. Update only the affected timeline rows. This is a pure function from the
    current rows and the applied records to the new rows, so it is unit-tested.
    Then update the timeline duration and repaint the preview.
@@ -280,7 +295,10 @@ skipped, and the user is told how many files could not come back.
 - **How steps describe themselves** (the hint prefixes "Undo " or "Redo "):
   - Videos: "moving intro.mp4", "trimming intro.mp4", "transforming
     intro.mp4", "changing the duration of still.png", "deleting intro.mp4",
-    "adding intro.mp4", "reordering tracks", "adding a track".
+    "adding intro.mp4", "reordering tracks", "adding a track", "splitting
+    intro.mp4", "changing the speed of intro.mp4", "muting Dialogue",
+    "unmuting Dialogue", "locking Dialogue", "unlocking Dialogue", "renaming
+    Track 2".
   - Images: "adding 12 files", "removing photo.jpg", "clearing the list (40
     files)", "cropping photo.jpg".
 
