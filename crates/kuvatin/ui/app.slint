@@ -215,6 +215,9 @@ export component AppWindow inherits Window {
     callback track-soloed(int, bool);
     callback track-locked(int, bool);
     callback track-renamed(int, string);
+    // The track whose name is being edited in place (double-click a name), or
+    // -1 for none.
+    in-out property <int> track-renaming: -1;
     // Undo and redo, one history per mode (gui/history.rs). The hints name the
     // step ("Undo trimming intro.mp4") and show on hover over the buttons.
     in property <bool> video-can-undo: false;
@@ -1928,6 +1931,49 @@ export component AppWindow inherits Window {
                                                 // Reset stale drag on cancel, else the next plain
                                                 // click could fire a spurious reorder.
                                                 if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
+                                            }
+                                            double-clicked => { root.track-renaming = t; }
+                                        }
+                                    }
+                                    // Renaming: an edit field over the name, seeded with it.
+                                    // Return or a click elsewhere keeps what was typed, Esc
+                                    // puts the name back, and an empty name means "Track N"
+                                    // again. A bare TextInput: the standard LineEdit is at
+                                    // least 32 px tall and 160 px wide, more than a header has.
+                                    if root.track-renaming == t : Rectangle {
+                                        x: 22px; y: 4px;
+                                        width: grab.width - 22px - 2px; height: parent.height - 8px;
+                                        background: Theme.well;
+                                        border-radius: 3px; border-width: 1px; border-color: Theme.accent;
+                                        name-edit := TextInput {
+                                            x: 4px; width: parent.width - 8px; height: parent.height;
+                                            text: trk.name;
+                                            color: Theme.ink;
+                                            font-size: 9.5px;
+                                            vertical-alignment: center;
+                                            single-line: true;
+                                            accessible-label: "Name of " + hdr.title;
+                                            init => { self.focus(); self.select-all(); }
+                                            // Once, whichever way the edit ends; a destroyed
+                                            // field's lost focus must not commit it again.
+                                            function finish(keep: bool) {
+                                                if (root.track-renaming != t) { return; }
+                                                if (keep) { root.track-renamed(t, self.text); }
+                                                root.track-renaming = -1;
+                                            }
+                                            accepted => { self.finish(true); kbd.focus(); }
+                                            key-pressed(e) => {
+                                                if (e.text == Key.Escape) {
+                                                    self.finish(false);
+                                                    kbd.focus();
+                                                    return accept;
+                                                }
+                                                return reject;
+                                            }
+                                            // Clicking away keeps the name rather than losing it,
+                                            // and leaves focus where the click put it.
+                                            changed has-focus => {
+                                                if (!self.has-focus) { self.finish(true); }
                                             }
                                         }
                                     }
