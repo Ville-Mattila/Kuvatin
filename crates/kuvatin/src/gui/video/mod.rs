@@ -6,11 +6,12 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod tracks;
 mod transport;
 mod undo;
 mod waves;
 
-use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
+use super::{show_error, AppWindow, ClipKind, TimelineClip, TimelineTrack, VideoAsset};
 use export::ExportState;
 use import::ImportState;
 use slint::{
@@ -56,9 +57,12 @@ pub(super) struct VideoState {
     pub(super) assets: Rc<VecModel<VideoAsset>>,
     pub(super) bin_paths: Rc<RefCell<Vec<PathBuf>>>,
     pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
-    /// Timeline tracks (GES layers, top = index 0 = composited on top). Kept
-    /// mutable so dragging a clip onto a new track can grow the list.
-    pub(super) tracks: Rc<VecModel<SharedString>>,
+    /// Timeline track rows (GES layers, top = index 0 = composited on top):
+    /// the truth about how many tracks there are and what each is called, and
+    /// whether it is muted, soloed or locked. A row can exist before its
+    /// layer does (see `on_add_track`). Kept mutable so dragging a clip onto a
+    /// new track can grow the list.
+    pub(super) tracks: Rc<VecModel<TimelineTrack>>,
     /// Index of the selected timeline clip (for the inspector), or -1.
     pub(super) sel_idx: Rc<Cell<i32>>,
     /// Latest inspector transform awaiting a coalesced apply on the UI timer.
@@ -82,11 +86,9 @@ impl VideoState {
         ui.set_video_clips(ModelRc::from(assets.clone()));
         let tl_clips = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
         ui.set_timeline_clips(ModelRc::from(tl_clips.clone()));
-        let tracks = Rc::new(VecModel::<SharedString>::from(vec![
-            SharedString::from("Track 1"),
-            SharedString::from("Track 2"),
-        ]));
-        ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
+        // Two unnamed, audible, unlocked tracks: what an empty project shows.
+        let tracks = Rc::new(VecModel::from(vec![TimelineTrack::default(); 2]));
+        ui.set_timeline_tracks(ModelRc::from(tracks.clone()));
         ui.set_insp_scale_min(MIN_SCALE_PCT);
         ui.set_insp_scale_max(MAX_SCALE_PCT);
         let labels: Vec<SharedString> = SPEEDS.iter().map(|r| format!("{r}×").into()).collect();
@@ -132,6 +134,7 @@ pub(super) fn wire(
 ) {
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
+    tracks::wire(ui, st);
     transport::wire(ui, st);
     export::wire(ui, st, ex, timers);
     project_file::wire(ui, st, im);
@@ -350,16 +353,26 @@ pub(super) fn wire(
                     return;
                 };
                 // Apply the latest inspector transform (if any) then repaint,
-                // both coalesced to one commit + one seek per tick.
+                // both coalesced to one commit + one seek per tick. A clip on
+                // a locked track keeps its transform and the value is
+                // dropped: its sliders and preview box stand down, so only a
+                // value stashed just before the lock went on gets here.
                 if let Some((id, l)) = pending_xform.borrow_mut().take() {
-                    let before = rec.before(Some(&*project));
-                    project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
-                    rec.record(
-                        Some(&*project),
-                        undo::StepKind::Transform,
-                        Some(id.as_str()),
-                        before,
-                    );
+                    let track = rec
+                        .tl_clips
+                        .iter()
+                        .find(|r| r.id.as_str() == id)
+                        .map_or(-1, |r| r.track);
+                    if !tracks::locked(&tracks::rows_of(&rec.tracks), track) {
+                        let before = rec.before(Some(&*project));
+                        project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
+                        rec.record(
+                            Some(&*project),
+                            undo::StepKind::Transform,
+                            Some(undo::Subject::Clip(id.clone())),
+                            before,
+                        );
+                    }
                 }
                 // Scrub target: one (keyframe) seek per tick during a drag,
                 // a frame-accurate one on release.
@@ -518,14 +531,6 @@ fn add_to_timeline(
     rec: &undo::Recorder,
     waves: &waves::Waves,
 ) {
-    if project_slot.borrow().is_none() {
-        *project_slot.borrow_mut() = make_project(ui_weak);
-    }
-    let mut slot = project_slot.borrow_mut();
-    let Some(project) = slot.as_mut() else {
-        return;
-    };
-    let before = rec.before(Some(&*project));
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -534,7 +539,24 @@ fn add_to_timeline(
     let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
     // GES composites lower layer indices ON TOP, so images (overlays) go on
     // layer 0 and videos on layer 1 (the base, underneath).
-    let track = if is_img { 0 } else { 1 };
+    let track: usize = if is_img { 0 } else { 1 };
+    if let Some(ui) = ui_weak.upgrade() {
+        if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[track as i32]) {
+            return;
+        }
+    }
+    if project_slot.borrow().is_none() {
+        *project_slot.borrow_mut() = make_project(ui_weak);
+    }
+    let mut slot = project_slot.borrow_mut();
+    let Some(project) = slot.as_mut() else {
+        return;
+    };
+    // A track muted before the first clip arrived was muted in the rows
+    // only: the engine did not exist yet. It hears about it now, before the
+    // clip is heard. Nothing to do when it already knows.
+    tracks::push_mutes(project, &rec.tracks);
+    let before = rec.before(Some(&*project));
     match project.append_clip(path, track, img_dur) {
         Ok(info) => {
             let name: SharedString = path
@@ -563,7 +585,7 @@ fn add_to_timeline(
             rec.record(
                 Some(&*project),
                 undo::StepKind::Add,
-                Some(info.id.0.as_str()),
+                Some(undo::Subject::Clip(info.id.0.clone())),
                 before,
             );
             // Only a video can have sound.
@@ -600,6 +622,14 @@ fn add_sequence_to_timeline(
     thumb: Image,
     rec: &undo::Recorder,
 ) {
+    // Sequences are footage, not overlays: the base video track (GES
+    // composites lower layer indices on top, so videos live on 1).
+    let track: usize = 1;
+    if let Some(ui) = ui_weak.upgrade() {
+        if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[track as i32]) {
+            return;
+        }
+    }
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
     }
@@ -607,12 +637,14 @@ fn add_sequence_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    // A track muted before the first clip arrived was muted in the rows
+    // only: the engine did not exist yet. It hears about it now, before the
+    // clip is heard. Nothing to do when it already knows.
+    tracks::push_mutes(project, &rec.tracks);
     let before = rec.before(Some(&*project));
     let added = spec
         .uri()
-        // Sequences are footage, not overlays: the base video track (GES
-        // composites lower layer indices on top, so videos live on 1).
-        .and_then(|uri| project.append_clip_uri(&uri, 1, None));
+        .and_then(|uri| project.append_clip_uri(&uri, track, None));
     match added {
         Ok(info) => {
             tl_clips.push(TimelineClip {
@@ -632,7 +664,7 @@ fn add_sequence_to_timeline(
             rec.record(
                 Some(&*project),
                 undo::StepKind::Add,
-                Some(info.id.0.as_str()),
+                Some(undo::Subject::Clip(info.id.0.clone())),
                 before,
             );
             let _ = project.play();

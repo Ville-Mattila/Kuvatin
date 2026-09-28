@@ -141,6 +141,7 @@ pub(super) fn wire(
         let export_path = export_path.clone();
         let export_starting = export_starting.clone();
         let export_fell_back = export_fell_back.clone();
+        let track_rows = st.tracks.clone();
         ui.on_video_export(move || {
             if export_active.get() || export_pending.get() {
                 return;
@@ -195,6 +196,11 @@ pub(super) fn wire(
             // for the teardown, show the modal, and let the progress timer
             // start the render when the pipeline has settled.
             *export_path.borrow_mut() = Some(path.clone());
+            // Solo is for listening. It goes off, visibly, while the engine
+            // still takes a mute: prepare_render stops it taking any.
+            if let Some(p) = project_slot.borrow_mut().as_mut() {
+                super::tracks::clear_solo(p, &track_rows);
+            }
             let prepared = project_slot.borrow().as_ref().map(|p| p.prepare_render());
             match prepared {
                 Some(Ok(())) => {

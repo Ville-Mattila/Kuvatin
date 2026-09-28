@@ -90,6 +90,33 @@ fn is_unit_rate(rate: &f64) -> bool {
     *rate == 1.0
 }
 
+/// One track, as stored. Its index in [`ProjectFile::tracks`] is the track:
+/// 0 is the top one, the numbering [`ClipRecord::track`] uses. Each field is
+/// left out of the file at its default, so a track nobody touched is a bare
+/// `[[tracks]]` header.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackRecord {
+    /// What the user called it. Empty means "call it Track N".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Silent: its layer plays no sound, in the preview or the export.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub muted: bool,
+    /// Refuses every edit to the clips on it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A track table that says nothing a default one would not. It is left out of
+/// the file, and the track count comes from the clips, as it always has.
+fn untouched(tracks: &[TrackRecord]) -> bool {
+    tracks.iter().all(|t| *t == TrackRecord::default())
+}
+
 /// The file a `file://` URI names, or None for anything else (an
 /// `imagesequence://` clip is a run of files, not one). The interface needs
 /// this to put a reopened project's sources back in the media bin.
@@ -106,6 +133,15 @@ pub struct ProjectFile {
     /// In timeline order, top track first. Empty is a valid project.
     #[serde(default)]
     pub clips: Vec<ClipRecord>,
+    /// One per track row, top first: names, mutes and locks. Left out when no
+    /// track has any of them, so a project that never used them is written
+    /// exactly as before. Empty on reading means "infer the tracks from the
+    /// clips", which is what every file from 2.13 and earlier needs.
+    ///
+    /// Filled in by the interface, which owns names and locks; the engine
+    /// writes it empty (see `Project::to_document`).
+    #[serde(default, skip_serializing_if = "untouched")]
+    pub tracks: Vec<TrackRecord>,
 }
 
 impl ProjectFile {
@@ -115,6 +151,7 @@ impl ProjectFile {
             canvas_w,
             canvas_h,
             clips,
+            tracks: Vec::new(),
         }
     }
 
@@ -311,5 +348,67 @@ volume = 1.0
         assert_eq!(doc.version, 1);
         assert_eq!(doc.clips[0].rate, 1.0);
         assert_eq!(doc.clips[0].duration, 4.25);
+        assert!(
+            doc.tracks.is_empty(),
+            "no table: the tracks come from the clips"
+        );
+    }
+
+    /// A top track at its defaults, a named and muted one, and a locked one.
+    fn tracks() -> Vec<TrackRecord> {
+        vec![
+            TrackRecord::default(),
+            TrackRecord {
+                name: "Dialogue".into(),
+                muted: true,
+                locked: false,
+            },
+            TrackRecord {
+                name: String::new(),
+                muted: false,
+                locked: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_track_table_survives_the_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tracks.kuvatin");
+        let mut doc = sample();
+        doc.tracks = tracks();
+        doc.save(&path).unwrap();
+        assert_eq!(ProjectFile::load(&path).unwrap(), doc);
+    }
+
+    /// A project nobody renamed, muted or locked is written exactly as before.
+    #[test]
+    fn an_untouched_track_table_is_left_out_of_the_file() {
+        let mut doc = sample();
+        doc.tracks = vec![TrackRecord::default(); 3];
+        let text = toml::to_string_pretty(&doc).unwrap();
+        assert!(!text.contains("tracks"), "{text}");
+        assert_eq!(text, toml::to_string_pretty(&sample()).unwrap());
+    }
+
+    /// Once one track has something to say, every row is written, so the
+    /// count survives; a row at its defaults is a bare header. The format
+    /// stays at version 1: the table is additive.
+    #[test]
+    fn a_touched_table_writes_every_row_and_only_what_is_set() {
+        let mut doc = sample();
+        doc.tracks = tracks();
+        let text = toml::to_string_pretty(&doc).unwrap();
+        assert_eq!(text.matches("[[tracks]]").count(), 3, "{text}");
+        assert!(text.contains("name = \"Dialogue\""), "{text}");
+        assert!(
+            text.contains("muted = true") && text.contains("locked = true"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("= false") && !text.contains("name = \"\""),
+            "{text}"
+        );
+        assert!(text.contains("version = 1"), "{text}");
     }
 }

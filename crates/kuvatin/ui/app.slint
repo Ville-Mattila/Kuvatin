@@ -4,7 +4,7 @@ import { Modal } from "modal.slint";
 import {
     QualitySlider, Card, SecondaryButton, DialogButton, RemoveButton, FieldLabel, CropHandle,
     WinButton, SegToggle, Splitter, NumberDropdown, PillButton, Scrubber, InspSlider,
-    TimelineChip, TooltipLayer, Gesture
+    TimelineChip, TrackToggle, TooltipLayer, Gesture
 } from "widgets.slint";
 export { ProgressWindow } from "progress.slint";
 
@@ -35,6 +35,16 @@ export struct TimelineClip {
     rate: float,       // playback rate: 1 unless the clip's speed was changed
     wave: image,       // the whole source's waveform, or empty
     wave-secs: float,  // how many seconds of source that image spans
+}
+
+// One timeline track row: its header in the gutter and its stripe in the
+// lane. Its index in `timeline-tracks` is the track, 0 = top, the numbering
+// TimelineClip.track uses.
+export struct TimelineTrack {
+    name: string,      // "" → the header shows "Track {t+1}"
+    muted: bool,
+    soloed: bool,      // for listening only: never saved, never undone
+    locked: bool,
 }
 
 // A media-bin entry: file name + a generated thumbnail.
@@ -113,7 +123,7 @@ export component AppWindow inherits Window {
 
     // Timeline editor.
     in property <[TimelineClip]> timeline-clips;
-    in property <[string]> timeline-track-labels;  // one per track, top row first
+    in property <[TimelineTrack]> timeline-tracks;  // one per track, top row first
     // Height of a single timeline track row. One source of truth: the band
     // height, header rows, lane stripes, clip Y and every drag/reorder distance
     // are all derived from this (change it here and the whole timeline follows).
@@ -199,6 +209,15 @@ export component AppWindow inherits Window {
     callback export-cancel();                  // abort a running render
     callback import-cancel();                  // abort an in-flight media import
     callback add-track();                      // click "+ New track" → new empty row
+    // A track header's controls (gui/video/tracks.rs): the row, and its new
+    // state. Mute, lock and rename are undoable edits; solo is for listening.
+    callback track-muted(int, bool);
+    callback track-soloed(int, bool);
+    callback track-locked(int, bool);
+    callback track-renamed(int, string);
+    // The track whose name is being edited in place (double-click a name), or
+    // -1 for none.
+    in-out property <int> track-renaming: -1;
     // Undo and redo, one history per mode (gui/history.rs). The hints name the
     // step ("Undo trimming intro.mp4") and show on hover over the buttons.
     in property <bool> video-can-undo: false;
@@ -247,6 +266,12 @@ export component AppWindow inherits Window {
     // Which clip is selected (-1 = none). The model carries `selected` per
     // clip for drawing; this is the index the keyboard verbs act on.
     in property <int> timeline-selected: -1;
+    // The selected clip sits on a locked track. Its inspector controls, its
+    // box in the preview and Split stand down; gui/video/tracks.rs refuses
+    // the edits too, for anything that gets past this.
+    property <bool> insp-locked: root.timeline-selected >= 0
+        && root.timeline-selected < root.timeline-clips.length
+        && root.timeline-tracks[root.timeline-clips[root.timeline-selected].track].locked;
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
@@ -1562,6 +1587,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 eta := TouchArea {
+                                    enabled: !root.insp-locked;
                                     property <EditMode> mode: EditMode.none;
                                     property <float> cen-x: 0;   // canvas center (resize anchor)
                                     property <float> cen-y: 0;
@@ -1716,6 +1742,10 @@ export component AppWindow inherits Window {
                                 animate opacity { duration: 180ms; easing: ease-out; }
                                 init => { self.opacity = 1; }
                             }
+                            if root.inspector-name != "" && root.insp-locked : Text {
+                                text: "On a locked track. Unlock it to change this clip.";
+                                color: Theme.hint; font-size: 10px; wrap: word-wrap;
+                            }
                             if root.inspector-name != "" : VerticalLayout {
                                 // The spare height below the controls belongs to the filler
                                 // after this layout. Without this the layout took a share of
@@ -1727,17 +1757,18 @@ export component AppWindow inherits Window {
                                 animate opacity { duration: 180ms; easing: ease-out; }
                                 init => { self.opacity = 1; }
                                 spacing: 6px;
-                                InspSlider { label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
-                                if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
+                                if root.insp-has-audio : InspSlider { enabled: !root.insp-locked; label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
                                 // Speed, for clips with source time to stretch: videos and
                                 // image sequences, not stills.
                                 if root.insp-has-rate : VerticalLayout {
                                     spacing: 4px;
                                     Text { text: "Speed"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; }
                                     ComboBox {
+                                        enabled: !root.insp-locked;
                                         model: root.insp-speed-labels;
                                         current-index <=> root.insp-rate-index;
                                         accessible-label: "Speed";
@@ -1754,6 +1785,7 @@ export component AppWindow inherits Window {
                                         Text { text: root.insp-duration-s + " s"; color: #cfd6e2; font-size: 9.5px; font-weight: 600; vertical-alignment: center; }
                                     }
                                     SpinBox {
+                                        enabled: !root.insp-locked;
                                         minimum: 1;
                                         maximum: 3600;
                                         value <=> root.insp-duration-s;
@@ -1771,7 +1803,7 @@ export component AppWindow inherits Window {
                 Rectangle {
                     // Sized to the tracks + one "new track" drop row with breathing
                     // room below it (so a clip dragged onto the row stays fully visible).
-                    height: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
+                    height: Math.max(140px, root.timeline-tracks.length * root.track-h + 82px);
                     background: #101319;
                     border-width: 1px; border-color: Theme.line;
                     VerticalLayout {
@@ -1805,7 +1837,7 @@ export component AppWindow inherits Window {
                                     label: "Split";
                                     wide: true;
                                     hint: "Split the selected clip at the playhead (S)";
-                                    enabled: root.timeline-selected >= 0 && !root.modal-open() && !root.video-engine-down;
+                                    enabled: root.timeline-selected >= 0 && !root.insp-locked && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.timeline-split(); if (!split-chip.has-focus) { kbd.focus(); } }
                                 }
@@ -1861,34 +1893,126 @@ export component AppWindow inherits Window {
                             vertical-stretch: 1;
 
                             VerticalLayout {
-                                width: 94px;
-                                // Drag a header up/down to reorder tracks.
-                                for lbl[t] in root.timeline-track-labels : hdr := Rectangle {
+                                // Wide enough for a name and three buttons. The row
+                                // height stays Theme.track-h: the whole timeline is
+                                // built on it, and the lane beside this simply gets
+                                // narrower.
+                                width: 168px;
+                                for trk[t] in root.timeline-tracks : hdr := Rectangle {
+                                    // "Track 3" until it is named.
+                                    property <string> title: trk.name != "" ? trk.name : "Track " + (t + 1);
+                                    property <length> ddy: 0px;
+                                    // Three 20 px buttons, 2 px apart, 8 px in from the right.
+                                    property <length> buttons-w: 3 * 20px + 2 * 2px;
                                     height: root.track-h;
                                     background: hta.pressed ? Theme.card : #13161c;
                                     animate background { duration: 100ms; }
                                     border-width: 1px; border-color: #181c23;
-                                    property <length> ddy: 0px;
-                                    HorizontalLayout {
-                                        padding-left: 9px; spacing: 6px;
-                                        Text { text: "≡"; color: hta.has-hover ? Theme.muted2 : #5e6675; font-size: 11px; vertical-alignment: center; animate color { duration: 120ms; } }
-                                        Text { text: lbl; color: Theme.muted2; font-size: 9px; vertical-alignment: center; overflow: elide; }
-                                    }
-                                    hta := TouchArea {
-                                        mouse-cursor: ns-resize;
-                                        moved => { hdr.ddy = self.mouse-y - self.pressed-y; }
-                                        pointer-event(ev) => {
-                                            Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
-                                            if (ev.kind == PointerEventKind.down) { kbd.focus(); }
-                                            if (ev.kind == PointerEventKind.up) {
-                                                if (Math.abs(hdr.ddy / 1px) > 15) {
-                                                    root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-track-labels.length - 1));
-                                                }
-                                                hdr.ddy = 0px;
+                                    // The grip and the name: the part that reorders. It
+                                    // stops short of the buttons, so a click on a button
+                                    // never starts a drag. A locked track does not move.
+                                    grab := Rectangle {
+                                        x: 0;
+                                        width: parent.width - hdr.buttons-w - 8px - 6px;
+                                        height: parent.height;
+                                        HorizontalLayout {
+                                            padding-left: 9px; spacing: 6px;
+                                            Text { text: "≡"; color: hta.has-hover && !trk.locked ? Theme.muted2 : #5e6675; font-size: 11px; vertical-alignment: center; animate color { duration: 120ms; } }
+                                            Text {
+                                                text: hdr.title;
+                                                color: trk.muted ? Theme.hint : Theme.muted2;
+                                                font-size: 9px; vertical-alignment: center; overflow: elide;
+                                                horizontal-stretch: 1;
                                             }
-                                            // Reset stale drag on cancel, else the next plain
-                                            // click could fire a spurious reorder.
-                                            if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
+                                        }
+                                        hta := TouchArea {
+                                            mouse-cursor: trk.locked ? MouseCursor.default : MouseCursor.ns-resize;
+                                            moved => {
+                                                if (!trk.locked) {
+                                                    hdr.ddy = self.mouse-y - self.pressed-y;
+                                                }
+                                            }
+                                            pointer-event(ev) => {
+                                                Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                                if (ev.kind == PointerEventKind.down) { kbd.focus(); }
+                                                if (ev.kind == PointerEventKind.up) {
+                                                    if (Math.abs(hdr.ddy / 1px) > 15) {
+                                                        root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-tracks.length - 1));
+                                                    }
+                                                    hdr.ddy = 0px;
+                                                }
+                                                // Reset stale drag on cancel, else the next plain
+                                                // click could fire a spurious reorder.
+                                                if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
+                                            }
+                                            double-clicked => { root.track-renaming = t; }
+                                        }
+                                    }
+                                    // Renaming: an edit field over the name, seeded with it.
+                                    // Return or a click elsewhere keeps what was typed, Esc
+                                    // puts the name back, and an empty name means "Track N"
+                                    // again. A bare TextInput: the standard LineEdit is at
+                                    // least 32 px tall and 160 px wide, more than a header has.
+                                    if root.track-renaming == t : Rectangle {
+                                        x: 22px; y: 4px;
+                                        width: grab.width - 22px - 2px; height: parent.height - 8px;
+                                        background: Theme.well;
+                                        border-radius: 3px; border-width: 1px; border-color: Theme.accent;
+                                        name-edit := TextInput {
+                                            x: 4px; width: parent.width - 8px; height: parent.height;
+                                            text: trk.name;
+                                            color: Theme.ink;
+                                            font-size: 9.5px;
+                                            vertical-alignment: center;
+                                            single-line: true;
+                                            accessible-label: "Name of " + hdr.title;
+                                            init => { self.focus(); self.select-all(); }
+                                            // Once, whichever way the edit ends; a destroyed
+                                            // field's lost focus must not commit it again.
+                                            function finish(keep: bool) {
+                                                if (root.track-renaming != t) { return; }
+                                                if (keep) { root.track-renamed(t, self.text); }
+                                                root.track-renaming = -1;
+                                            }
+                                            accepted => { self.finish(true); kbd.focus(); }
+                                            key-pressed(e) => {
+                                                if (e.text == Key.Escape) {
+                                                    self.finish(false);
+                                                    kbd.focus();
+                                                    return accept;
+                                                }
+                                                return reject;
+                                            }
+                                            // Clicking away keeps the name rather than losing it,
+                                            // and leaves focus where the click put it.
+                                            changed has-focus => {
+                                                if (!self.has-focus) { self.finish(true); }
+                                            }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        x: parent.width - hdr.buttons-w - 8px;
+                                        y: (parent.height - 20px) / 2;
+                                        width: hdr.buttons-w;
+                                        height: 20px;
+                                        spacing: 2px;
+                                        TrackToggle {
+                                            label: "M";
+                                            on: trk.muted;
+                                            hint: (trk.muted ? "Unmute " : "Mute ") + hdr.title;
+                                            toggled => { root.track-muted(t, !trk.muted); kbd.focus(); }
+                                        }
+                                        TrackToggle {
+                                            label: "S";
+                                            on: trk.soloed;
+                                            hint: (trk.soloed ? "Stop soloing " : "Solo ") + hdr.title;
+                                            toggled => { root.track-soloed(t, !trk.soloed); kbd.focus(); }
+                                        }
+                                        TrackToggle {
+                                            label: "L";
+                                            on: trk.locked;
+                                            hint: (trk.locked ? "Unlock " : "Lock ") + hdr.title;
+                                            toggled => { root.track-locked(t, !trk.locked); kbd.focus(); }
                                         }
                                     }
                                 }
@@ -1944,7 +2068,12 @@ export component AppWindow inherits Window {
 
                                     // row background stripes (fixed; span the visible lane)
                                     VerticalLayout {
-                                        for lbl[t] in root.timeline-track-labels : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
+                                        // A muted track reads darker and a locked one flat grey,
+                                        // so the lane says so without a look at the gutter.
+                                        for trk[t] in root.timeline-tracks : Rectangle {
+                                            height: root.track-h; border-width: 1px; border-color: #181c23;
+                                            background: trk.locked ? Theme.well : (trk.muted ? #090b0f : transparent);
+                                        }
                                     }
 
                                     // clip blocks. The wrapper `blk` keeps the clip's MODEL
@@ -1960,8 +2089,12 @@ export component AppWindow inherits Window {
                                         accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
                                             + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
                                             + Math.round(clip.duration * 10) / 10 + " s long"
-                                            + (clip.rate > 0 && clip.rate != 1 ? ", plays at " + clip.rate + "×" : "");
+                                            + (clip.rate > 0 && clip.rate != 1 ? ", plays at " + clip.rate + "×" : "")
+                                            + (blk.locked ? ", locked" : "");
                                         accessible-item-selected: clip.selected;
+                                        // On a locked track: selectable, so the inspector can show
+                                        // it, but not moved, trimmed or removed from here.
+                                        property <bool> locked: root.timeline-tracks[clip.track].locked;
                                         x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                         // track 0 = GES layer 0 = top (both on-screen and composited).
                                         y: clip.track * root.track-h + 4px;
@@ -2028,12 +2161,12 @@ export component AppWindow inherits Window {
                                             // left scrim so the name stays legible over the thumb
                                             Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
                                             Text { text: clip.rate > 0 && clip.rate != 1 ? clip.name + "  " + clip.rate + "×" : clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
-                                            Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
-                                            Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                            Rectangle { x: 0; width: 5px; height: parent.height; background: blk.locked ? #ffffff40 : #ffffffcc; }
+                                            Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: blk.locked ? #ffffff40 : #ffffffcc; }
                                             // Delete affordance on the selected clip (also Delete key).
                                             // The visible square is 16 px; the hit area spans the
                                             // clip's full height and 24 px of width.
-                                            if clip.selected : Rectangle {
+                                            if clip.selected && !blk.locked : Rectangle {
                                                 x: parent.width - self.width - 3px; y: 3px;
                                                 width: 16px; height: 16px; border-radius: 5px;
                                                 background: del-ta.has-hover ? Theme.danger2 : #00000088;
@@ -2054,13 +2187,15 @@ export component AppWindow inherits Window {
                                         // body: slide (horizontal) + move to another track
                                         // (vertical) + select. Stable frame = blk.
                                         TouchArea {
-                                            mouse-cursor: move;
+                                            mouse-cursor: blk.locked ? MouseCursor.default : MouseCursor.move;
                                             moved => {
-                                                blk.dmode = DragMode.slide;
-                                                blk.ddx = self.mouse-x - self.pressed-x;
-                                                blk.ddy = self.mouse-y - self.pressed-y;
-                                                root.clip-dragging = true;
-                                                root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
+                                                if (!blk.locked) {
+                                                    blk.dmode = DragMode.slide;
+                                                    blk.ddx = self.mouse-x - self.pressed-x;
+                                                    blk.ddy = self.mouse-y - self.pressed-y;
+                                                    root.clip-dragging = true;
+                                                    root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
+                                                }
                                             }
                                             pointer-event(ev) => {
                                                 Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
@@ -2087,6 +2222,7 @@ export component AppWindow inherits Window {
                                         Rectangle {
                                             x: 0; width: 12px; height: parent.height; background: transparent;
                                             TouchArea {
+                                                enabled: !blk.locked;
                                                 mouse-cursor: ew-resize;
                                                 moved => { blk.dmode = DragMode.trim-left; blk.ddx = self.mouse-x - self.pressed-x; }
                                                 pointer-event(ev) => {
@@ -2106,6 +2242,7 @@ export component AppWindow inherits Window {
                                         Rectangle {
                                             x: parent.width - 12px; width: 12px; height: parent.height; background: transparent;
                                             TouchArea {
+                                                enabled: !blk.locked;
                                                 mouse-cursor: ew-resize;
                                                 moved => { blk.dmode = DragMode.trim-right; blk.ddx = self.mouse-x - self.pressed-x; }
                                                 pointer-event(ev) => {
@@ -2160,8 +2297,8 @@ export component AppWindow inherits Window {
                                     // through. A dashed-look border keeps it reading as a drop
                                     // zone. Sits above the scrollbar with room to spare.
                                     Rectangle {
-                                        property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                        y: root.timeline-track-labels.length * root.track-h + 4px;
+                                        property <bool> active: root.clip-drag-target-row >= root.timeline-tracks.length;
+                                        y: root.timeline-tracks.length * root.track-h + 4px;
                                         animate y { duration: 160ms; easing: ease-out; }
                                         x: 4px; width: parent.width - 8px; height: 26px;
                                         border-radius: 7px;
@@ -2203,8 +2340,8 @@ export component AppWindow inherits Window {
         // It's purely a visual affordance: the drop target is decided by drag distance,
         // so the banner doesn't need to sit directly under the cursor.
         if root.clip-dragging : Rectangle {
-            property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-            property <length> band-h: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
+            property <bool> active: root.clip-drag-target-row >= root.timeline-tracks.length;
+            property <length> band-h: Math.max(140px, root.timeline-tracks.length * root.track-h + 82px);
             // Entrance: fade + rise so the banner glides in instead of popping.
             property <length> rise: 10px;
             opacity: 0;

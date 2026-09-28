@@ -5,7 +5,7 @@
 //! says what could not be found. Opening replaces the timeline, so a timeline
 //! with anything on it asks first.
 
-use super::{ClipKind, TimelineClip, VideoState};
+use super::{ClipKind, TimelineClip, TimelineTrack, VideoState};
 use crate::gui::{name_list, show_error, show_info, AppWindow, VideoAsset};
 use slint::{ComponentHandle, Image, Model, SharedString, VecModel};
 use std::cell::RefCell;
@@ -26,6 +26,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState, im: &super::import::ImportSt
         let ui_weak = ui_weak.clone();
         let project_slot = st.project.clone();
         let seq_by_path = im.seq_by_path.clone();
+        let track_rows = st.tracks.clone();
         let current = current.clone();
         ui.on_video_save_project(move |ask_where| {
             let Some(ui) = ui_weak.upgrade() else {
@@ -51,6 +52,9 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState, im: &super::import::ImportSt
                         .find(|s| s.uri().map(|u| u == rec.uri).unwrap_or(false))
                         .cloned();
                 }
+                // Names and locks live only here, and the engine silences
+                // solo too, so the table comes from the rows: solo left out.
+                doc.tracks = super::tracks::records(&super::tracks::rows_of(&track_rows));
                 doc
             };
             let existing = current.borrow().clone();
@@ -228,19 +232,13 @@ fn restore_models(
         .collect();
     st.tl_clips.set_vec(rows);
 
-    // Tracks: as many as the deepest clip uses, and never fewer than the two
-    // an empty project starts with.
-    let needed = records
-        .iter()
-        .map(|(_, r)| r.track + 1)
-        .max()
-        .unwrap_or(0)
-        .max(2);
-    st.tracks.set_vec(
-        (0..needed)
-            .map(|i| SharedString::from(format!("Track {}", i + 1)))
-            .collect::<Vec<_>>(),
-    );
+    // Tracks: the saved table, reaching the deepest clip, and then the engine
+    // hears the saved mutes.
+    let deepest = records.iter().map(|(_, r)| r.track + 1).max().unwrap_or(0);
+    st.tracks.set_vec(track_rows_on_open(&doc.tracks, deepest));
+    if let Some(p) = st.project.borrow_mut().as_mut() {
+        super::tracks::push_mutes(p, &st.tracks);
+    }
 
     // Media bin: one row per distinct source, and the sequence specs come back
     // with it so a bin click re-adds the sequence rather than a single still.
@@ -290,6 +288,19 @@ fn restore_models(
         .collect();
     st.waves.fill(ui.as_weak(), sources);
     spawn_thumbnails(ui.as_weak(), records);
+}
+
+/// The track rows a project opens with: its saved table, padded with unnamed
+/// rows to reach the deepest clip (`deepest` is that clip's track plus one)
+/// and to the two an empty project starts with. The largest of the three
+/// wins: a table shorter than the deepest clip would otherwise lose a track,
+/// and a file from 2.13 or earlier has no table at all. Solo is never saved,
+/// so every row opens unsoloed.
+fn track_rows_on_open(table: &[kuvatin_video::TrackRecord], deepest: usize) -> Vec<TimelineTrack> {
+    let needed = table.len().max(deepest).max(2);
+    (0..needed)
+        .map(|i| super::tracks::row(&table.get(i).cloned().unwrap_or_default(), false))
+        .collect()
 }
 
 /// Decode one thumbnail per clip on a worker and drop each into its row (and
@@ -363,7 +374,7 @@ pub(super) struct VideoHandles {
     pub(super) assets: Rc<VecModel<VideoAsset>>,
     pub(super) bin_paths: Rc<RefCell<Vec<PathBuf>>>,
     pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
-    pub(super) tracks: Rc<VecModel<SharedString>>,
+    pub(super) tracks: Rc<VecModel<TimelineTrack>>,
     pub(super) sel_idx: Rc<std::cell::Cell<i32>>,
     pub(super) history: super::undo::TimelineHistory,
     pub(super) waves: super::waves::Waves,
@@ -399,6 +410,49 @@ mod tests {
         // A query on a plain file URI must not be read as part of the
         // extension: `.png?x=1` is still a PNG.
         assert_eq!(kind_of("file:///C:/shots/logo.png?x=1"), ClipKind::Image);
+    }
+
+    fn named(name: &str) -> kuvatin_video::TrackRecord {
+        kuvatin_video::TrackRecord {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// The saved table decides, when it is the longest of the three.
+    #[test]
+    fn a_project_opens_with_its_saved_tracks() {
+        let rows = track_rows_on_open(&[named("A"), named("B"), named("C")], 1);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["A", "B", "C"]);
+    }
+
+    /// A table shorter than the deepest clip would lose a track: the clip
+    /// wins, and the rows past the table are unnamed.
+    #[test]
+    fn the_deepest_clip_outranks_a_shorter_table() {
+        let rows = track_rows_on_open(&[named("A")], 4);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].name.as_str(), "A");
+        assert_eq!(rows[3], TimelineTrack::default());
+    }
+
+    /// A file with no table and a clip on the top track only still opens
+    /// with the two tracks every project starts with: 2.13 and earlier.
+    #[test]
+    fn a_project_never_opens_with_fewer_than_two_tracks() {
+        assert_eq!(track_rows_on_open(&[], 1).len(), 2);
+        assert_eq!(track_rows_on_open(&[], 0).len(), 2);
+    }
+
+    /// Solo is not saved, so no key a file could carry brings it back.
+    #[test]
+    fn no_track_opens_soloed() {
+        let text = "version = 1\ncanvas_w = 1280\ncanvas_h = 720\n\n[[tracks]]\nname = \"A\"\nsoloed = true\n";
+        let doc: kuvatin_video::ProjectFile = toml::from_str(text).expect("a project");
+        let rows = track_rows_on_open(&doc.tracks, 0);
+        assert!(rows.iter().all(|r| !r.soloed));
+        assert_eq!(rows[0].name.as_str(), "A");
     }
 
     #[test]

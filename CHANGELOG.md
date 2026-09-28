@@ -15,6 +15,18 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **Track controls.** Each track's header has M, S and L buttons. **Mute**
+  silences the track's sound in the preview and in the export; its pictures
+  still show. **Solo** plays only the soloed tracks while you listen, and
+  switches itself off when an export starts, so a forgotten solo cannot
+  silence the file. **Lock** stops any change to the clips on the track, by
+  mouse or keyboard, until it is unlocked. Double-click a track's name to
+  rename it. Names, mutes and locks are undoable and saved with the project;
+  solo is neither. A project with named, muted or locked tracks opens in 2.13
+  and earlier with its clips as they were and every track unnamed, audible and
+  unlocked.
+
 ## [2.13.0] - 2026-09-23
 The video editor learns to cut. The S key splits a clip at the playhead,
 comma and period step a frame at a time, and J, K and L shuttle. A clip can
