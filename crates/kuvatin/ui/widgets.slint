@@ -570,20 +570,25 @@ export component InspSlider inherits Rectangle {
     in property <float> min: 0;
     in property <float> max: 100;
     in property <string> suffix: "";
+    // Off for a clip on a locked track: it shows its value and takes no input.
+    in property <bool> enabled: true;
     in-out property <float> value: 0;
     callback changed();
     height: 38px;
+    opacity: root.enabled ? 1 : 0.45;
     accessible-role: slider;
     accessible-label: root.label;
     accessible-value: Math.round(root.value) + root.suffix;
+    accessible-enabled: root.enabled;
     property <float> frac: (root.max - root.min) > 0
         ? Math.clamp((root.value - root.min) / (root.max - root.min), 0, 1) : 0;
     border-radius: 6px;
-    border-width: ifs.has-focus ? 1px : 0px;
+    border-width: ifs.has-focus && root.enabled ? 1px : 0px;
     border-color: Theme.accent;
     // Arrows move by a hundredth of the range, up/down by a tenth — the same
     // proportions whatever the transform's units are.
     ifs := FocusScope {
+        enabled: root.enabled;
         function step(frac-of-range: float) {
             root.value = Math.clamp(
                 root.value + (root.max - root.min) * frac-of-range, root.min, root.max);
@@ -631,6 +636,7 @@ export component InspSlider inherits Rectangle {
                 animate background { duration: 100ms; }
             }
             kta := TouchArea {
+                enabled: root.enabled;
                 function emit(mx: length) {
                     root.value = root.min + Math.clamp(mx / self.width, 0, 1) * (root.max - root.min);
                     root.changed();

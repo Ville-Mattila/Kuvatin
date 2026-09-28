@@ -266,6 +266,12 @@ export component AppWindow inherits Window {
     // Which clip is selected (-1 = none). The model carries `selected` per
     // clip for drawing; this is the index the keyboard verbs act on.
     in property <int> timeline-selected: -1;
+    // The selected clip sits on a locked track. Its inspector controls, its
+    // box in the preview and Split stand down; gui/video/tracks.rs refuses
+    // the edits too, for anything that gets past this.
+    property <bool> insp-locked: root.timeline-selected >= 0
+        && root.timeline-selected < root.timeline-clips.length
+        && root.timeline-tracks[root.timeline-clips[root.timeline-selected].track].locked;
     callback timeline-seek-time(float);       // seconds (from ruler/lane click)
     callback timeline-clip-dropped(int, float, int); // clip index, delta seconds (slide), delta rows (track change)
     callback timeline-clip-trimmed(int, int, float); // clip index, edge (-1 left / +1 right), delta seconds
@@ -1581,6 +1587,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 eta := TouchArea {
+                                    enabled: !root.insp-locked;
                                     property <EditMode> mode: EditMode.none;
                                     property <float> cen-x: 0;   // canvas center (resize anchor)
                                     property <float> cen-y: 0;
@@ -1735,6 +1742,10 @@ export component AppWindow inherits Window {
                                 animate opacity { duration: 180ms; easing: ease-out; }
                                 init => { self.opacity = 1; }
                             }
+                            if root.inspector-name != "" && root.insp-locked : Text {
+                                text: "On a locked track. Unlock it to change this clip.";
+                                color: Theme.hint; font-size: 10px; wrap: word-wrap;
+                            }
                             if root.inspector-name != "" : VerticalLayout {
                                 // The spare height below the controls belongs to the filler
                                 // after this layout. Without this the layout took a share of
@@ -1746,17 +1757,18 @@ export component AppWindow inherits Window {
                                 animate opacity { duration: 180ms; easing: ease-out; }
                                 init => { self.opacity = 1; }
                                 spacing: 6px;
-                                InspSlider { label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
-                                InspSlider { label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
-                                if root.insp-has-audio : InspSlider { label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Position X"; min: -root.canvas-w; max: root.canvas-w; suffix: "px"; value <=> root.insp-posx; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Position Y"; min: -root.canvas-h; max: root.canvas-h; suffix: "px"; value <=> root.insp-posy; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Scale"; min: root.insp-scale-min; max: root.insp-scale-max; suffix: "%"; value <=> root.insp-scale; changed => { root.inspector-changed(); } }
+                                InspSlider { enabled: !root.insp-locked; label: "Opacity"; min: 0; max: 100; suffix: "%"; value <=> root.insp-alpha; changed => { root.inspector-changed(); } }
+                                if root.insp-has-audio : InspSlider { enabled: !root.insp-locked; label: "Volume"; min: 0; max: 100; suffix: "%"; value <=> root.insp-volume; changed => { root.inspector-changed(); } }
                                 // Speed, for clips with source time to stretch: videos and
                                 // image sequences, not stills.
                                 if root.insp-has-rate : VerticalLayout {
                                     spacing: 4px;
                                     Text { text: "Speed"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; }
                                     ComboBox {
+                                        enabled: !root.insp-locked;
                                         model: root.insp-speed-labels;
                                         current-index <=> root.insp-rate-index;
                                         accessible-label: "Speed";
@@ -1773,6 +1785,7 @@ export component AppWindow inherits Window {
                                         Text { text: root.insp-duration-s + " s"; color: #cfd6e2; font-size: 9.5px; font-weight: 600; vertical-alignment: center; }
                                     }
                                     SpinBox {
+                                        enabled: !root.insp-locked;
                                         minimum: 1;
                                         maximum: 3600;
                                         value <=> root.insp-duration-s;
@@ -1824,7 +1837,7 @@ export component AppWindow inherits Window {
                                     label: "Split";
                                     wide: true;
                                     hint: "Split the selected clip at the playhead (S)";
-                                    enabled: root.timeline-selected >= 0 && !root.modal-open() && !root.video-engine-down;
+                                    enabled: root.timeline-selected >= 0 && !root.insp-locked && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.timeline-split(); if (!split-chip.has-focus) { kbd.focus(); } }
                                 }
@@ -2076,8 +2089,12 @@ export component AppWindow inherits Window {
                                         accessible-label: clip.name + " \u{2014} track " + (clip.track + 1)
                                             + ", starts " + Math.round(clip.start * 10) / 10 + " s, "
                                             + Math.round(clip.duration * 10) / 10 + " s long"
-                                            + (clip.rate > 0 && clip.rate != 1 ? ", plays at " + clip.rate + "×" : "");
+                                            + (clip.rate > 0 && clip.rate != 1 ? ", plays at " + clip.rate + "×" : "")
+                                            + (blk.locked ? ", locked" : "");
                                         accessible-item-selected: clip.selected;
+                                        // On a locked track: selectable, so the inspector can show
+                                        // it, but not moved, trimmed or removed from here.
+                                        property <bool> locked: root.timeline-tracks[clip.track].locked;
                                         x: (clip.start * root.timeline-pps) * 1px - lane.scroll;
                                         // track 0 = GES layer 0 = top (both on-screen and composited).
                                         y: clip.track * root.track-h + 4px;
@@ -2144,12 +2161,12 @@ export component AppWindow inherits Window {
                                             // left scrim so the name stays legible over the thumb
                                             Rectangle { x: 0; width: 62%; background: @linear-gradient(90deg, #000000bb 0%, #00000000 100%); }
                                             Text { text: clip.rate > 0 && clip.rate != 1 ? clip.name + "  " + clip.rate + "×" : clip.name; color: white; font-size: 9px; font-weight: 700; x: 9px; y: (parent.height - self.height) / 2; }
-                                            Rectangle { x: 0; width: 5px; height: parent.height; background: #ffffffcc; }
-                                            Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: #ffffffcc; }
+                                            Rectangle { x: 0; width: 5px; height: parent.height; background: blk.locked ? #ffffff40 : #ffffffcc; }
+                                            Rectangle { x: parent.width - 5px; width: 5px; height: parent.height; background: blk.locked ? #ffffff40 : #ffffffcc; }
                                             // Delete affordance on the selected clip (also Delete key).
                                             // The visible square is 16 px; the hit area spans the
                                             // clip's full height and 24 px of width.
-                                            if clip.selected : Rectangle {
+                                            if clip.selected && !blk.locked : Rectangle {
                                                 x: parent.width - self.width - 3px; y: 3px;
                                                 width: 16px; height: 16px; border-radius: 5px;
                                                 background: del-ta.has-hover ? Theme.danger2 : #00000088;
@@ -2170,13 +2187,15 @@ export component AppWindow inherits Window {
                                         // body: slide (horizontal) + move to another track
                                         // (vertical) + select. Stable frame = blk.
                                         TouchArea {
-                                            mouse-cursor: move;
+                                            mouse-cursor: blk.locked ? MouseCursor.default : MouseCursor.move;
                                             moved => {
-                                                blk.dmode = DragMode.slide;
-                                                blk.ddx = self.mouse-x - self.pressed-x;
-                                                blk.ddy = self.mouse-y - self.pressed-y;
-                                                root.clip-dragging = true;
-                                                root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
+                                                if (!blk.locked) {
+                                                    blk.dmode = DragMode.slide;
+                                                    blk.ddx = self.mouse-x - self.pressed-x;
+                                                    blk.ddy = self.mouse-y - self.pressed-y;
+                                                    root.clip-dragging = true;
+                                                    root.clip-drag-target-row = clip.track + Math.round(blk.ddy / root.track-h);
+                                                }
                                             }
                                             pointer-event(ev) => {
                                                 Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
@@ -2203,6 +2222,7 @@ export component AppWindow inherits Window {
                                         Rectangle {
                                             x: 0; width: 12px; height: parent.height; background: transparent;
                                             TouchArea {
+                                                enabled: !blk.locked;
                                                 mouse-cursor: ew-resize;
                                                 moved => { blk.dmode = DragMode.trim-left; blk.ddx = self.mouse-x - self.pressed-x; }
                                                 pointer-event(ev) => {
@@ -2222,6 +2242,7 @@ export component AppWindow inherits Window {
                                         Rectangle {
                                             x: parent.width - 12px; width: 12px; height: parent.height; background: transparent;
                                             TouchArea {
+                                                enabled: !blk.locked;
                                                 mouse-cursor: ew-resize;
                                                 moved => { blk.dmode = DragMode.trim-right; blk.ddx = self.mouse-x - self.pressed-x; }
                                                 pointer-event(ev) => {
