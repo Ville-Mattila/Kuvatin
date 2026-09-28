@@ -104,6 +104,15 @@ pub(super) fn effective_mutes(rows: &[TimelineTrack]) -> Vec<bool> {
         .collect()
 }
 
+/// Whether the track at `t` refuses edits. A track past the end, or no track
+/// at all (-1), is not locked: a new bottom track never is.
+pub(super) fn locked(rows: &[TimelineTrack], t: i32) -> bool {
+    usize::try_from(t)
+        .ok()
+        .and_then(|t| rows.get(t))
+        .is_some_and(|r| r.locked)
+}
+
 /// The rows as they are stored and undone: name, mute and lock. Solo is left
 /// out.
 pub(super) fn records(rows: &[TimelineTrack]) -> Vec<TrackRecord> {
@@ -225,6 +234,15 @@ pub(super) mod tests {
         );
         assert_eq!(row(&got[0], true), rows[0], "and a row comes back from it");
         assert!(!row(&got[0], false).soloed);
+    }
+
+    #[test]
+    fn only_a_row_that_exists_can_be_locked() {
+        let rows = [trk("", false, false, true), trk("", false, false, false)];
+        assert!(locked(&rows, 0));
+        assert!(!locked(&rows, 1));
+        assert!(!locked(&rows, 2), "a new bottom track");
+        assert!(!locked(&rows, -1), "no track");
     }
 
     #[test]

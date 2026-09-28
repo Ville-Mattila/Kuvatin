@@ -724,6 +724,60 @@ export component TimelineChip inherits Rectangle {
     }
 }
 
+// One of a track header's M, S and L buttons: a 20 px square that lights up
+// while it is on. Its hint ("Mute Dialogue") shows on hover and is its
+// accessible label; to assistive technology it is a checkable button. It
+// does not take keyboard focus; the header hands focus back to the window's
+// key scope after a click, as the timeline chips do.
+export component TrackToggle inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> on;
+    callback toggled();
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    background: root.on ? Theme.accent2 : (ta.has-hover ? Theme.hover : transparent);
+    animate background { duration: 110ms; }
+    accessible-role: button;
+    accessible-label: root.hint;
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-action-default => { root.toggled(); }
+    // The hint flips under the pointer after a click ("Unmute Dialogue").
+    changed hint => {
+        if (ta.has-hover) {
+            Tooltip.text = root.hint;
+        }
+    }
+    Text {
+        text: root.label;
+        color: root.on ? Theme.on-accent : (ta.has-hover ? Theme.ink2 : #5e6675);
+        font-size: 9.5px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        // A click is a gesture too: undo waits for the button to come up.
+        pointer-event(ev) => {
+            Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+        }
+        clicked => { root.toggled(); }
+        changed has-hover => {
+            if (self.has-hover) {
+                Tooltip.text = root.hint;
+                Tooltip.left = root.absolute-position.x;
+                Tooltip.top = root.absolute-position.y + root.height + 4px;
+                Tooltip.shown = true;
+            } else if (Tooltip.text == root.hint) {
+                Tooltip.shown = false;
+            }
+        }
+    }
+}
+
 // The one tooltip in the window. Slint has no tooltip element: a control with
 // a hint writes its text and position here while it is hovered, and
 // `TooltipLayer`, the last thing the window draws, shows it above everything.

@@ -1,6 +1,7 @@
 //! Timeline editing: selection + inspector, slide / trim / move-to-track,
 //! magnetic snapping, track rows and clip removal.
 
+use super::tracks;
 use super::undo::{Recorder, StepKind, Subject};
 use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT, SPEEDS};
 use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip, TimelineTrack};
@@ -209,33 +210,45 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         });
     }
 
-    // Reorder tracks by dragging a header: move the GES layer, then resync
-    // every clip's track from GES (a reorder shifts several layers' indices).
+    // Reorder tracks by dragging a header: move the row, and the GES layer
+    // with it, then resync every clip's track from GES (a reorder shifts
+    // several layers' indices). The row carries the track's name, mute, solo
+    // and lock. Before any clip exists there is no engine, only rows to move.
     {
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
+        let track_rows = video_tracks.clone();
         let rec = rec.clone();
         ui.on_track_reordered(move |from, to| {
-            if from == to {
+            let rows = tracks::rows_of(&track_rows);
+            let (Ok(f), Ok(t)) = (usize::try_from(from), usize::try_from(to)) else {
+                return;
+            };
+            // A locked track does not move; one next to it still can, since
+            // that changes nothing on it but its place.
+            if f == t || f >= rows.len() || t >= rows.len() || tracks::locked(&rows, from) {
                 return;
             }
             let mut slot = project_slot.borrow_mut();
-            let Some(p) = slot.as_mut() else {
-                return;
-            };
-            let before = rec.before(Some(&*p));
-            p.move_track(from as usize, to as usize);
-            for idx in 0..tl_clips.row_count() {
-                if let Some(mut row) = tl_clips.row_data(idx) {
-                    if let Some(t) = p.clip_track(&kuvatin_video::ClipId(row.id.to_string())) {
-                        if row.track != t as i32 {
-                            row.track = t as i32;
-                            tl_clips.set_row_data(idx, row);
+            let before = rec.before(slot.as_ref());
+            let moved = rows[f].clone();
+            track_rows.remove(f);
+            track_rows.insert(t, moved);
+            if let Some(p) = slot.as_mut() {
+                p.move_track(f, t);
+                for idx in 0..tl_clips.row_count() {
+                    if let Some(mut row) = tl_clips.row_data(idx) {
+                        if let Some(t) = p.clip_track(&kuvatin_video::ClipId(row.id.to_string())) {
+                            if row.track != t as i32 {
+                                row.track = t as i32;
+                                tl_clips.set_row_data(idx, row);
+                            }
                         }
                     }
                 }
+                tracks::push_mutes(p, &track_rows);
             }
-            rec.record(Some(&*p), StepKind::ReorderTracks, None, before);
+            rec.record(slot.as_ref(), StepKind::ReorderTracks, None, before);
         });
     }
 

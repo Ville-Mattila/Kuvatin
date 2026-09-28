@@ -4,7 +4,7 @@ import { Modal } from "modal.slint";
 import {
     QualitySlider, Card, SecondaryButton, DialogButton, RemoveButton, FieldLabel, CropHandle,
     WinButton, SegToggle, Splitter, NumberDropdown, PillButton, Scrubber, InspSlider,
-    TimelineChip, TooltipLayer, Gesture
+    TimelineChip, TrackToggle, TooltipLayer, Gesture
 } from "widgets.slint";
 export { ProgressWindow } from "progress.slint";
 
@@ -1877,34 +1877,83 @@ export component AppWindow inherits Window {
                             vertical-stretch: 1;
 
                             VerticalLayout {
-                                width: 94px;
-                                // Drag a header up/down to reorder tracks.
+                                // Wide enough for a name and three buttons. The row
+                                // height stays Theme.track-h: the whole timeline is
+                                // built on it, and the lane beside this simply gets
+                                // narrower.
+                                width: 168px;
                                 for trk[t] in root.timeline-tracks : hdr := Rectangle {
+                                    // "Track 3" until it is named.
+                                    property <string> title: trk.name != "" ? trk.name : "Track " + (t + 1);
+                                    property <length> ddy: 0px;
+                                    // Three 20 px buttons, 2 px apart, 8 px in from the right.
+                                    property <length> buttons-w: 3 * 20px + 2 * 2px;
                                     height: root.track-h;
                                     background: hta.pressed ? Theme.card : #13161c;
                                     animate background { duration: 100ms; }
                                     border-width: 1px; border-color: #181c23;
-                                    property <length> ddy: 0px;
-                                    HorizontalLayout {
-                                        padding-left: 9px; spacing: 6px;
-                                        Text { text: "≡"; color: hta.has-hover ? Theme.muted2 : #5e6675; font-size: 11px; vertical-alignment: center; animate color { duration: 120ms; } }
-                                        Text { text: trk.name != "" ? trk.name : "Track " + (t + 1); color: Theme.muted2; font-size: 9px; vertical-alignment: center; overflow: elide; }
-                                    }
-                                    hta := TouchArea {
-                                        mouse-cursor: ns-resize;
-                                        moved => { hdr.ddy = self.mouse-y - self.pressed-y; }
-                                        pointer-event(ev) => {
-                                            Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
-                                            if (ev.kind == PointerEventKind.down) { kbd.focus(); }
-                                            if (ev.kind == PointerEventKind.up) {
-                                                if (Math.abs(hdr.ddy / 1px) > 15) {
-                                                    root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-tracks.length - 1));
-                                                }
-                                                hdr.ddy = 0px;
+                                    // The grip and the name: the part that reorders. It
+                                    // stops short of the buttons, so a click on a button
+                                    // never starts a drag. A locked track does not move.
+                                    grab := Rectangle {
+                                        x: 0;
+                                        width: parent.width - hdr.buttons-w - 8px - 6px;
+                                        height: parent.height;
+                                        HorizontalLayout {
+                                            padding-left: 9px; spacing: 6px;
+                                            Text { text: "≡"; color: hta.has-hover && !trk.locked ? Theme.muted2 : #5e6675; font-size: 11px; vertical-alignment: center; animate color { duration: 120ms; } }
+                                            Text {
+                                                text: hdr.title;
+                                                color: trk.muted ? Theme.hint : Theme.muted2;
+                                                font-size: 9px; vertical-alignment: center; overflow: elide;
+                                                horizontal-stretch: 1;
                                             }
-                                            // Reset stale drag on cancel, else the next plain
-                                            // click could fire a spurious reorder.
-                                            if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
+                                        }
+                                        hta := TouchArea {
+                                            mouse-cursor: trk.locked ? MouseCursor.default : MouseCursor.ns-resize;
+                                            moved => {
+                                                if (!trk.locked) {
+                                                    hdr.ddy = self.mouse-y - self.pressed-y;
+                                                }
+                                            }
+                                            pointer-event(ev) => {
+                                                Gesture.held = ev.kind == PointerEventKind.down || (Gesture.held && ev.kind != PointerEventKind.up && ev.kind != PointerEventKind.cancel);
+                                                if (ev.kind == PointerEventKind.down) { kbd.focus(); }
+                                                if (ev.kind == PointerEventKind.up) {
+                                                    if (Math.abs(hdr.ddy / 1px) > 15) {
+                                                        root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-tracks.length - 1));
+                                                    }
+                                                    hdr.ddy = 0px;
+                                                }
+                                                // Reset stale drag on cancel, else the next plain
+                                                // click could fire a spurious reorder.
+                                                if (ev.kind == PointerEventKind.cancel) { hdr.ddy = 0px; }
+                                            }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        x: parent.width - hdr.buttons-w - 8px;
+                                        y: (parent.height - 20px) / 2;
+                                        width: hdr.buttons-w;
+                                        height: 20px;
+                                        spacing: 2px;
+                                        TrackToggle {
+                                            label: "M";
+                                            on: trk.muted;
+                                            hint: (trk.muted ? "Unmute " : "Mute ") + hdr.title;
+                                            toggled => { root.track-muted(t, !trk.muted); kbd.focus(); }
+                                        }
+                                        TrackToggle {
+                                            label: "S";
+                                            on: trk.soloed;
+                                            hint: (trk.soloed ? "Stop soloing " : "Solo ") + hdr.title;
+                                            toggled => { root.track-soloed(t, !trk.soloed); kbd.focus(); }
+                                        }
+                                        TrackToggle {
+                                            label: "L";
+                                            on: trk.locked;
+                                            hint: (trk.locked ? "Unlock " : "Lock ") + hdr.title;
+                                            toggled => { root.track-locked(t, !trk.locked); kbd.focus(); }
                                         }
                                     }
                                 }
@@ -1960,7 +2009,12 @@ export component AppWindow inherits Window {
 
                                     // row background stripes (fixed; span the visible lane)
                                     VerticalLayout {
-                                        for trk[t] in root.timeline-tracks : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
+                                        // A muted track reads darker and a locked one flat grey,
+                                        // so the lane says so without a look at the gutter.
+                                        for trk[t] in root.timeline-tracks : Rectangle {
+                                            height: root.track-h; border-width: 1px; border-color: #181c23;
+                                            background: trk.locked ? Theme.well : (trk.muted ? #090b0f : transparent);
+                                        }
                                     }
 
                                     // clip blocks. The wrapper `blk` keeps the clip's MODEL
