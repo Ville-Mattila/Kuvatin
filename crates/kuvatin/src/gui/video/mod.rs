@@ -353,16 +353,26 @@ pub(super) fn wire(
                     return;
                 };
                 // Apply the latest inspector transform (if any) then repaint,
-                // both coalesced to one commit + one seek per tick.
+                // both coalesced to one commit + one seek per tick. A clip on
+                // a locked track keeps its transform and the value is
+                // dropped: its sliders and preview box stand down, so only a
+                // value stashed just before the lock went on gets here.
                 if let Some((id, l)) = pending_xform.borrow_mut().take() {
-                    let before = rec.before(Some(&*project));
-                    project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
-                    rec.record(
-                        Some(&*project),
-                        undo::StepKind::Transform,
-                        Some(undo::Subject::Clip(id.clone())),
-                        before,
-                    );
+                    let track = rec
+                        .tl_clips
+                        .iter()
+                        .find(|r| r.id.as_str() == id)
+                        .map_or(-1, |r| r.track);
+                    if !tracks::locked(&tracks::rows_of(&rec.tracks), track) {
+                        let before = rec.before(Some(&*project));
+                        project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
+                        rec.record(
+                            Some(&*project),
+                            undo::StepKind::Transform,
+                            Some(undo::Subject::Clip(id.clone())),
+                            before,
+                        );
+                    }
                 }
                 // Scrub target: one (keyframe) seek per tick during a drag,
                 // a frame-accurate one on release.
@@ -521,14 +531,6 @@ fn add_to_timeline(
     rec: &undo::Recorder,
     waves: &waves::Waves,
 ) {
-    if project_slot.borrow().is_none() {
-        *project_slot.borrow_mut() = make_project(ui_weak);
-    }
-    let mut slot = project_slot.borrow_mut();
-    let Some(project) = slot.as_mut() else {
-        return;
-    };
-    let before = rec.before(Some(&*project));
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -537,7 +539,20 @@ fn add_to_timeline(
     let img_dur = is_img.then(|| std::time::Duration::from_secs(5));
     // GES composites lower layer indices ON TOP, so images (overlays) go on
     // layer 0 and videos on layer 1 (the base, underneath).
-    let track = if is_img { 0 } else { 1 };
+    let track: usize = if is_img { 0 } else { 1 };
+    if let Some(ui) = ui_weak.upgrade() {
+        if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[track as i32]) {
+            return;
+        }
+    }
+    if project_slot.borrow().is_none() {
+        *project_slot.borrow_mut() = make_project(ui_weak);
+    }
+    let mut slot = project_slot.borrow_mut();
+    let Some(project) = slot.as_mut() else {
+        return;
+    };
+    let before = rec.before(Some(&*project));
     match project.append_clip(path, track, img_dur) {
         Ok(info) => {
             let name: SharedString = path
@@ -603,6 +618,14 @@ fn add_sequence_to_timeline(
     thumb: Image,
     rec: &undo::Recorder,
 ) {
+    // Sequences are footage, not overlays: the base video track (GES
+    // composites lower layer indices on top, so videos live on 1).
+    let track: usize = 1;
+    if let Some(ui) = ui_weak.upgrade() {
+        if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[track as i32]) {
+            return;
+        }
+    }
     if project_slot.borrow().is_none() {
         *project_slot.borrow_mut() = make_project(ui_weak);
     }
@@ -613,9 +636,7 @@ fn add_sequence_to_timeline(
     let before = rec.before(Some(&*project));
     let added = spec
         .uri()
-        // Sequences are footage, not overlays: the base video track (GES
-        // composites lower layer indices on top, so videos live on 1).
-        .and_then(|uri| project.append_clip_uri(&uri, 1, None));
+        .and_then(|uri| project.append_clip_uri(&uri, track, None));
     match added {
         Ok(info) => {
             tl_clips.push(TimelineClip {

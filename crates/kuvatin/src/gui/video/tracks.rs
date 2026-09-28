@@ -113,6 +113,38 @@ pub(super) fn locked(rows: &[TimelineTrack], t: i32) -> bool {
         .is_some_and(|r| r.locked)
 }
 
+/// The first of `touched` that is locked: the track an edit touching those
+/// tracks must be refused for. A drop touches the track the clip is on and
+/// the one it would land on.
+pub(super) fn first_locked(rows: &[TimelineTrack], touched: &[i32]) -> Option<usize> {
+    touched
+        .iter()
+        .copied()
+        .find(|&t| locked(rows, t))
+        .map(|t| t as usize)
+}
+
+/// What an edit refused on the locked track `t` says.
+pub(super) fn refusal(rows: &[TimelineTrack], t: usize) -> (String, String) {
+    (
+        format!("{} is locked", label(&records(rows), t)),
+        "Unlock the track to change what is on it.".into(),
+    )
+}
+
+/// Refuse an edit that touches a locked track, saying which track and how to
+/// get past it. True when the edit must not go ahead. A locked track's clips
+/// lose their handles on screen, so this is for the keyboard, and for a
+/// click that got there first.
+pub(super) fn refuse_locked(ui: &AppWindow, rows: &[TimelineTrack], touched: &[i32]) -> bool {
+    let Some(t) = first_locked(rows, touched) else {
+        return false;
+    };
+    let (title, detail) = refusal(rows, t);
+    crate::gui::show_error(ui, &title, detail);
+    true
+}
+
 /// The rows as they are stored and undone: name, mute and lock. Solo is left
 /// out.
 pub(super) fn records(rows: &[TimelineTrack]) -> Vec<TrackRecord> {
@@ -243,6 +275,30 @@ pub(super) mod tests {
         assert!(!locked(&rows, 1));
         assert!(!locked(&rows, 2), "a new bottom track");
         assert!(!locked(&rows, -1), "no track");
+    }
+
+    /// A drop is refused if the clip's track or the one it lands on is
+    /// locked, and the message names the one it found first.
+    #[test]
+    fn an_edit_is_refused_for_the_first_locked_track_it_touches() {
+        let rows = [
+            trk("", false, false, false),
+            trk("Music", false, false, true),
+            trk("", false, false, true),
+        ];
+        assert_eq!(first_locked(&rows, &[0, 0]), None, "neither");
+        assert_eq!(first_locked(&rows, &[1, 0]), Some(1), "the source");
+        assert_eq!(first_locked(&rows, &[0, 2]), Some(2), "the target");
+        assert_eq!(first_locked(&rows, &[2, 1]), Some(2), "both: the source");
+        assert_eq!(first_locked(&rows, &[0, 3]), None, "a new bottom track");
+        assert_eq!(
+            refusal(&rows, 1),
+            (
+                "Music is locked".to_string(),
+                "Unlock the track to change what is on it.".to_string()
+            )
+        );
+        assert_eq!(refusal(&rows, 2).0, "Track 3 is locked");
     }
 
     #[test]

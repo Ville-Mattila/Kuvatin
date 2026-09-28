@@ -118,7 +118,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
         let ui_weak = ui_weak.clone();
         let project_slot = project_slot.clone();
         let tl_clips = tl_clips.clone();
-        let tracks = video_tracks.clone();
+        let track_rows = video_tracks.clone();
         let rec = rec.clone();
         ui.on_timeline_clip_dropped(move |i, delta_secs, delta_rows| {
             let Some(mut row) = tl_clips.row_data(i as usize) else {
@@ -129,6 +129,24 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(p) = slot.as_mut() else {
                 return;
             };
+            // Where it would land, worked out before anything moves: a drop
+            // that touches a locked track is refused whole, slide and all.
+            let target = if delta_rows != 0 {
+                drop_target_track(
+                    row.track,
+                    delta_rows,
+                    p.track_count(),
+                    track_rows.row_count(),
+                )
+            } else {
+                row.track
+            };
+            if let Some(ui) = ui_weak.upgrade() {
+                let rows = tracks::rows_of(&track_rows);
+                if tracks::refuse_locked(&ui, &rows, &[row.track, target]) {
+                    return;
+                }
+            }
             let before = rec.before(Some(&*p));
             // Horizontal: slide along the track.
             if let Some(geom) = p.slide_clip(&cid, delta_secs as f64) {
@@ -137,19 +155,15 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 row.duration = geom.duration.as_secs_f32();
             }
             // Vertical: move to another track, or a new bottom track.
-            if delta_rows != 0 {
-                let target =
-                    drop_target_track(row.track, delta_rows, p.track_count(), tracks.row_count());
-                if target != row.track {
-                    if let Some(t) = p.move_clip_to_track(&cid, target as usize) {
-                        row.track = t as i32;
-                    }
+            if target != row.track {
+                if let Some(t) = p.move_clip_to_track(&cid, target as usize) {
+                    row.track = t as i32;
                 }
                 // Grow the rows to match any newly created track. A new
                 // track starts unnamed, audible, unsoloed and unlocked.
                 let new_count = p.track_count();
-                while tracks.row_count() < new_count {
-                    tracks.push(TimelineTrack::default());
+                while track_rows.row_count() < new_count {
+                    track_rows.push(TimelineTrack::default());
                 }
             }
             rec.record(
@@ -262,6 +276,11 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(mut row) = tl_clips.row_data(i as usize) else {
                 return;
             };
+            if let Some(ui) = ui_weak.upgrade() {
+                if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[row.track]) {
+                    return;
+                }
+            }
             let geom = project_slot.borrow_mut().as_mut().and_then(|p| {
                 let before = rec.before(Some(&*p));
                 let geom = p.trim_clip(
@@ -314,6 +333,9 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(mut left) = tl_clips.row_data(i as usize) else {
                 return;
             };
+            if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[left.track]) {
+                return;
+            }
             let at = std::time::Duration::from_secs_f64(f64::from(ui.get_playhead().max(0.0)));
             let mut slot = project_slot.borrow_mut();
             let Some(p) = slot.as_mut() else {
@@ -381,6 +403,13 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(mut row) = tl_clips.row_data(i as usize) else {
                 return;
             };
+            if let Some(ui) = ui_weak.upgrade() {
+                if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[row.track]) {
+                    // The field shows what the clip still has.
+                    ui.set_insp_duration_s(row.duration.round().max(1.0) as i32);
+                    return;
+                }
+            }
             let geom = project_slot.borrow_mut().as_mut().and_then(|p| {
                 let before = rec.before(Some(&*p));
                 let geom =
@@ -428,6 +457,11 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let Some(mut row) = tl_clips.row_data(i as usize) else {
                 return;
             };
+            if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[row.track]) {
+                // The list shows the speed the clip still plays at.
+                ui.set_insp_rate_index(speed_index(f64::from(row.rate)));
+                return;
+            }
             let cid = kuvatin_video::ClipId(row.id.to_string());
             let done = project_slot.borrow_mut().as_mut().and_then(|p| {
                 let before = rec.before(Some(&*p));
@@ -512,6 +546,12 @@ fn remove_timeline_clip(
     }
     let mut duration = None;
     if let Some(row) = tl_clips.row_data(i as usize) {
+        // One guard for the × and the Delete key.
+        if let Some(ui) = ui_weak.upgrade() {
+            if tracks::refuse_locked(&ui, &tracks::rows_of(&rec.tracks), &[row.track]) {
+                return;
+            }
+        }
         if let Some(p) = project_slot.borrow_mut().as_mut() {
             let before = rec.before(Some(&*p));
             p.remove_clip(&kuvatin_video::ClipId(row.id.to_string()));
