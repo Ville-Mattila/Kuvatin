@@ -189,6 +189,29 @@ pub(super) fn push_mutes(project: &mut kuvatin_video::Project, tracks: &VecModel
     project.set_track_mutes(&effective_mutes(&rows_of(tracks)));
 }
 
+/// The rows with every solo off, and nothing else changed.
+fn unsoloed(rows: &[TimelineTrack]) -> Vec<TimelineTrack> {
+    rows.iter()
+        .map(|r| TimelineTrack {
+            soloed: false,
+            ..r.clone()
+        })
+        .collect()
+}
+
+/// Switch every solo off and tell the engine, before a render: an export
+/// hears every track that is not muted, and a solo forgotten on would
+/// silence most of it. The buttons go off where the user can see them.
+/// Explicit mutes stay, and are rendered.
+pub(super) fn clear_solo(project: &mut kuvatin_video::Project, tracks: &VecModel<TimelineTrack>) {
+    for (i, row) in unsoloed(&rows_of(tracks)).into_iter().enumerate() {
+        if tracks.row_data(i).is_some_and(|was| was.soloed) {
+            tracks.set_row_data(i, row);
+        }
+    }
+    push_mutes(project, tracks);
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -299,6 +322,26 @@ pub(super) mod tests {
             )
         );
         assert_eq!(refusal(&rows, 2).0, "Track 3 is locked");
+    }
+
+    /// Before an export: solo off everywhere, and what is left silent is
+    /// exactly what was muted on purpose.
+    #[test]
+    fn clearing_solo_leaves_the_explicit_mutes() {
+        let rows = [
+            trk("A", false, true, false),
+            trk("B", true, false, true),
+            trk("C", false, false, false),
+        ];
+        let cleared = unsoloed(&rows);
+        assert!(cleared.iter().all(|r| !r.soloed));
+        assert_eq!(
+            records(&cleared),
+            records(&rows),
+            "names, mutes, locks kept"
+        );
+        assert_eq!(effective_mutes(&rows), vec![false, true, true]);
+        assert_eq!(effective_mutes(&cleared), vec![false, true, false]);
     }
 
     #[test]
