@@ -7,7 +7,7 @@
 
 use super::project_file::kind_of;
 use crate::gui::history::{History, Step};
-use crate::gui::{name_list, show_error, AppWindow, TimelineClip};
+use crate::gui::{name_list, show_error, AppWindow, TimelineClip, TimelineTrack};
 use kuvatin_video::ClipRecord;
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -339,14 +339,14 @@ pub(super) fn applied_from_engine(
     gone.chain(present).collect()
 }
 
-/// Make the timeline show exactly `count` track rows, named in order.
-pub(super) fn set_track_rows(tracks: &VecModel<SharedString>, count: usize) {
+/// Make the timeline show exactly `count` track rows. Rows past the end go;
+/// new ones are unnamed.
+pub(super) fn set_track_rows(tracks: &VecModel<TimelineTrack>, count: usize) {
     while tracks.row_count() > count {
         tracks.remove(tracks.row_count() - 1);
     }
     while tracks.row_count() < count {
-        let n = tracks.row_count() + 1;
-        tracks.push(SharedString::from(format!("Track {n}")));
+        tracks.push(TimelineTrack::default());
     }
 }
 
@@ -357,7 +357,7 @@ pub(super) fn set_track_rows(tracks: &VecModel<SharedString>, count: usize) {
 pub(super) struct Recorder {
     pub(super) history: TimelineHistory,
     pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
-    pub(super) tracks: Rc<VecModel<SharedString>>,
+    pub(super) tracks: Rc<VecModel<TimelineTrack>>,
     pub(super) ui: slint::Weak<AppWindow>,
 }
 
@@ -1085,11 +1085,7 @@ mod tests {
         Recorder {
             history: Rc::new(RefCell::new(History::new())),
             tl_clips: Rc::new(VecModel::from(rows)),
-            tracks: Rc::new(VecModel::from(
-                (0..tracks)
-                    .map(|i| SharedString::from(format!("Track {}", i + 1)))
-                    .collect::<Vec<_>>(),
-            )),
+            tracks: Rc::new(VecModel::from(vec![TimelineTrack::default(); tracks])),
             ui: slint::Weak::default(),
         }
     }
@@ -1114,7 +1110,7 @@ mod tests {
     fn a_new_track_is_recorded_without_a_project() {
         let r = recorder(Vec::new(), 2);
         let before = r.before(None);
-        r.tracks.push("Track 3".into());
+        r.tracks.push(TimelineTrack::default());
         r.record(None, StepKind::AddTrack, None, before);
         let history = r.history.borrow();
         let s = history.peek_undo().expect("a step");
@@ -1162,13 +1158,10 @@ mod tests {
 
     #[test]
     fn track_rows_grow_and_shrink_to_a_count() {
-        let tracks = VecModel::from(vec![
-            SharedString::from("Track 1"),
-            SharedString::from("Track 2"),
-        ]);
+        let tracks = VecModel::from(vec![TimelineTrack::default(); 2]);
         set_track_rows(&tracks, 4);
         assert_eq!(tracks.row_count(), 4);
-        assert_eq!(tracks.row_data(3).unwrap().as_str(), "Track 4");
+        assert_eq!(tracks.row_data(3), Some(TimelineTrack::default()));
         set_track_rows(&tracks, 1);
         assert_eq!(tracks.row_count(), 1);
     }

@@ -3,7 +3,7 @@
 
 use super::undo::{Recorder, StepKind};
 use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT, SPEEDS};
-use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip};
+use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip, TimelineTrack};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -144,11 +144,11 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                         row.track = t as i32;
                     }
                 }
-                // Grow the gutter labels to match any newly created track.
+                // Grow the rows to match any newly created track. A new
+                // track starts unnamed, audible, unsoloed and unlocked.
                 let new_count = p.track_count();
                 while tracks.row_count() < new_count {
-                    let n = tracks.row_count() + 1;
-                    tracks.push(SharedString::from(format!("Track {n}")));
+                    tracks.push(TimelineTrack::default());
                 }
             }
             rec.record(Some(&*p), StepKind::Move, Some(row.id.as_str()), before);
@@ -199,8 +199,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             }
             // No clip changes, so no project is needed to record it.
             let before = rec.before(None);
-            let n = tracks.row_count() + 1;
-            tracks.push(SharedString::from(format!("Track {n}")));
+            tracks.push(TimelineTrack::default());
             rec.record(None, StepKind::AddTrack, None, before);
         });
     }

@@ -5,7 +5,7 @@
 //! says what could not be found. Opening replaces the timeline, so a timeline
 //! with anything on it asks first.
 
-use super::{ClipKind, TimelineClip, VideoState};
+use super::{ClipKind, TimelineClip, TimelineTrack, VideoState};
 use crate::gui::{name_list, show_error, show_info, AppWindow, VideoAsset};
 use slint::{ComponentHandle, Image, Model, SharedString, VecModel};
 use std::cell::RefCell;
@@ -236,11 +236,7 @@ fn restore_models(
         .max()
         .unwrap_or(0)
         .max(2);
-    st.tracks.set_vec(
-        (0..needed)
-            .map(|i| SharedString::from(format!("Track {}", i + 1)))
-            .collect::<Vec<_>>(),
-    );
+    st.tracks.set_vec(vec![TimelineTrack::default(); needed]);
 
     // Media bin: one row per distinct source, and the sequence specs come back
     // with it so a bin click re-adds the sequence rather than a single still.
@@ -363,7 +359,7 @@ pub(super) struct VideoHandles {
     pub(super) assets: Rc<VecModel<VideoAsset>>,
     pub(super) bin_paths: Rc<RefCell<Vec<PathBuf>>>,
     pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
-    pub(super) tracks: Rc<VecModel<SharedString>>,
+    pub(super) tracks: Rc<VecModel<TimelineTrack>>,
     pub(super) sel_idx: Rc<std::cell::Cell<i32>>,
     pub(super) history: super::undo::TimelineHistory,
     pub(super) waves: super::waves::Waves,

@@ -37,6 +37,16 @@ export struct TimelineClip {
     wave-secs: float,  // how many seconds of source that image spans
 }
 
+// One timeline track row: its header in the gutter and its stripe in the
+// lane. Its index in `timeline-tracks` is the track, 0 = top, the numbering
+// TimelineClip.track uses.
+export struct TimelineTrack {
+    name: string,      // "" → the header shows "Track {t+1}"
+    muted: bool,
+    soloed: bool,      // for listening only: never saved, never undone
+    locked: bool,
+}
+
 // A media-bin entry: file name + a generated thumbnail.
 export struct VideoAsset {
     name: string,
@@ -113,7 +123,7 @@ export component AppWindow inherits Window {
 
     // Timeline editor.
     in property <[TimelineClip]> timeline-clips;
-    in property <[string]> timeline-track-labels;  // one per track, top row first
+    in property <[TimelineTrack]> timeline-tracks;  // one per track, top row first
     // Height of a single timeline track row. One source of truth: the band
     // height, header rows, lane stripes, clip Y and every drag/reorder distance
     // are all derived from this (change it here and the whole timeline follows).
@@ -1771,7 +1781,7 @@ export component AppWindow inherits Window {
                 Rectangle {
                     // Sized to the tracks + one "new track" drop row with breathing
                     // room below it (so a clip dragged onto the row stays fully visible).
-                    height: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
+                    height: Math.max(140px, root.timeline-tracks.length * root.track-h + 82px);
                     background: #101319;
                     border-width: 1px; border-color: Theme.line;
                     VerticalLayout {
@@ -1863,7 +1873,7 @@ export component AppWindow inherits Window {
                             VerticalLayout {
                                 width: 94px;
                                 // Drag a header up/down to reorder tracks.
-                                for lbl[t] in root.timeline-track-labels : hdr := Rectangle {
+                                for trk[t] in root.timeline-tracks : hdr := Rectangle {
                                     height: root.track-h;
                                     background: hta.pressed ? Theme.card : #13161c;
                                     animate background { duration: 100ms; }
@@ -1872,7 +1882,7 @@ export component AppWindow inherits Window {
                                     HorizontalLayout {
                                         padding-left: 9px; spacing: 6px;
                                         Text { text: "≡"; color: hta.has-hover ? Theme.muted2 : #5e6675; font-size: 11px; vertical-alignment: center; animate color { duration: 120ms; } }
-                                        Text { text: lbl; color: Theme.muted2; font-size: 9px; vertical-alignment: center; overflow: elide; }
+                                        Text { text: trk.name != "" ? trk.name : "Track " + (t + 1); color: Theme.muted2; font-size: 9px; vertical-alignment: center; overflow: elide; }
                                     }
                                     hta := TouchArea {
                                         mouse-cursor: ns-resize;
@@ -1882,7 +1892,7 @@ export component AppWindow inherits Window {
                                             if (ev.kind == PointerEventKind.down) { kbd.focus(); }
                                             if (ev.kind == PointerEventKind.up) {
                                                 if (Math.abs(hdr.ddy / 1px) > 15) {
-                                                    root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-track-labels.length - 1));
+                                                    root.track-reordered(t, Math.clamp(t + Math.round(hdr.ddy / root.track-h), 0, root.timeline-tracks.length - 1));
                                                 }
                                                 hdr.ddy = 0px;
                                             }
@@ -1944,7 +1954,7 @@ export component AppWindow inherits Window {
 
                                     // row background stripes (fixed; span the visible lane)
                                     VerticalLayout {
-                                        for lbl[t] in root.timeline-track-labels : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
+                                        for trk[t] in root.timeline-tracks : Rectangle { height: root.track-h; border-width: 1px; border-color: #181c23; }
                                     }
 
                                     // clip blocks. The wrapper `blk` keeps the clip's MODEL
@@ -2160,8 +2170,8 @@ export component AppWindow inherits Window {
                                     // through. A dashed-look border keeps it reading as a drop
                                     // zone. Sits above the scrollbar with room to spare.
                                     Rectangle {
-                                        property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-                                        y: root.timeline-track-labels.length * root.track-h + 4px;
+                                        property <bool> active: root.clip-drag-target-row >= root.timeline-tracks.length;
+                                        y: root.timeline-tracks.length * root.track-h + 4px;
                                         animate y { duration: 160ms; easing: ease-out; }
                                         x: 4px; width: parent.width - 8px; height: 26px;
                                         border-radius: 7px;
@@ -2203,8 +2213,8 @@ export component AppWindow inherits Window {
         // It's purely a visual affordance: the drop target is decided by drag distance,
         // so the banner doesn't need to sit directly under the cursor.
         if root.clip-dragging : Rectangle {
-            property <bool> active: root.clip-drag-target-row >= root.timeline-track-labels.length;
-            property <length> band-h: Math.max(140px, root.timeline-track-labels.length * root.track-h + 82px);
+            property <bool> active: root.clip-drag-target-row >= root.timeline-tracks.length;
+            property <length> band-h: Math.max(140px, root.timeline-tracks.length * root.track-h + 82px);
             // Entrance: fade + rise so the banner glides in instead of popping.
             property <length> rise: 10px;
             opacity: 0;

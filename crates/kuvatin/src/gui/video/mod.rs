@@ -10,7 +10,7 @@ mod transport;
 mod undo;
 mod waves;
 
-use super::{show_error, AppWindow, ClipKind, TimelineClip, VideoAsset};
+use super::{show_error, AppWindow, ClipKind, TimelineClip, TimelineTrack, VideoAsset};
 use export::ExportState;
 use import::ImportState;
 use slint::{
@@ -56,9 +56,12 @@ pub(super) struct VideoState {
     pub(super) assets: Rc<VecModel<VideoAsset>>,
     pub(super) bin_paths: Rc<RefCell<Vec<PathBuf>>>,
     pub(super) tl_clips: Rc<VecModel<TimelineClip>>,
-    /// Timeline tracks (GES layers, top = index 0 = composited on top). Kept
-    /// mutable so dragging a clip onto a new track can grow the list.
-    pub(super) tracks: Rc<VecModel<SharedString>>,
+    /// Timeline track rows (GES layers, top = index 0 = composited on top):
+    /// the truth about how many tracks there are and what each is called, and
+    /// whether it is muted, soloed or locked. A row can exist before its
+    /// layer does (see `on_add_track`). Kept mutable so dragging a clip onto a
+    /// new track can grow the list.
+    pub(super) tracks: Rc<VecModel<TimelineTrack>>,
     /// Index of the selected timeline clip (for the inspector), or -1.
     pub(super) sel_idx: Rc<Cell<i32>>,
     /// Latest inspector transform awaiting a coalesced apply on the UI timer.
@@ -82,11 +85,9 @@ impl VideoState {
         ui.set_video_clips(ModelRc::from(assets.clone()));
         let tl_clips = Rc::new(VecModel::<TimelineClip>::from(Vec::<TimelineClip>::new()));
         ui.set_timeline_clips(ModelRc::from(tl_clips.clone()));
-        let tracks = Rc::new(VecModel::<SharedString>::from(vec![
-            SharedString::from("Track 1"),
-            SharedString::from("Track 2"),
-        ]));
-        ui.set_timeline_track_labels(ModelRc::from(tracks.clone()));
+        // Two unnamed, audible, unlocked tracks: what an empty project shows.
+        let tracks = Rc::new(VecModel::from(vec![TimelineTrack::default(); 2]));
+        ui.set_timeline_tracks(ModelRc::from(tracks.clone()));
         ui.set_insp_scale_min(MIN_SCALE_PCT);
         ui.set_insp_scale_max(MAX_SCALE_PCT);
         let labels: Vec<SharedString> = SPEEDS.iter().map(|r| format!("{r}×").into()).collect();
