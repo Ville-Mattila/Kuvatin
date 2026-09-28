@@ -6,9 +6,10 @@
 //! comes back gets the row it had, name and thumbnail included.
 
 use super::project_file::kind_of;
+use super::tracks;
 use crate::gui::history::{History, Step};
 use crate::gui::{name_list, show_error, AppWindow, TimelineClip, TimelineTrack};
-use kuvatin_video::ClipRecord;
+use kuvatin_video::{ClipRecord, TrackRecord};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -44,16 +45,18 @@ impl StepKind {
     }
 }
 
-/// Every clip's record, by ID, and the number of track rows, at one moment.
+/// Every clip's record, by ID, and the track table, at one moment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Capture {
     pub(super) records: BTreeMap<String, ClipRecord>,
-    pub(super) tracks: usize,
+    /// One record per track row, top first: how many there are, and each
+    /// one's name, mute and lock. Solo is not in it.
+    pub(super) tracks: Vec<TrackRecord>,
 }
 
 impl Capture {
     /// Read the timeline as it is now. No project yet means no clips.
-    pub(super) fn of(project: Option<&kuvatin_video::Project>, tracks: usize) -> Self {
+    pub(super) fn of(project: Option<&kuvatin_video::Project>, tracks: Vec<TrackRecord>) -> Self {
         let records = project
             .map(|p| {
                 p.clip_records()
@@ -103,8 +106,10 @@ pub(super) struct TimelineStep {
     /// clip that comes back gets its row as it was: its name (the engine's
     /// record spells one from the URI), kind and thumbnail, without decoding.
     pub(super) kept_rows: HashMap<String, TimelineClip>,
-    pub(super) tracks_before: usize,
-    pub(super) tracks_after: usize,
+    /// The track table on each side. A step that changes nothing but the
+    /// table (a rename, a mute, a lock) is still a step.
+    pub(super) tracks_before: Vec<TrackRecord>,
+    pub(super) tracks_after: Vec<TrackRecord>,
 }
 
 impl TimelineStep {
@@ -134,8 +139,8 @@ impl TimelineStep {
             name: name.to_string(),
             changes,
             kept_rows,
-            tracks_before: before.tracks,
-            tracks_after: after.tracks,
+            tracks_before: before.tracks.clone(),
+            tracks_after: after.tracks.clone(),
         }
     }
 
@@ -240,11 +245,11 @@ pub(super) fn plan(step: &TimelineStep, dir: Direction) -> Plan {
     out
 }
 
-/// How many track rows the timeline shows on the `dir` side of `step`.
-pub(super) fn target_tracks(step: &TimelineStep, dir: Direction) -> usize {
+/// The track table the timeline shows on the `dir` side of `step`.
+pub(super) fn target_tracks(step: &TimelineStep, dir: Direction) -> Vec<TrackRecord> {
     match dir {
-        Direction::Undo => step.tracks_before,
-        Direction::Redo => step.tracks_after,
+        Direction::Undo => step.tracks_before.clone(),
+        Direction::Redo => step.tracks_after.clone(),
     }
 }
 
@@ -339,14 +344,25 @@ pub(super) fn applied_from_engine(
     gone.chain(present).collect()
 }
 
-/// Make the timeline show exactly `count` track rows. Rows past the end go;
-/// new ones are unnamed.
-pub(super) fn set_track_rows(tracks: &VecModel<TimelineTrack>, count: usize) {
-    while tracks.row_count() > count {
-        tracks.remove(tracks.row_count() - 1);
+/// Make the timeline's track rows match `want` exactly: how many there are,
+/// and every row's name, mute and lock. Solo is the row's own and is carried
+/// across rather than overwritten: undo does not change what you are
+/// listening to. Rows that already match are left alone, so Slint does not
+/// repaint them.
+pub(super) fn set_track_rows(rows: &VecModel<TimelineTrack>, want: &[TrackRecord]) {
+    while rows.row_count() > want.len() {
+        rows.remove(rows.row_count() - 1);
     }
-    while tracks.row_count() < count {
-        tracks.push(TimelineTrack::default());
+    for (i, record) in want.iter().enumerate() {
+        match rows.row_data(i) {
+            Some(have) => {
+                let row = tracks::row(record, have.soloed);
+                if row != have {
+                    rows.set_row_data(i, row);
+                }
+            }
+            None => rows.push(tracks::row(record, false)),
+        }
     }
 }
 
@@ -364,7 +380,12 @@ pub(super) struct Recorder {
 impl Recorder {
     /// Read the timeline just before an edit.
     pub(super) fn before(&self, project: Option<&kuvatin_video::Project>) -> Capture {
-        Capture::of(project, self.tracks.row_count())
+        Capture::of(project, self.table())
+    }
+
+    /// The track rows as the history keeps them.
+    fn table(&self) -> Vec<TrackRecord> {
+        tracks::records(&tracks::rows_of(&self.tracks))
     }
 
     /// Record what an edit changed. Call it after the engine edit and after an
@@ -377,7 +398,7 @@ impl Recorder {
         subject: Option<&str>,
         before: Capture,
     ) {
-        let after = Capture::of(project, self.tracks.row_count());
+        let after = Capture::of(project, self.table());
         self.record_captures(kind, subject, before, after);
     }
 
@@ -462,7 +483,7 @@ fn apply_step(
     };
     // Read what to do, then let go of the history: applying reads the rows,
     // and recording must never see it borrowed.
-    let (ops, tracks, subject, kept) = {
+    let (ops, table, subject, kept) = {
         let history = rec.history.borrow();
         let step = match dir {
             Direction::Undo => history.peek_undo(),
@@ -479,11 +500,12 @@ fn apply_step(
         )
     };
 
-    // A step that only changed track rows (a track added before any clip was
-    // placed) needs no engine, which may not exist yet.
+    // A step that only changed track rows (a track added, renamed, muted or
+    // locked before any clip was placed) needs no engine, which may not exist
+    // yet.
     if project.borrow().is_none() {
         if ops == Plan::default() {
-            set_track_rows(&rec.tracks, tracks);
+            set_track_rows(&rec.tracks, &table);
             let mut history = rec.history.borrow_mut();
             match dir {
                 Direction::Undo => history.commit_undo(),
@@ -583,7 +605,7 @@ fn apply_step(
             }
         }
     }
-    p.prune_tracks(tracks);
+    p.prune_tracks(table.len());
 
     let rows: Vec<TimelineClip> = rec.tl_clips.iter().collect();
     let selected_id = usize::try_from(sel_idx.get())
@@ -611,11 +633,23 @@ fn apply_step(
         (applied, kept)
     };
     let new_rows = rows_after(&rows, &to_rows, &kept);
-    let track_rows = tracks.max(p.track_count());
+    // A prune the engine refused (a clip still on a track this side does not
+    // have) leaves more layers than the table has rows: they stay on screen,
+    // as rows of their own.
+    let mut table = table;
+    if table.len() < p.track_count() {
+        table.resize(p.track_count(), TrackRecord::default());
+    }
     let duration = p.duration();
     drop(slot);
 
-    set_track_rows(&rec.tracks, track_rows);
+    set_track_rows(&rec.tracks, &table);
+    if let Some(p) = project.borrow_mut().as_mut() {
+        tracks::push_mutes(p, &rec.tracks);
+        // Every undo changes the work, and one that changes only the table (a
+        // rename, a lock) touches nothing the engine would notice by itself.
+        p.mark_unsaved();
+    }
     ui.set_timeline_duration(duration.map(|d| d.as_secs_f32()).unwrap_or(0.0));
 
     let subject_now = subject.map(|s| {
@@ -714,13 +748,29 @@ mod tests {
         }
     }
 
+    /// Clips, on `tracks` unnamed, audible, unlocked tracks.
     fn cap(clips: &[(&str, ClipRecord)], tracks: usize) -> Capture {
         Capture {
             records: clips
                 .iter()
                 .map(|(id, r)| (id.to_string(), r.clone()))
                 .collect(),
-            tracks,
+            tracks: vec![TrackRecord::default(); tracks],
+        }
+    }
+
+    /// No clips, and this track table.
+    fn table_only(tracks: &[TrackRecord]) -> Capture {
+        Capture {
+            records: BTreeMap::new(),
+            tracks: tracks.to_vec(),
+        }
+    }
+
+    fn named(name: &str) -> TrackRecord {
+        TrackRecord {
+            name: name.into(),
+            ..TrackRecord::default()
         }
     }
 
@@ -877,7 +927,10 @@ mod tests {
             diff(&c0, &c2),
             "b, which only the newer step touched, is in too"
         );
-        assert_eq!((first.tracks_before, first.tracks_after), (2, 3));
+        assert_eq!(
+            (first.tracks_before.len(), first.tracks_after.len()),
+            (2, 3)
+        );
     }
 
     #[test]
@@ -902,7 +955,7 @@ mod tests {
                 restores: vec![("b".into(), rec(1, 0.0, 2.0))],
             }
         );
-        assert_eq!(target_tracks(&s, Direction::Undo), 2);
+        assert_eq!(target_tracks(&s, Direction::Undo).len(), 2);
     }
 
     #[test]
@@ -918,7 +971,7 @@ mod tests {
                 restores: vec![("c".into(), rec(1, 4.0, 1.0))],
             }
         );
-        assert_eq!(target_tracks(&s, Direction::Redo), 3);
+        assert_eq!(target_tracks(&s, Direction::Redo).len(), 3);
     }
 
     /// Undo removes the right half and writes the left one back whole; redo
@@ -1114,7 +1167,7 @@ mod tests {
         r.record(None, StepKind::AddTrack, None, before);
         let history = r.history.borrow();
         let s = history.peek_undo().expect("a step");
-        assert_eq!((s.tracks_before, s.tracks_after), (2, 3));
+        assert_eq!((s.tracks_before.len(), s.tracks_after.len()), (2, 3));
     }
 
     #[test]
@@ -1157,13 +1210,107 @@ mod tests {
     }
 
     #[test]
-    fn track_rows_grow_and_shrink_to_a_count() {
-        let tracks = VecModel::from(vec![TimelineTrack::default(); 2]);
-        set_track_rows(&tracks, 4);
-        assert_eq!(tracks.row_count(), 4);
-        assert_eq!(tracks.row_data(3), Some(TimelineTrack::default()));
-        set_track_rows(&tracks, 1);
-        assert_eq!(tracks.row_count(), 1);
+    fn track_rows_grow_shrink_and_change_in_place() {
+        let rows = VecModel::from(vec![TimelineTrack::default(); 2]);
+        let mut want = vec![TrackRecord::default(); 4];
+        want[1].muted = true;
+        set_track_rows(&rows, &want);
+        assert_eq!(tracks::records(&tracks::rows_of(&rows)), want);
+        want.truncate(1);
+        set_track_rows(&rows, &want);
+        assert_eq!(rows.row_count(), 1);
+        want[0].locked = true;
+        set_track_rows(&rows, &want);
+        assert!(rows.row_data(0).unwrap().locked, "changed in place");
+    }
+
+    /// The bug this table exists for: an undo regenerated every track's name
+    /// from its index, so a rename was silently lost to the next Ctrl+Z.
+    #[test]
+    fn track_rows_take_their_names_from_the_table_not_the_index() {
+        let rows = VecModel::from(vec![TimelineTrack::default(); 2]);
+        set_track_rows(&rows, &[named("Music"), named("Dialogue")]);
+        let names: Vec<String> = tracks::rows_of(&rows)
+            .iter()
+            .map(|r| r.name.to_string())
+            .collect();
+        assert_eq!(names, vec!["Music", "Dialogue"]);
+    }
+
+    /// Undo does not change what you are listening to.
+    #[test]
+    fn track_rows_keep_their_solo() {
+        let rows = VecModel::from(vec![TimelineTrack {
+            soloed: true,
+            ..TimelineTrack::default()
+        }]);
+        set_track_rows(&rows, &[named("Dialogue")]);
+        let row = rows.row_data(0).unwrap();
+        assert!(row.soloed);
+        assert_eq!(row.name.as_str(), "Dialogue");
+    }
+
+    /// A rename, a mute or a lock changes no clip, and is still a step. With
+    /// a bare count on each side it compared equal and was thrown away.
+    #[test]
+    fn a_step_that_changes_only_the_track_table_is_not_empty() {
+        let plain = [TrackRecord::default(), TrackRecord::default()];
+        let mut muted = plain.clone();
+        muted[1].muted = true;
+        let mut locked = plain.clone();
+        locked[0].locked = true;
+        let mut renamed = plain.clone();
+        renamed[1].name = "Dialogue".into();
+        for other in [muted, locked, renamed] {
+            let s = TimelineStep::new(
+                StepKind::AddTrack,
+                None,
+                "",
+                &table_only(&plain),
+                &table_only(&other),
+                HashMap::new(),
+            );
+            assert!(!s.is_empty(), "{other:?}");
+        }
+        let same = TimelineStep::new(
+            StepKind::AddTrack,
+            None,
+            "",
+            &table_only(&plain),
+            &table_only(&plain),
+            HashMap::new(),
+        );
+        assert!(same.is_empty(), "identical tables and no clips");
+    }
+
+    #[test]
+    fn undo_goes_to_the_before_table_and_redo_to_the_after() {
+        let s = TimelineStep::new(
+            StepKind::AddTrack,
+            None,
+            "",
+            &table_only(&[named("A")]),
+            &table_only(&[named("B")]),
+            HashMap::new(),
+        );
+        assert_eq!(target_tracks(&s, Direction::Undo), vec![named("A")]);
+        assert_eq!(target_tracks(&s, Direction::Redo), vec![named("B")]);
+    }
+
+    /// The recorder reads the table from the rows, so a change to a row
+    /// between the two reads is what the step holds.
+    #[test]
+    fn the_recorder_reads_the_track_table_from_the_rows() {
+        let r = recorder(Vec::new(), 2);
+        let before = r.before(None);
+        let mut row = r.tracks.row_data(1).unwrap();
+        row.name = "Dialogue".into();
+        r.tracks.set_row_data(1, row);
+        r.record(None, StepKind::AddTrack, None, before);
+        let history = r.history.borrow();
+        let s = history.peek_undo().expect("a step");
+        assert_eq!(s.tracks_before[1].name, "");
+        assert_eq!(s.tracks_after[1].name, "Dialogue");
     }
 
     #[test]

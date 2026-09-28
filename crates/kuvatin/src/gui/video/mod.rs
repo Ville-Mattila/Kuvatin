@@ -6,6 +6,7 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod tracks;
 mod transport;
 mod undo;
 mod waves;
