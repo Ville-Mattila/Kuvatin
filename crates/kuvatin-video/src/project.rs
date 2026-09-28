@@ -5170,6 +5170,119 @@ mod tests {
         }
     }
 
+    /// Render the timeline to a small WebM and measure its sound: the share
+    /// of a 400 × 200 waveform picture the export's audio inks. The CI
+    /// fixture's sine tone fills most of it; silence fills none, and a lossy
+    /// codec's rounding a sliver at most.
+    fn rendered_ink(project: &Project, tag: &str) -> f64 {
+        let out = scratch(tag).join("out.webm");
+        let _ = std::fs::remove_file(&out);
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::Vp8,
+                    width: 320,
+                    height: 180,
+                    fps: 30,
+                    bitrate_kbps: 500,
+                    encoder: Encoder::Auto,
+                },
+            )
+            .expect("begin_render");
+        let end = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match project.render_status() {
+                RenderStatus::Done => break,
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => {
+                    assert!(std::time::Instant::now() < end, "render never finished");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        project.end_render().expect("end_render");
+        let uri = gst::glib::filename_to_uri(&out, None).expect("uri");
+        let (frame, _) = waveform_uri(&uri, 400, 200).expect("the export has a sound stream");
+        let ink = frame.rgba.chunks_exact(4).filter(|p| p[3] > 0).count();
+        ink as f64 / (400.0 * 200.0)
+    }
+
+    /// A muted track is silent in the export, not only in the preview. The
+    /// same clip renders with its sound on an audible track and without it on
+    /// a muted one: one muted before the clip's layer existed, and one that
+    /// existed and was muted before the clip moved onto it. Needs
+    /// `GST_TEST_FILE`, a video with sound.
+    #[test]
+    fn a_muted_track_is_silent_in_the_export() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping a_muted_track_is_silent_in_the_export: set GST_TEST_FILE");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+
+        let mut audible = Project::new(|_f| {}).expect("project");
+        audible.append_clip(&path, 1, None).expect("clip");
+        let loud = rendered_ink(&audible, "mute-export-loud");
+        assert!(loud > 0.3, "the fixture's tone fills the waveform: {loud}");
+        drop(audible);
+
+        let mut first = Project::new(|_f| {}).expect("project");
+        first.set_track_mutes(&[false, true]);
+        first.append_clip(&path, 1, None).expect("clip");
+        let quiet = rendered_ink(&first, "mute-export-first");
+        assert!(
+            quiet < loud / 10.0,
+            "muted before its layer existed: {quiet} against {loud}"
+        );
+        drop(first);
+
+        let mut moved = Project::new(|_f| {}).expect("project");
+        let clip = moved.append_clip(&path, 0, None).expect("clip");
+        moved.layer(1);
+        moved.set_track_mutes(&[false, true]);
+        assert_eq!(moved.move_clip_to_track(&clip.id, 1), Some(1));
+        let quiet = rendered_ink(&moved, "mute-export-moved");
+        assert!(
+            quiet < loud / 10.0,
+            "moved onto a muted track: {quiet} against {loud}"
+        );
+    }
+
+    /// A mute changes a layer's activity under a running pipeline, the same
+    /// kind of change that froze the preview for a speed effect (see
+    /// `after_time_effects`). Playback must carry on through a mute, and
+    /// through a mute and an unmute in a row. Needs `GST_TEST_FILE`.
+    #[test]
+    fn muting_a_track_during_playback_leaves_the_preview_playing() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping muting_a_track_during_playback_...: set GST_TEST_FILE");
+            return;
+        };
+        for round in 0..6 {
+            let mut project = Project::new(|_f| {}).expect("project");
+            project
+                .append_clip(Path::new(&path), 1, None)
+                .expect("clip");
+            project.play().expect("play");
+            wait_settled(&project);
+            project.set_track_mutes(&[false, true]);
+            if round >= 3 {
+                wait_settled(&project);
+                project.set_track_mutes(&[false, false]);
+            }
+            wait_settled(&project);
+            let from = project.position().expect("a position");
+            std::thread::sleep(Duration::from_millis(800));
+            let to = project.position().expect("a position");
+            assert!(
+                to > from + Duration::from_millis(400),
+                "round {round}: frozen after a mute, {from:?} -> {to:?}"
+            );
+            let _ = project.pause();
+        }
+    }
+
     /// Not a gate: a measurement of what this GStreamer does with a speed
     /// change, which the speed work was built on (see the Amendments of
     /// `docs/superpowers/plans/2026-09-23-editor-clip-edits.md`). Run it by
