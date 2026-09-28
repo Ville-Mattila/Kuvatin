@@ -1108,6 +1108,12 @@ fn set_clip_frame(clip: &ges::Clip, posx: i32, posy: i32, width: i32, height: i3
 pub struct Project {
     timeline: ges::Timeline,
     layers: Vec<ges::Layer>,
+    /// Per track position, top first, whether its sound is silenced, as the
+    /// interface last said (see [`Project::set_track_mutes`]). A position past
+    /// the end is audible. It describes the interface's track rows, not the
+    /// layers: a row keeps its mute when its last clip leaves and its layer is
+    /// pruned, so the layer made for the next clip there arrives silent.
+    mutes: Vec<bool>,
     pipeline: ges::Pipeline,
     /// Clips by ID, so the GUI can edit them (slide/trim/transform). An ID is
     /// the GES name a clip was placed under, or, for a restored clip, the ID it
@@ -1234,6 +1240,7 @@ impl Project {
         Ok(Self {
             timeline,
             layers: vec![layer],
+            mutes: Vec::new(),
             pipeline,
             clips: HashMap::new(),
             dirty: std::cell::Cell::new(false),
@@ -1274,6 +1281,13 @@ impl Project {
         self.unsaved.set(false);
     }
 
+    /// The interface changed something saved with the project that the engine
+    /// does not hold, or cannot tell was saved (a track's name, lock or mute,
+    /// or an undo of one). Closing now would lose it.
+    pub fn mark_unsaved(&self) {
+        self.unsaved.set(true);
+    }
+
     /// Current composited canvas ("viewport") size in px.
     pub fn canvas_size(&self) -> (i32, i32) {
         (self.canvas_w, self.canvas_h)
@@ -1305,9 +1319,15 @@ impl Project {
     }
 
     /// Ensure at least `index + 1` layers exist; return the layer at `index`.
+    /// A layer made for a muted position arrives silent: without that, a clip
+    /// dropped onto a muted track that had no layer yet would be heard.
     fn layer(&mut self, index: usize) -> ges::Layer {
         while self.layers.len() <= index {
-            self.layers.push(self.timeline.append_layer());
+            let layer = self.timeline.append_layer();
+            if self.mutes.get(self.layers.len()).copied().unwrap_or(false) {
+                self.apply_mute(&layer, true);
+            }
+            self.layers.push(layer);
         }
         self.layers[index].clone()
     }
@@ -1902,6 +1922,63 @@ impl Project {
         self.layers.len()
     }
 
+    /// Silence the sound of the tracks whose flag is set, and remember the
+    /// whole vector. Positional, top track first; a track past the end is
+    /// audible. Only the timeline's audio track is switched off for a layer,
+    /// never the video one: a muted track's pictures still show. Inert while
+    /// rendering, like every other edit.
+    ///
+    /// Repaints, but does not count as unsaved work: the interface drives
+    /// this for solo too, which is not saved. It marks an explicit mute
+    /// itself ([`Self::mark_unsaved`]). A vector that changes nothing asks
+    /// GES for nothing.
+    pub fn set_track_mutes(&mut self, mutes: &[bool]) {
+        if self.rendering.get() {
+            return;
+        }
+        self.mutes = mutes.to_vec();
+        let mut changed = false;
+        for (i, layer) in self.layers.iter().enumerate() {
+            let muted = self.mutes.get(i).copied().unwrap_or(false);
+            changed |= self.apply_mute(layer, muted);
+        }
+        if changed {
+            self.commit();
+            self.dirty.set(true);
+        }
+    }
+
+    /// Whether the track at `track` is silent right now, read back from GES.
+    /// False for a track that has no layer yet.
+    pub fn track_muted(&self, track: usize) -> bool {
+        self.layers
+            .get(track)
+            .is_some_and(|layer| self.is_silent(layer))
+    }
+
+    /// The timeline's audio tracks: exactly one, from `new_audio_video`.
+    fn audio_tracks(&self) -> Vec<ges::Track> {
+        self.timeline
+            .tracks()
+            .into_iter()
+            .filter(|t| t.track_type() == ges::TrackType::AUDIO)
+            .collect()
+    }
+
+    fn is_silent(&self, layer: &ges::Layer) -> bool {
+        self.audio_tracks()
+            .iter()
+            .any(|t| !layer.is_active_for_track(t))
+    }
+
+    /// Make `layer`'s sound match `muted`. True if that changed it.
+    fn apply_mute(&self, layer: &ges::Layer, muted: bool) -> bool {
+        if self.is_silent(layer) == muted {
+            return false;
+        }
+        layer.set_active_for_tracks(!muted, &self.audio_tracks())
+    }
+
     /// Move a clip to `track`, creating the layer if `track` is one past the last
     /// (a new bottom track). Returns the resulting track index.
     pub fn move_clip_to_track(&mut self, id: &ClipId, track: usize) -> Option<usize> {
@@ -2104,6 +2181,9 @@ impl Project {
         for id in self.clips.keys().cloned().collect::<Vec<_>>() {
             self.remove_clip(&ClipId(id));
         }
+        // The old project's mutes are not this one's. The interface tells the
+        // engine the new ones once it has built the new track rows.
+        self.set_track_mutes(&[]);
         self.set_canvas_size(doc.canvas_w, doc.canvas_h);
         let mut missing = Vec::new();
         for rec in &doc.clips {
@@ -2170,18 +2250,25 @@ impl Project {
     }
 
     /// Reorder tracks: move the track at `from` to position `to` (0 = top).
+    /// Either may be a row the engine has no layer for yet (a track added
+    /// with "+ New track" gets one only when a clip lands on it): the layers
+    /// up to it are made first, so the interface's rows and the layers move
+    /// together. The track's mute moves with it.
     pub fn move_track(&mut self, from: usize, to: usize) {
-        if self.rendering.get()
-            || from >= self.layers.len()
-            || to >= self.layers.len()
-            || from == to
-        {
+        if self.rendering.get() || from == to {
             return;
         }
+        let last = from.max(to);
+        self.layer(last);
         let layer = self.layers[from].clone();
         let _ = self.timeline.move_layer(&layer, to as u32);
         // Resync our layer vec to the new priority order.
         self.layers = self.timeline.layers();
+        if self.mutes.len() <= last {
+            self.mutes.resize(last + 1, false);
+        }
+        let muted = self.mutes.remove(from);
+        self.mutes.insert(to, muted);
         self.commit();
         self.touched();
     }
@@ -2975,6 +3062,18 @@ mod tests {
             project.has_unsaved_work(),
             "a repaint is not a save: this is the bug this flag exists to fix"
         );
+    }
+
+    /// A track's name or lock lives in the interface, which says when one
+    /// changed: work the engine could not have noticed.
+    #[test]
+    fn unsaved_work_can_be_marked_by_the_interface() {
+        let project = Project::new(|_f| {}).expect("project");
+        assert!(!project.has_unsaved_work());
+        project.mark_unsaved();
+        assert!(project.has_unsaved_work());
+        project.mark_saved();
+        assert!(!project.has_unsaved_work());
     }
 
     #[test]
@@ -4546,6 +4645,189 @@ mod tests {
         project.prune_tracks(0);
         assert_eq!(project.track_count(), 1);
         assert_eq!(project.timeline.layers().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mute switches off a layer's sound and nothing else: the pictures on
+    /// a muted track still show.
+    #[test]
+    fn track_mute_silences_the_sound_and_keeps_the_picture() {
+        let (dir, png, mut project) = undo_fixture("mute-audio-only");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_track_mutes(&[true]);
+        assert!(project.track_muted(0));
+        let video: Vec<ges::Track> = project
+            .timeline
+            .tracks()
+            .into_iter()
+            .filter(|t| t.track_type() == ges::TrackType::VIDEO)
+            .collect();
+        assert_eq!(video.len(), 1);
+        assert!(
+            project.layers[0].is_active_for_track(&video[0]),
+            "the picture stays"
+        );
+        project.set_track_mutes(&[false]);
+        assert!(!project.track_muted(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn track_mute_reads_false_for_a_track_with_no_layer() {
+        let (dir, _png, mut project) = undo_fixture("mute-no-layer");
+        project.set_track_mutes(&[false, false, false, true]);
+        assert_eq!(project.track_count(), 1);
+        assert!(!project.track_muted(3), "no layer, nothing to silence");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A drop onto a muted row that has no layer yet must not unmute it: the
+    /// layer made for the clip arrives silent, the ones above it as their
+    /// own flags say.
+    #[test]
+    fn track_mute_arrives_on_a_layer_made_later() {
+        let (dir, png, mut project) = undo_fixture("mute-later");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_track_mutes(&[false, false, true]);
+        assert_eq!(project.move_clip_to_track(&a, 2), Some(2));
+        assert!(project.track_muted(2));
+        assert!(!project.track_muted(0) && !project.track_muted(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mute is the track's, not the position's: moving the track moves
+    /// it, in GES and in the vector the engine remembers. This also pins that
+    /// GES's `move_layer` permutes the layers as a removal followed by an
+    /// insertion, which `move_track` assumes of the vector.
+    #[test]
+    fn track_mute_moves_with_its_track() {
+        let (dir, png, mut project) = undo_fixture("mute-move");
+        let ids: Vec<ClipId> = (0..3)
+            .map(|t| {
+                project
+                    .add_clip(&png, t, secs(0.0), Duration::ZERO, secs(2.0))
+                    .expect("clip")
+            })
+            .collect();
+        project.set_track_mutes(&[true, false, false]);
+        project.move_track(0, 2);
+        assert_eq!(
+            ids.iter()
+                .map(|id| project.clip_track(id))
+                .collect::<Vec<_>>(),
+            vec![Some(2), Some(0), Some(1)],
+            "the top track went to the bottom, the others moved up"
+        );
+        assert_eq!(
+            (0..3).map(|t| project.track_muted(t)).collect::<Vec<_>>(),
+            vec![false, false, true]
+        );
+        // GES moved the silent layer itself; the remembered vector must have
+        // moved too. Empty the bottom track so its layer goes, then bring a
+        // clip back to it: the layer made for it follows the vector.
+        assert!(project.remove_clip(&ids[0]));
+        assert_eq!(project.track_count(), 2);
+        assert_eq!(project.move_clip_to_track(&ids[1], 2), Some(2));
+        assert!(project.track_muted(2), "the vector moved with the track");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A row added with "+ New track" has no layer until a clip lands on it,
+    /// but it can still be dragged, and a track can be dragged onto it.
+    #[test]
+    fn track_mute_moves_to_a_row_with_no_layer_yet() {
+        let (dir, png, mut project) = undo_fixture("mute-move-lazy");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_track_mutes(&[true]);
+        project.move_track(0, 2);
+        assert_eq!(project.track_count(), 3);
+        assert_eq!(project.clip_track(&a), Some(2));
+        assert!(project.track_muted(2) && !project.track_muted(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A track row outlives its layer. Deleting the last clip on a muted
+    /// track prunes the layer; the next clip there must still be silent.
+    #[test]
+    fn track_mute_survives_the_last_clip_leaving() {
+        let (dir, png, mut project) = undo_fixture("mute-prune");
+        let a = project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        let b = project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        project.set_track_mutes(&[false, true]);
+        assert!(project.remove_clip(&b));
+        assert_eq!(project.track_count(), 1, "the empty bottom layer went");
+        assert_eq!(project.move_clip_to_track(&a, 1), Some(1));
+        assert!(project.track_muted(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opening a project starts from its own mutes, not the last one's: the
+    /// layer the engine keeps across the load must not stay silent.
+    #[test]
+    fn track_mute_does_not_leak_into_the_next_project() {
+        let (dir, png, mut project) = undo_fixture("mute-load");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("b");
+        let doc = project.to_document();
+        project.set_track_mutes(&[true, true]);
+        project.apply_document(&doc).expect("apply");
+        assert!(!project.track_muted(0) && !project.track_muted(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While a render owns the pipeline a mute changes nothing, and one set
+    /// before it is still there when the preview comes back.
+    #[test]
+    fn track_mute_is_inert_while_rendering_and_outlives_it() {
+        let (dir, png, mut project) = undo_fixture("mute-render");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.set_track_mutes(&[true]);
+        project.prepare_render().expect("prepare");
+        project.set_track_mutes(&[false]);
+        assert!(project.track_muted(0), "inert while rendering");
+        project.begin_restore().expect("restore");
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while project.restore_ready() == Step::Pending && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!project.is_rendering(), "the preview came back");
+        assert!(project.track_muted(0), "the mute outlived the render");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Solo drives the same call as a mute, and solo is not saved: a mute
+    /// repaints but does not call the project unsaved. A vector that changes
+    /// nothing commits nothing.
+    #[test]
+    fn track_mute_repaints_without_counting_as_unsaved_work() {
+        let (dir, png, mut project) = undo_fixture("mute-unsaved");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("a");
+        project.mark_saved();
+        project.dirty.set(false);
+        project.set_track_mutes(&[true]);
+        assert!(!project.has_unsaved_work());
+        assert!(project.dirty.get(), "the preview repaints");
+        let commits = project.commits.get();
+        project.set_track_mutes(&[true, false]);
+        assert_eq!(project.commits.get(), commits, "nothing changed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
