@@ -1,7 +1,7 @@
 //! Timeline editing: selection + inspector, slide / trim / move-to-track,
 //! magnetic snapping, track rows and clip removal.
 
-use super::undo::{Recorder, StepKind};
+use super::undo::{Recorder, StepKind, Subject};
 use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT, SPEEDS};
 use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip, TimelineTrack};
 use slint::{ComponentHandle, Model, SharedString, VecModel};
@@ -151,7 +151,12 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     tracks.push(TimelineTrack::default());
                 }
             }
-            rec.record(Some(&*p), StepKind::Move, Some(row.id.as_str()), before);
+            rec.record(
+                Some(&*p),
+                StepKind::Move,
+                Some(Subject::Clip(row.id.to_string())),
+                before,
+            );
             let dur = p.duration();
             drop(slot);
             tl_clips.set_row_data(i as usize, row);
@@ -251,7 +256,12 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     edge,
                     delta as f64,
                 );
-                rec.record(Some(&*p), StepKind::Trim, Some(row.id.as_str()), before);
+                rec.record(
+                    Some(&*p),
+                    StepKind::Trim,
+                    Some(Subject::Clip(row.id.to_string())),
+                    before,
+                );
                 geom
             });
             let Some(geom) = geom else {
@@ -312,7 +322,12 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                     tl_clips.set_row_data(i as usize, left.clone());
                     tl_clips.push(right);
                     // After the push: the step keeps the row of a clip it adds.
-                    rec.record(Some(&*p), StepKind::Split, Some(left.id.as_str()), before);
+                    rec.record(
+                        Some(&*p),
+                        StepKind::Split,
+                        Some(Subject::Clip(left.id.to_string())),
+                        before,
+                    );
                     let length = p.duration();
                     let right_uri = p.clip_uri(&right_id);
                     drop(slot);
@@ -357,7 +372,12 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 let before = rec.before(Some(&*p));
                 let geom =
                     p.set_clip_duration(&kuvatin_video::ClipId(row.id.to_string()), secs as f64);
-                rec.record(Some(&*p), StepKind::Duration, Some(row.id.as_str()), before);
+                rec.record(
+                    Some(&*p),
+                    StepKind::Duration,
+                    Some(Subject::Clip(row.id.to_string())),
+                    before,
+                );
                 geom
             });
             let Some(geom) = geom else {
@@ -399,7 +419,12 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             let done = project_slot.borrow_mut().as_mut().and_then(|p| {
                 let before = rec.before(Some(&*p));
                 let geom = p.set_clip_rate(&cid, rate)?;
-                rec.record(Some(&*p), StepKind::Speed, Some(row.id.as_str()), before);
+                rec.record(
+                    Some(&*p),
+                    StepKind::Speed,
+                    Some(Subject::Clip(row.id.to_string())),
+                    before,
+                );
                 Some((geom, p.clip_rate(&cid), p.duration()))
             });
             match done {
@@ -478,7 +503,12 @@ fn remove_timeline_clip(
             let before = rec.before(Some(&*p));
             p.remove_clip(&kuvatin_video::ClipId(row.id.to_string()));
             // Recorded before the row goes, so the step keeps the row.
-            rec.record(Some(&*p), StepKind::Delete, Some(row.id.as_str()), before);
+            rec.record(
+                Some(&*p),
+                StepKind::Delete,
+                Some(Subject::Clip(row.id.to_string())),
+                before,
+            );
             duration = Some(p.duration());
         }
     }

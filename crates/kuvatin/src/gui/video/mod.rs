@@ -134,6 +134,7 @@ pub(super) fn wire(
 ) {
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
+    tracks::wire(ui, st);
     transport::wire(ui, st);
     export::wire(ui, st, ex, timers);
     project_file::wire(ui, st, im);
@@ -359,7 +360,7 @@ pub(super) fn wire(
                     rec.record(
                         Some(&*project),
                         undo::StepKind::Transform,
-                        Some(id.as_str()),
+                        Some(undo::Subject::Clip(id.clone())),
                         before,
                     );
                 }
@@ -565,7 +566,7 @@ fn add_to_timeline(
             rec.record(
                 Some(&*project),
                 undo::StepKind::Add,
-                Some(info.id.0.as_str()),
+                Some(undo::Subject::Clip(info.id.0.clone())),
                 before,
             );
             // Only a video can have sound.
@@ -634,7 +635,7 @@ fn add_sequence_to_timeline(
             rec.record(
                 Some(&*project),
                 undo::StepKind::Add,
-                Some(info.id.0.as_str()),
+                Some(undo::Subject::Clip(info.id.0.clone())),
                 before,
             );
             let _ = project.play();

@@ -6,9 +6,93 @@
 //! [`TrackRecord`]s. Solo is the one flag a record leaves out: it is a way of
 //! listening, not an edit, so it is neither saved nor undone.
 
-use crate::gui::TimelineTrack;
+use super::undo::{Recorder, StepKind, Subject};
+use crate::gui::{AppWindow, TimelineTrack};
 use kuvatin_video::TrackRecord;
 use slint::{Model, VecModel};
+
+/// Wire the track header's controls: mute, solo, lock and rename.
+pub(super) fn wire(ui: &AppWindow, st: &super::VideoState) {
+    let rec = st.recorder(ui);
+    {
+        let project = st.project.clone();
+        let rec = rec.clone();
+        ui.on_track_muted(move |t, on| {
+            edit_row(&project, &rec, t, StepKind::MuteTrack, |r| r.muted = on);
+        });
+    }
+    {
+        let project = st.project.clone();
+        let rec = rec.clone();
+        ui.on_track_locked(move |t, on| {
+            edit_row(&project, &rec, t, StepKind::LockTrack, |r| r.locked = on);
+        });
+    }
+    {
+        let project = st.project.clone();
+        let rec = rec.clone();
+        ui.on_track_renamed(move |t, name| {
+            // Blank or spaces only: back to "Track N".
+            let name = name.trim().to_string();
+            edit_row(&project, &rec, t, StepKind::RenameTrack, |r| {
+                r.name = name.as_str().into()
+            });
+        });
+    }
+    // Solo is for listening: it changes what the engine silences and nothing
+    // else. Not the history, not the file, not unsaved work.
+    {
+        let project = st.project.clone();
+        let rows = st.tracks.clone();
+        ui.on_track_soloed(move |t, on| {
+            let Some(i) = usize::try_from(t).ok() else {
+                return;
+            };
+            let Some(mut row) = rows.row_data(i) else {
+                return;
+            };
+            row.soloed = on;
+            rows.set_row_data(i, row);
+            if let Some(p) = project.borrow_mut().as_mut() {
+                push_mutes(p, &rows);
+            }
+        });
+    }
+}
+
+/// Change the track row at `t` as an edit: recorded as a step of `kind`,
+/// pushed to the engine, and counted as unsaved work. A change that leaves
+/// the row as it was does nothing at all. Works before the engine exists,
+/// as adding a track does: the step needs no clips.
+fn edit_row(
+    project: &super::ProjectSlot,
+    rec: &Recorder,
+    t: i32,
+    kind: StepKind,
+    change: impl FnOnce(&mut TimelineTrack),
+) {
+    let Some(i) = usize::try_from(t).ok() else {
+        return;
+    };
+    let Some(was) = rec.tracks.row_data(i) else {
+        return;
+    };
+    let mut row = was.clone();
+    change(&mut row);
+    if row == was {
+        return;
+    }
+    let mut slot = project.borrow_mut();
+    let before = rec.before(slot.as_ref());
+    rec.tracks.set_row_data(i, row);
+    if let Some(p) = slot.as_mut() {
+        push_mutes(p, &rec.tracks);
+        // The engine cannot tell a name or a lock changed; a mute it does
+        // not count, because solo drives the same call.
+        p.mark_unsaved();
+    }
+    rec.record(slot.as_ref(), kind, Some(Subject::Track(i)), before);
+}
 
 /// What the engine should silence, given the rows as they are. While any
 /// track is soloed every other one is silent; an explicit mute wins over
@@ -30,6 +114,14 @@ pub(super) fn records(rows: &[TimelineTrack]) -> Vec<TrackRecord> {
             locked: r.locked,
         })
         .collect()
+}
+
+/// What to call the track at `i`: what it was named, or "Track {i+1}".
+pub(super) fn label(table: &[TrackRecord], i: usize) -> String {
+    match table.get(i) {
+        Some(t) if !t.name.is_empty() => t.name.clone(),
+        _ => format!("Track {}", i + 1),
+    }
 }
 
 /// The row a record draws as, carrying the solo flag it is given.
@@ -133,5 +225,49 @@ pub(super) mod tests {
         );
         assert_eq!(row(&got[0], true), rows[0], "and a row comes back from it");
         assert!(!row(&got[0], false).soloed);
+    }
+
+    #[test]
+    fn a_track_is_called_by_its_name_or_its_number() {
+        let table = records(&[
+            trk("Dialogue", false, false, false),
+            trk("", false, false, false),
+        ]);
+        assert_eq!(label(&table, 0), "Dialogue");
+        assert_eq!(label(&table, 1), "Track 2");
+        assert_eq!(label(&table, 5), "Track 6", "past the end");
+    }
+
+    /// Two unnamed tracks and no engine, as the window starts.
+    fn recorder() -> (super::super::ProjectSlot, Recorder) {
+        let rec = Recorder {
+            history: std::rc::Rc::new(std::cell::RefCell::new(crate::gui::history::History::new())),
+            tl_clips: std::rc::Rc::new(VecModel::from(Vec::new())),
+            tracks: std::rc::Rc::new(VecModel::from(vec![TimelineTrack::default(); 2])),
+            ui: slint::Weak::default(),
+        };
+        (std::rc::Rc::new(std::cell::RefCell::new(None)), rec)
+    }
+
+    /// A mute is an edit, recorded with the track's label, and needs no
+    /// engine: a track can be muted before any clip is on the timeline.
+    #[test]
+    fn muting_a_row_is_a_step_named_for_its_track() {
+        use crate::gui::history::Step;
+        let (project, rec) = recorder();
+        edit_row(&project, &rec, 1, StepKind::MuteTrack, |r| r.muted = true);
+        assert!(rec.tracks.row_data(1).unwrap().muted);
+        let history = rec.history.borrow();
+        let step = history.peek_undo().expect("a step");
+        assert_eq!(step.describe(), "muting Track 2");
+        assert_eq!(step.subject, Some(Subject::Track(1)));
+    }
+
+    #[test]
+    fn a_change_that_changes_nothing_records_nothing() {
+        let (project, rec) = recorder();
+        edit_row(&project, &rec, 0, StepKind::LockTrack, |r| r.locked = false);
+        edit_row(&project, &rec, 9, StepKind::LockTrack, |r| r.locked = true);
+        assert!(!rec.history.borrow().can_undo());
     }
 }

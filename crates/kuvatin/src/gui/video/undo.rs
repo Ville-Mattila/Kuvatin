@@ -33,15 +33,44 @@ pub(super) enum StepKind {
     AddTrack,
     Split,
     Speed,
+    MuteTrack,
+    LockTrack,
+    RenameTrack,
 }
 
 impl StepKind {
-    /// The kinds a continuous gesture produces. Only these merge.
+    /// The kinds a continuous gesture produces, and a rename, whose
+    /// keystrokes are one renaming. Only these merge. A mute or a lock is one
+    /// click: muting and unmuting inside a second is two steps, not nothing.
     fn merges(self) -> bool {
         matches!(
             self,
-            StepKind::Move | StepKind::Trim | StepKind::Transform | StepKind::Duration
+            StepKind::Move
+                | StepKind::Trim
+                | StepKind::Transform
+                | StepKind::Duration
+                | StepKind::RenameTrack
         )
+    }
+}
+
+/// What a step is about, when it is about one thing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Subject {
+    Clip(String),
+    /// A track, by its index. Safe as a merge key: the only track kind that
+    /// merges is RenameTrack, and every edit that could renumber a track is a
+    /// kind of its own, which `merges_with` already refuses to merge across.
+    Track(usize),
+}
+
+impl Subject {
+    /// The clip this is about, if it is about a clip.
+    pub(super) fn clip(&self) -> Option<&str> {
+        match self {
+            Subject::Clip(id) => Some(id),
+            Subject::Track(_) => None,
+        }
     }
 }
 
@@ -97,9 +126,10 @@ pub(super) fn diff(before: &Capture, after: &Capture) -> Vec<ClipChange> {
 /// What one timeline edit changed.
 pub(super) struct TimelineStep {
     pub(super) kind: StepKind,
-    /// The clip the step is about, when it is about one.
-    pub(super) subject: Option<String>,
-    /// That clip's display name, for the hint.
+    /// The clip or track the step is about, when it is about one.
+    pub(super) subject: Option<Subject>,
+    /// That clip's display name, or that track's label on the step's "before"
+    /// side, for the hint.
     pub(super) name: String,
     pub(super) changes: Vec<ClipChange>,
     /// The timeline rows of the clips that exist on only one side, by ID, so a
@@ -117,7 +147,7 @@ impl TimelineStep {
     /// those of clips that come or go are kept.
     pub(super) fn new(
         kind: StepKind,
-        subject: Option<&str>,
+        subject: Option<Subject>,
         name: &str,
         before: &Capture,
         after: &Capture,
@@ -135,7 +165,7 @@ impl TimelineStep {
             .collect();
         TimelineStep {
             kind,
-            subject: subject.map(str::to_string),
+            subject,
             name: name.to_string(),
             changes,
             kept_rows,
@@ -147,8 +177,8 @@ impl TimelineStep {
     /// Replace a clip's ID everywhere in the step: the engine restored it
     /// under a new one.
     pub(super) fn rename_clip(&mut self, old: &str, new: &str) {
-        if self.subject.as_deref() == Some(old) {
-            self.subject = Some(new.to_string());
+        if self.subject.as_ref().and_then(Subject::clip) == Some(old) {
+            self.subject = Some(Subject::Clip(new.to_string()));
         }
         for change in &mut self.changes {
             if change.id == old {
@@ -157,6 +187,15 @@ impl TimelineStep {
         }
         if let Some(row) = self.kept_rows.remove(old) {
             self.kept_rows.insert(new.to_string(), row);
+        }
+    }
+
+    /// Whether the step's track has `flag` set on its "after" side: which
+    /// way a toggle went, read off the step's own tables.
+    fn turned_on(&self, flag: impl Fn(&TrackRecord) -> bool) -> bool {
+        match self.subject {
+            Some(Subject::Track(t)) => self.tracks_after.get(t).is_some_and(flag),
+            _ => false,
         }
     }
 }
@@ -175,6 +214,11 @@ impl Step for TimelineStep {
             StepKind::AddTrack => "adding a track".into(),
             StepKind::Split => format!("splitting {name}"),
             StepKind::Speed => format!("changing the speed of {name}"),
+            StepKind::MuteTrack if self.turned_on(|t| t.muted) => format!("muting {name}"),
+            StepKind::MuteTrack => format!("unmuting {name}"),
+            StepKind::LockTrack if self.turned_on(|t| t.locked) => format!("locking {name}"),
+            StepKind::LockTrack => format!("unlocking {name}"),
+            StepKind::RenameTrack => format!("renaming {name}"),
         }
     }
 
@@ -395,7 +439,7 @@ impl Recorder {
         &self,
         project: Option<&kuvatin_video::Project>,
         kind: StepKind,
-        subject: Option<&str>,
+        subject: Option<Subject>,
         before: Capture,
     ) {
         let after = Capture::of(project, self.table());
@@ -405,18 +449,28 @@ impl Recorder {
     pub(super) fn record_captures(
         &self,
         kind: StepKind,
-        subject: Option<&str>,
+        subject: Option<Subject>,
         before: Capture,
         after: Capture,
     ) {
         let rows: Vec<TimelineClip> = self.tl_clips.iter().collect();
-        let from_rows = subject
-            .and_then(|id| rows.iter().find(|r| r.id.as_str() == id))
-            .map(|r| r.name.to_string());
-        let from_records = subject
-            .and_then(|id| before.records.get(id).or_else(|| after.records.get(id)))
-            .map(|r| r.name.clone());
-        let name = from_rows.or(from_records).unwrap_or_default();
+        let name = match &subject {
+            Some(Subject::Clip(id)) => {
+                let from_rows = rows
+                    .iter()
+                    .find(|r| r.id.as_str() == id)
+                    .map(|r| r.name.to_string());
+                let from_records = before
+                    .records
+                    .get(id)
+                    .or_else(|| after.records.get(id))
+                    .map(|r| r.name.clone());
+                from_rows.or(from_records).unwrap_or_default()
+            }
+            // As it was called before the step: "renaming Track 2".
+            Some(Subject::Track(t)) => tracks::label(&before.tracks, *t),
+            None => String::new(),
+        };
         let kept = rows.into_iter().map(|r| (r.id.to_string(), r)).collect();
         let step = TimelineStep::new(kind, subject, &name, &before, &after, kept);
         let mut history = self.history.borrow_mut();
@@ -652,12 +706,14 @@ fn apply_step(
     }
     ui.set_timeline_duration(duration.map(|d| d.as_secs_f32()).unwrap_or(0.0));
 
-    let subject_now = subject.map(|s| {
+    // A track's step selects no clip; a clip's step selects its clip, under
+    // the ID it has now.
+    let subject_now = subject.as_ref().and_then(Subject::clip).map(|s| {
         renames
             .iter()
-            .find(|(old, _)| *old == s)
+            .find(|(old, _)| old == s)
             .map(|(_, new)| new.clone())
-            .unwrap_or(s)
+            .unwrap_or_else(|| s.to_string())
     });
     let next = selection_after(&new_rows, subject_now.as_deref(), selected_id.as_deref());
     // A clip deleted before its thumbnail arrived comes back without one:
@@ -798,7 +854,7 @@ mod tests {
     fn step(kind: StepKind, subject: &str, before: &Capture, after: &Capture) -> TimelineStep {
         TimelineStep::new(
             kind,
-            Some(subject),
+            Some(Subject::Clip(subject.into())),
             "intro.mp4",
             before,
             after,
@@ -860,7 +916,7 @@ mod tests {
             .collect();
         let s = TimelineStep::new(
             StepKind::Delete,
-            Some("b"),
+            Some(Subject::Clip("b".into())),
             "intro.mp4",
             &before,
             &after,
@@ -1013,14 +1069,14 @@ mod tests {
                 .collect();
         let mut s = TimelineStep::new(
             StepKind::Delete,
-            Some("old"),
+            Some(Subject::Clip("old".into())),
             "intro.mp4",
             &before,
             &after,
             rows,
         );
         s.rename_clip("old", "new");
-        assert_eq!(s.subject.as_deref(), Some("new"));
+        assert_eq!(s.subject, Some(Subject::Clip("new".into())));
         let ids: Vec<&str> = s.changes.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["new", "other"], "only the renamed clip's change");
         assert!(s.kept_rows.contains_key("new") && !s.kept_rows.contains_key("old"));
@@ -1120,7 +1176,15 @@ mod tests {
     fn each_kind_describes_itself() {
         let c = cap(&[], 2);
         let d = |kind| {
-            TimelineStep::new(kind, Some("a"), "intro.mp4", &c, &c, HashMap::new()).describe()
+            TimelineStep::new(
+                kind,
+                Some(Subject::Clip("a".into())),
+                "intro.mp4",
+                &c,
+                &c,
+                HashMap::new(),
+            )
+            .describe()
         };
         assert_eq!(d(StepKind::Move), "moving intro.mp4");
         assert_eq!(d(StepKind::Trim), "trimming intro.mp4");
@@ -1132,6 +1196,118 @@ mod tests {
         assert_eq!(d(StepKind::AddTrack), "adding a track");
         assert_eq!(d(StepKind::Split), "splitting intro.mp4");
         assert_eq!(d(StepKind::Speed), "changing the speed of intro.mp4");
+    }
+
+    /// A step about track `t`, going from one table to another, named as the
+    /// recorder names it: by the track's label before the step.
+    fn track_step(
+        kind: StepKind,
+        t: usize,
+        before: &[TrackRecord],
+        after: &[TrackRecord],
+    ) -> TimelineStep {
+        TimelineStep::new(
+            kind,
+            Some(Subject::Track(t)),
+            &tracks::label(before, t),
+            &table_only(before),
+            &table_only(after),
+            HashMap::new(),
+        )
+    }
+
+    /// Which way a toggle went is read off the step's own tables, and the
+    /// hint names the track as it was called before the step.
+    #[test]
+    fn track_steps_describe_which_way_they_went() {
+        let plain = [TrackRecord::default(), named("Dialogue")];
+        let mut muted = plain.clone();
+        muted[1].muted = true;
+        let mut locked = plain.clone();
+        locked[1].locked = true;
+        let mut renamed = plain.clone();
+        renamed[0].name = "Music".into();
+        let d =
+            |kind, t, b: &[TrackRecord], a: &[TrackRecord]| track_step(kind, t, b, a).describe();
+        assert_eq!(d(StepKind::MuteTrack, 1, &plain, &muted), "muting Dialogue");
+        assert_eq!(
+            d(StepKind::MuteTrack, 1, &muted, &plain),
+            "unmuting Dialogue"
+        );
+        assert_eq!(
+            d(StepKind::LockTrack, 1, &plain, &locked),
+            "locking Dialogue"
+        );
+        assert_eq!(
+            d(StepKind::LockTrack, 1, &locked, &plain),
+            "unlocking Dialogue"
+        );
+        assert_eq!(
+            d(StepKind::RenameTrack, 0, &plain, &renamed),
+            "renaming Track 1"
+        );
+    }
+
+    /// A rename is typed: its keystrokes are one step. Renames of different
+    /// tracks are not, and neither is a mute or a lock, which is one click.
+    #[test]
+    fn renames_of_one_track_merge_and_nothing_else_about_tracks_does() {
+        let t0 = [named("A"), TrackRecord::default()];
+        let t1 = [named("Ab"), TrackRecord::default()];
+        let t2 = [named("Abc"), TrackRecord::default()];
+        let first = track_step(StepKind::RenameTrack, 0, &t0, &t1);
+        assert!(first.merges_with(&track_step(StepKind::RenameTrack, 0, &t1, &t2)));
+        assert!(!first.merges_with(&track_step(StepKind::RenameTrack, 1, &t1, &t2)));
+        for kind in [StepKind::MuteTrack, StepKind::LockTrack] {
+            assert!(
+                !track_step(kind, 0, &t0, &t1).merges_with(&track_step(kind, 0, &t1, &t0)),
+                "{kind:?} never merges"
+            );
+        }
+    }
+
+    /// Typing a name and then typing the old one back within a second is no
+    /// rename at all: the history drops the step, and the next change starts
+    /// one of its own rather than merging into whatever came before.
+    #[test]
+    fn a_rename_typed_back_to_the_old_name_leaves_nothing() {
+        let t0 = [named("A")];
+        let t1 = [named("B")];
+        let now = Instant::now();
+        let mut history = History::new();
+        history.record(track_step(StepKind::RenameTrack, 0, &t0, &t1), now);
+        history.record(
+            track_step(StepKind::RenameTrack, 0, &t1, &t0),
+            now + std::time::Duration::from_millis(300),
+        );
+        assert!(!history.can_undo(), "nothing changed after all");
+    }
+
+    /// Muting and unmuting straight away is two clicks and two steps.
+    #[test]
+    fn a_mute_and_an_unmute_are_two_steps() {
+        let plain = [named("Dialogue")];
+        let muted = [TrackRecord {
+            muted: true,
+            ..named("Dialogue")
+        }];
+        let now = Instant::now();
+        let mut history = History::new();
+        history.record(track_step(StepKind::MuteTrack, 0, &plain, &muted), now);
+        history.record(
+            track_step(StepKind::MuteTrack, 0, &muted, &plain),
+            now + std::time::Duration::from_millis(100),
+        );
+        assert_eq!(history.undo_hint(), "Undo unmuting Dialogue");
+        history.commit_undo();
+        assert_eq!(history.undo_hint(), "Undo muting Dialogue");
+    }
+
+    /// Undoing a track's step selects no clip: the one selected stays.
+    #[test]
+    fn a_track_step_is_not_a_clip_to_select() {
+        assert_eq!(Subject::Track(0).clip(), None);
+        assert_eq!(Subject::Clip("a".into()).clip(), Some("a"));
     }
 
     fn recorder(rows: Vec<TimelineClip>, tracks: usize) -> Recorder {
@@ -1152,7 +1328,12 @@ mod tests {
         let r = recorder(vec![shown], 2);
         let before = cap(&[("a", rec(0, 0.0, 2.0))], 2);
         let after = cap(&[], 2);
-        r.record_captures(StepKind::Delete, Some("a"), before, after);
+        r.record_captures(
+            StepKind::Delete,
+            Some(Subject::Clip("a".into())),
+            before,
+            after,
+        );
         let history = r.history.borrow();
         let s = history.peek_undo().expect("a step");
         assert_eq!(s.describe(), "deleting intro (bin name).mp4");
@@ -1174,7 +1355,12 @@ mod tests {
     fn an_edit_that_changed_nothing_records_nothing() {
         let r = recorder(vec![row("a", &rec(0, 0.0, 2.0))], 2);
         let same = cap(&[("a", rec(0, 0.0, 2.0))], 2);
-        r.record_captures(StepKind::Move, Some("a"), same.clone(), same);
+        r.record_captures(
+            StepKind::Move,
+            Some(Subject::Clip("a".into())),
+            same.clone(),
+            same,
+        );
         assert!(!r.history.borrow().can_undo());
     }
 
@@ -1186,7 +1372,12 @@ mod tests {
         let before = cap(&[], 2);
         r.tl_clips.push(row("a", &rec(0, 0.0, 2.0)));
         let after = cap(&[("a", rec(0, 0.0, 2.0))], 2);
-        r.record_captures(StepKind::Add, Some("a"), before, after);
+        r.record_captures(
+            StepKind::Add,
+            Some(Subject::Clip("a".into())),
+            before,
+            after,
+        );
         let history = r.history.borrow();
         let s = history.peek_undo().expect("a step");
         assert_eq!(s.describe(), "adding intro.mp4");
