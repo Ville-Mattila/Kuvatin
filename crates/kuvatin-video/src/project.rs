@@ -1937,10 +1937,30 @@ impl Project {
             return;
         }
         self.mutes = mutes.to_vec();
+        let wanted = |i: usize| self.mutes.get(i).copied().unwrap_or(false);
+        let needed = self
+            .layers
+            .iter()
+            .enumerate()
+            .any(|(i, layer)| self.is_silent(layer) != wanted(i));
+        if !needed {
+            return;
+        }
+        // A layer's sound switched while the timeline is still applying an
+        // earlier commit (a track reorder, most often) left the audio
+        // composition invalid in three runs of six: "The NleComposition
+        // structure is not valid". Waited for, none of six failed. Below
+        // PAUSED no commit runs, so there is nothing to wait for.
+        if self.pipeline.current_state() >= gst::State::Paused {
+            let asked = self.commits.get();
+            let end = std::time::Instant::now() + Duration::from_secs(2);
+            while self.commits_done() < asked && std::time::Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         let mut changed = false;
         for (i, layer) in self.layers.iter().enumerate() {
-            let muted = self.mutes.get(i).copied().unwrap_or(false);
-            changed |= self.apply_mute(layer, muted);
+            changed |= self.apply_mute(layer, wanted(i));
         }
         if changed {
             self.commit();
@@ -5206,6 +5226,37 @@ mod tests {
         let (frame, _) = waveform_uri(&uri, 400, 200).expect("the export has a sound stream");
         let ink = frame.rgba.chunks_exact(4).filter(|p| p[3] > 0).count();
         ink as f64 / (400.0 * 200.0)
+    }
+
+    /// A mute straight after a track reorder switched a layer's sound while
+    /// the timeline was still applying the reorder, and GStreamer called the
+    /// audio composition invalid in three runs of six. The mute now waits
+    /// for the reorder's commit. Needs `GST_TEST_FILE`, a video with sound.
+    #[test]
+    fn muting_a_track_just_after_a_reorder_keeps_the_audio_valid() {
+        let Some(path) = std::env::var_os("GST_TEST_FILE") else {
+            eprintln!("skipping muting_a_track_just_after_a_reorder_...: set GST_TEST_FILE");
+            return;
+        };
+        for round in 0..6 {
+            let mut project = Project::new(|_f| {}).expect("project");
+            project
+                .append_clip(Path::new(&path), 1, None)
+                .expect("clip");
+            project.play().expect("play");
+            wait_settled(&project);
+            project.move_track(0, 1);
+            project.set_track_mutes(&[true, false]);
+            let end = std::time::Instant::now() + Duration::from_millis(1500);
+            while std::time::Instant::now() < end {
+                project.refresh_preview();
+                if let Some(e) = project.poll_preview_error() {
+                    panic!("round {round}: {e}");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = project.pause();
+        }
     }
 
     /// A muted track is silent in the export, not only in the preview. The

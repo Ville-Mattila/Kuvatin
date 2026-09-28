@@ -552,6 +552,10 @@ fn add_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    // A track muted before the first clip arrived was muted in the rows
+    // only: the engine did not exist yet. It hears about it now, before the
+    // clip is heard. Nothing to do when it already knows.
+    tracks::push_mutes(project, &rec.tracks);
     let before = rec.before(Some(&*project));
     match project.append_clip(path, track, img_dur) {
         Ok(info) => {
@@ -633,6 +637,10 @@ fn add_sequence_to_timeline(
     let Some(project) = slot.as_mut() else {
         return;
     };
+    // A track muted before the first clip arrived was muted in the rows
+    // only: the engine did not exist yet. It hears about it now, before the
+    // clip is heard. Nothing to do when it already knows.
+    tracks::push_mutes(project, &rec.tracks);
     let before = rec.before(Some(&*project));
     let added = spec
         .uri()
