@@ -355,6 +355,7 @@ pub(super) fn wire(
                 if ui.get_app_mode() != 1 {
                     return;
                 }
+                timeline::show_dissolves(&ui, &rec.tl_clips);
                 let mut slot = project_slot.borrow_mut();
                 let Some(project) = slot.as_mut() else {
                     return;

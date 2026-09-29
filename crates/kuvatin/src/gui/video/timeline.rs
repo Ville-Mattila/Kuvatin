@@ -4,8 +4,8 @@
 use super::tracks;
 use super::undo::{Recorder, StepKind, Subject};
 use super::{VideoState, MAX_SCALE_PCT, MIN_SCALE_PCT, SPEEDS};
-use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip, TimelineTrack};
-use slint::{ComponentHandle, Model, SharedString, VecModel};
+use crate::gui::{show_error, AppWindow, ClipKind, TimelineClip, TimelineOverlap, TimelineTrack};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -182,6 +182,31 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             tl_clips.set_row_data(i as usize, row);
             if let (Some(ui), Some(d)) = (ui_weak.upgrade(), dur) {
                 ui.set_timeline_duration(d.as_secs_f32());
+            }
+        });
+    }
+
+    // Dissolve chip: slide the selected clip so it overlaps the clip before
+    // it by the default length, or so the two only meet. Through the drop,
+    // so the engine's rule bounds it and it is a Move like any drag.
+    {
+        let ui_weak = ui_weak.clone();
+        let tl_clips = tl_clips.clone();
+        ui.on_timeline_dissolve(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let Ok(sel) = usize::try_from(ui.get_timeline_selected()) else {
+                return;
+            };
+            let rows: Vec<TimelineClip> = tl_clips.iter().collect();
+            let want = match dissolve_of(&rows, sel) {
+                Some(d) if d > 0.0 => 0.0,
+                Some(_) => DISSOLVE_SECS,
+                None => return,
+            };
+            if let Some((_, delta)) = dissolve_slide(&rows, sel, want) {
+                ui.invoke_timeline_clip_dropped(sel as i32, delta, 0);
             }
         });
     }
@@ -644,6 +669,90 @@ fn drop_target_track(
     (current + delta_rows).clamp(0, count)
 }
 
+/// How long a dissolve the Dissolve chip makes, in seconds.
+const DISSOLVE_SECS: f32 = 1.0;
+
+/// Shorter than this, two clips are taken to meet rather than overlap:
+/// positions come through f32 seconds.
+const OVERLAP_EPS: f32 = 1e-3;
+
+/// Where clips on the same track overlap, in track and start order. Only
+/// neighbours on a track can: the engine never lets a clip reach past the
+/// one beside it.
+pub(super) fn overlaps(rows: &[TimelineClip]) -> Vec<TimelineOverlap> {
+    let mut sorted: Vec<&TimelineClip> = rows.iter().collect();
+    sorted.sort_by(|a, b| a.track.cmp(&b.track).then(a.start.total_cmp(&b.start)));
+    sorted
+        .windows(2)
+        .filter(|w| w[0].track == w[1].track)
+        .filter_map(|w| {
+            let end = (w[0].start + w[0].duration).min(w[1].start + w[1].duration);
+            (end - w[1].start > OVERLAP_EPS).then(|| TimelineOverlap {
+                track: w[1].track,
+                start: w[1].start,
+                duration: end - w[1].start,
+            })
+        })
+        .collect()
+}
+
+/// The row before row `sel` on its own track: the last one starting earlier.
+fn previous_on_track(rows: &[TimelineClip], sel: usize) -> Option<usize> {
+    let s = rows.get(sel)?;
+    rows.iter()
+        .enumerate()
+        .filter(|(i, r)| *i != sel && r.track == s.track && r.start < s.start)
+        .max_by(|(_, a), (_, b)| a.start.total_cmp(&b.start))
+        .map(|(i, _)| i)
+}
+
+/// The clip before `sel` on its own track and the slide that would give them
+/// a `want` second dissolve: negative to make one, positive to take one away.
+/// None when nothing precedes it on the track, or when the clip before it is
+/// too short to give up `want` and still keep 0.2 s of its own.
+fn dissolve_slide(rows: &[TimelineClip], sel: usize, want: f32) -> Option<(usize, f32)> {
+    let p = previous_on_track(rows, sel)?;
+    let (prev, s) = (&rows[p], &rows[sel]);
+    if prev.duration < want + 0.2 {
+        return None;
+    }
+    Some((p, prev.start + prev.duration - want - s.start))
+}
+
+/// How far the selected clip dissolves from the one before it, when there
+/// is one before it: 0 when they only meet or a gap parts them.
+fn dissolve_of(rows: &[TimelineClip], sel: usize) -> Option<f32> {
+    let p = previous_on_track(rows, sel)?;
+    let overlap = rows[p].start + rows[p].duration - rows[sel].start;
+    Some(if overlap > OVERLAP_EPS { overlap } else { 0.0 })
+}
+
+/// Show the cross-dissolves on the timeline and what the Dissolve chip would
+/// do for the selected clip. The UI tick calls this, so no edit, undo or
+/// reopen can leave a stale wedge; it only touches the window when
+/// something changed.
+pub(super) fn show_dissolves(ui: &AppWindow, rows: &VecModel<TimelineClip>) {
+    let rows: Vec<TimelineClip> = rows.iter().collect();
+    let now = overlaps(&rows);
+    let shown = ui.get_timeline_overlaps();
+    if shown.row_count() != now.len() || shown.iter().zip(&now).any(|(a, b)| a != *b) {
+        ui.set_timeline_overlaps(ModelRc::new(VecModel::from(now)));
+    }
+    let dissolve = usize::try_from(ui.get_timeline_selected())
+        .ok()
+        .and_then(|sel| dissolve_of(&rows, sel));
+    let hint = match dissolve {
+        None => "Select a clip with another before it on its track".to_string(),
+        Some(d) if d > 0.0 => format!("Remove the {d:.1} s dissolve with the clip before it"),
+        Some(_) => format!("Cross-dissolve with the clip before it ({DISSOLVE_SECS:.1} s)"),
+    };
+    ui.set_dissolve_possible(dissolve.is_some());
+    ui.set_dissolve_present(dissolve.is_some_and(|d| d > 0.0));
+    if ui.get_dissolve_hint() != hint.as_str() {
+        ui.set_dissolve_hint(hint.into());
+    }
+}
+
 /// Which row is selected after row `removed` is deleted: none if it was the
 /// selected one, one fewer if the selection sat after it (those rows move up),
 /// otherwise the same.
@@ -844,5 +953,84 @@ mod tests {
                 "{r} survives the engine's f32 rounding"
             );
         }
+    }
+
+    // ---- cross-dissolves ----------------------------------------------------
+
+    fn clip_at(track: i32, start: f32, duration: f32) -> TimelineClip {
+        TimelineClip {
+            track,
+            start,
+            duration,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dissolve_wedges_sit_where_clips_on_a_track_overlap() {
+        let rows = [clip_at(0, 3.0, 4.0), clip_at(0, 0.0, 4.0)];
+        let got = overlaps(&rows);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].track, got[0].start), (0, 3.0));
+        assert!(near(got[0].duration, 1.0));
+    }
+
+    #[test]
+    fn dissolve_wedges_need_the_same_track_and_a_real_overlap() {
+        assert!(overlaps(&[clip_at(0, 0.0, 4.0), clip_at(1, 3.0, 4.0)]).is_empty());
+        assert!(
+            overlaps(&[clip_at(0, 0.0, 4.0), clip_at(0, 4.0, 2.0)]).is_empty(),
+            "butted up: no dissolve"
+        );
+    }
+
+    #[test]
+    fn dissolve_wedges_come_in_track_and_start_order() {
+        let rows = [
+            clip_at(1, 0.0, 3.0),
+            clip_at(0, 5.0, 3.0),
+            clip_at(0, 0.0, 3.0),
+            clip_at(0, 2.5, 3.0),
+            clip_at(1, 2.0, 3.0),
+        ];
+        let got: Vec<(i32, f32)> = overlaps(&rows).iter().map(|o| (o.track, o.start)).collect();
+        assert_eq!(got, vec![(0, 2.5), (0, 5.0), (1, 2.0)]);
+    }
+
+    #[test]
+    fn dissolve_slide_makes_one_of_the_length_asked() {
+        // [0,4) then [5,8): slide 2 s left to overlap by 1 s.
+        let rows = [clip_at(0, 0.0, 4.0), clip_at(0, 5.0, 3.0)];
+        let (p, delta) = dissolve_slide(&rows, 1, 1.0).expect("a clip before it");
+        assert_eq!(p, 0);
+        assert!(near(delta, -2.0), "{delta}");
+    }
+
+    #[test]
+    fn dissolve_slide_takes_one_away() {
+        let rows = [clip_at(0, 0.0, 4.0), clip_at(0, 2.8, 3.0)];
+        let (_, delta) = dissolve_slide(&rows, 1, 0.0).expect("a clip before it");
+        assert!(near(delta, 1.2), "{delta}");
+        assert_eq!(
+            dissolve_of(&rows, 1).map(|d| (d * 10.0).round()),
+            Some(12.0)
+        );
+    }
+
+    #[test]
+    fn dissolve_slide_needs_a_long_enough_clip_before_it() {
+        let alone = [clip_at(0, 5.0, 3.0), clip_at(1, 0.0, 4.0)];
+        assert_eq!(
+            dissolve_slide(&alone, 0, 1.0),
+            None,
+            "nothing before it on its track"
+        );
+        let short = [clip_at(0, 0.0, 1.1), clip_at(0, 2.0, 3.0)];
+        assert_eq!(
+            dissolve_slide(&short, 1, 1.0),
+            None,
+            "1.1 s cannot give up 1.0 s"
+        );
+        assert!(dissolve_slide(&short, 1, 0.5).is_some());
     }
 }
