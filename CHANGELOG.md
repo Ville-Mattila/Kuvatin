@@ -14,6 +14,8 @@ the minor number moves when something new appears, the patch number when
 something is fixed.
 
 ## [Unreleased]
+
+## [2.14.0] - 2026-09-29
 The video editor gets tracks you can manage, dissolves and text. Each track
 can be muted, soloed, locked and renamed. Two clips on one track may now
 overlap, and they dissolve into each other for as long as they do; the
@@ -383,7 +385,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.13.0...HEAD
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.14.0...HEAD
+[2.14.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.0
 [2.13.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.13.0
 [2.12.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.12.0
 [2.11.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.11.0
