@@ -1306,7 +1306,12 @@ impl Project {
                 done
             })
             .collect();
+        // Where two clips on a layer overlap, GES puts a cross-dissolve of
+        // its own between them, resizes it as they move and takes it away
+        // when they part. It is never one of our clips (see `record_of`).
+        timeline.set_auto_transition(true);
         let layer = timeline.append_layer();
+        layer.set_auto_transition(true);
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
 
@@ -1438,11 +1443,13 @@ impl Project {
     }
 
     /// Ensure at least `index + 1` layers exist; return the layer at `index`.
+    /// Every layer draws a cross-dissolve where its clips overlap.
     /// A layer made for a muted position arrives silent: without that, a clip
     /// dropped onto a muted track that had no layer yet would be heard.
     fn layer(&mut self, index: usize) -> ges::Layer {
         while self.layers.len() <= index {
             let layer = self.timeline.append_layer();
+            layer.set_auto_transition(true);
             if self.mutes.get(self.layers.len()).copied().unwrap_or(false) {
                 self.apply_mute(&layer, true);
             }
@@ -2469,6 +2476,12 @@ impl Project {
             .clips
             .values()
             .any(|c| c.layer().is_some_and(|l| &l == layer))
+    }
+
+    /// Everything GES has on a track's layer, its own transitions included.
+    #[cfg(test)]
+    fn layer_clip_count(&self, track: usize) -> usize {
+        self.layers.get(track).map_or(0, |l| l.clips().len())
     }
 
     /// Replace the timeline with what `doc` describes.
@@ -6584,6 +6597,133 @@ mod tests {
             })
             .count();
         assert!(red > 100, "red text at the top left: {red} pixels");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two stills on one track, the second starting 1 s before the first
+    /// ends: a 1 s dissolve.
+    fn overlapping_pair(project: &mut Project, png: &Path, track: usize) -> (ClipId, ClipId) {
+        let a = project
+            .add_clip(png, track, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let b = project
+            .add_clip(png, track, secs(2.0), Duration::ZERO, secs(3.0))
+            .expect("b");
+        (a, b)
+    }
+
+    /// The transition GES puts over an overlap is never one of our clips: it
+    /// reaches no record, no file and no undo step.
+    #[test]
+    fn dissolve_overlapping_clips_are_still_two_records() {
+        let (dir, png, mut project) = undo_fixture("dissolve-records");
+        overlapping_pair(&mut project, &png, 0);
+        assert_eq!(project.clip_records().len(), 2);
+        assert_eq!(project.to_document().clips.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dissolve_appears_on_the_layer_and_goes_when_the_clips_part() {
+        let (dir, png, mut project) = undo_fixture("dissolve-layer");
+        let (_, b) = overlapping_pair(&mut project, &png, 0);
+        assert_eq!(project.layer_clip_count(0), 3, "two clips and a dissolve");
+        project.slide_clip(&b, 1.0).expect("slide");
+        assert_eq!(project.layer_clip_count(0), 2, "butted up: no dissolve");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dissolve_survives_a_reopen() {
+        let (dir, png, mut project) = undo_fixture("dissolve-reopen");
+        overlapping_pair(&mut project, &png, 0);
+        let path = dir.join("dissolve.kuvatin");
+        project.to_document().save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(text.matches("[[clips]]").count(), 2, "{text}");
+        assert!(text.contains("version = 1"), "{text}");
+        let doc = crate::document::ProjectFile::load(&path).expect("load");
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        reopened.apply_document(&doc).expect("apply");
+        assert_eq!(reopened.layer_clip_count(0), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A layer is empty when none of OUR clips is on it, whatever GES has
+    /// left there: removing both clips of a dissolve takes the track.
+    #[test]
+    fn dissolve_leaves_no_dead_track_when_its_clips_go() {
+        let (dir, png, mut project) = undo_fixture("dissolve-prune");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("top");
+        let (a, b) = overlapping_pair(&mut project, &png, 1);
+        assert_eq!(project.track_count(), 2);
+        assert!(project.remove_clip(&b));
+        assert!(project.remove_clip(&a));
+        assert_eq!(project.track_count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undo writes an overlap back through the parking dance, and the
+    /// dissolve comes back with it.
+    #[test]
+    fn dissolve_comes_back_when_undo_writes_the_overlap_back() {
+        let (dir, png, mut project) = undo_fixture("dissolve-undo");
+        let (a, b) = overlapping_pair(&mut project, &png, 0);
+        let (ra, rb) = (record_of(&project, &a), record_of(&project, &b));
+        project.slide_clip(&b, 2.0).expect("part");
+        assert_eq!(project.layer_clip_count(0), 2);
+        assert!(write_back(&mut project, &[(&a, &ra), (&b, &rb)]));
+        assert_same_record(&record_of(&project, &b), &rb);
+        assert_eq!(project.layer_clip_count(0), 3);
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Halfway through a dissolve from white to black, the picture is grey.
+    #[test]
+    fn dissolve_blends_the_two_clips_in_the_preview() {
+        type Shot = Arc<std::sync::Mutex<Option<(u32, u32, Vec<u8>)>>>;
+        let shot: Shot = Arc::new(std::sync::Mutex::new(None));
+        let sink = shot.clone();
+        let dir = scratch("dissolve-blend");
+        let white = dir.join("white.png");
+        let black = dir.join("black.png");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([255, 255, 255, 255]))
+            .save(&white)
+            .expect("white");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([0, 0, 0, 255]))
+            .save(&black)
+            .expect("black");
+        let mut project = Project::new(move |f| {
+            let mut buf = vec![0u8; (f.width * f.height * 4) as usize];
+            f.copy_packed_into(&mut buf);
+            *sink.lock().unwrap() = Some((f.width, f.height, buf));
+        })
+        .expect("project");
+        project
+            .add_clip(&white, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("white");
+        project
+            .add_clip(&black, 0, secs(2.0), Duration::ZERO, secs(3.0))
+            .expect("black");
+        project.pause().expect("pause");
+        wait_settled(&project);
+        *shot.lock().unwrap() = None;
+        project.seek_accurate(secs(2.5)).expect("seek");
+        wait_settled(&project);
+        std::thread::sleep(Duration::from_millis(500));
+        let (w, h, px) = shot.lock().unwrap().clone().expect("a frame");
+        let i = (((h / 2) * w + w / 2) * 4) as usize;
+        let (r, g, b) = (px[i], px[i + 1], px[i + 2]);
+        for v in [r, g, b] {
+            assert!(
+                (60..=200).contains(&v),
+                "grey mid-dissolve: {:?}",
+                (r, g, b)
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
