@@ -26,6 +26,23 @@ something is fixed.
   solo is neither. A project with named, muted or locked tracks opens in 2.13
   and earlier with its clips as they were and every track unnamed, audible and
   unlocked.
+- **Cross-dissolves.** Drag a clip onto the one before it on its track and the
+  two dissolve into each other for as long as they overlap; a band over the
+  overlap shows it. The **Dissolve** chip makes a one-second dissolve with the
+  clip before the selected one, or takes it away again. A clip still cannot
+  cover another completely, pass the clip beside it, or reach the one beyond,
+  and trimming an edge now follows the same rule.
+- **Text.** The **Text** chip puts a five-second title on the top track. Type
+  it in the inspector, over as many lines as you like, and pick its size,
+  weight, colour and alignment; move, scale and fade it like any other clip.
+  Typing a sentence is one undo step. A project with text in it needs this
+  version to open: 2.13 and earlier refuse it by name rather than open it
+  without the text. A project without text opens in them as before.
+
+### Changed
+- A project from before this version that has clips overlapping on a track
+  now plays a cross-dissolve where they overlap, instead of one clip hiding
+  the other.
 
 ## [2.13.0] - 2026-09-23
 The video editor learns to cut. The S key splits a clip at the playhead,
