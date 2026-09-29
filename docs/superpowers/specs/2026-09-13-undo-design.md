@@ -120,7 +120,8 @@ The merged step keeps the older "before" and takes the newer "after", and its
 time becomes the newer one. One slider drag, one mouse drag, or a held
 Ctrl+arrow therefore becomes one step. Add, Delete, Reorder tracks, Add track,
 Split, Speed, Mute track and Lock track never merge, and nothing in Images mode
-merges. Rename track merges, so the keystrokes of one renaming are one step.
+merges. Rename track merges, so the keystrokes of one renaming are one step,
+and so does Text, so a typed sentence is one step.
 
 A merged step that ends up changing nothing (a drag back to where it began) is
 removed, and that seals the history too, so the next change cannot merge into
@@ -162,7 +163,7 @@ the step beneath it.
 A `TimelineStep` holds:
 
 - its kind (Move, Trim, Transform, Duration, Add, Delete, Reorder tracks, Add
-  track, Split, Speed, Mute track, Lock track, Rename track), the clip **or
+  track, Split, Speed, Mute track, Lock track, Rename track, Text), the clip **or
   track** it is about if it is about one of them, and that clip's display name
   or that track's label, which its description uses ("trimming intro.mp4",
   "muting Dialogue");
@@ -204,14 +205,18 @@ called from:
 | `on_track_muted` | Mute track (track rows only) |
 | `on_track_locked` | Lock track (track rows only) |
 | `on_track_renamed` | Rename track (track rows only) |
+| the Text chip (`on_timeline_add_text`) | Add |
+| the transform timer's `set_title` (any title control) | Text |
 
 Keyboard nudges and trims reach the same callbacks, so they need no hook of
-their own.
+their own, and neither does the Dissolve chip: it slides the clip through
+`on_timeline_clip_dropped`, so making or removing a dissolve is a Move.
 
 **Undoing a timeline step:**
 
 1. Check `source_available` for every clip the undo brings back. If any is
    missing, change nothing, show an error naming the file, and keep the step.
+   A title has no source, so it is never checked.
 2. For each affected clip: remove it if it did not exist before; restore it if
    it existed before but not after; otherwise write its "before" record.
    Removals are applied first, then all writes at once with
@@ -298,7 +303,7 @@ skipped, and the user is told how many files could not come back.
     "adding intro.mp4", "reordering tracks", "adding a track", "splitting
     intro.mp4", "changing the speed of intro.mp4", "muting Dialogue",
     "unmuting Dialogue", "locking Dialogue", "unlocking Dialogue", "renaming
-    Track 2".
+    Track 2", "editing the text of Opening titles".
   - Images: "adding 12 files", "removing photo.jpg", "clearing the list (40
     files)", "cropping photo.jpg".
 

@@ -701,6 +701,19 @@ project in a 2.12.0 build and read the refusal.
 
 ## Risks and open questions
 
+> **Measured while planning (2026-09-29, GStreamer 1.26.11).** The first two
+> risks below are settled. A `TitleClip` has no `background` child property:
+> it draws its text over a `videotestsrc` filled with its `foreground-color`,
+> opaque white by default, so a title hid everything beneath it. Setting
+> `foreground-color` to 0 makes the frame transparent, and the title then
+> composites over the clip below; the fork to `TextOverlayClip` is not needed.
+> A white still cannot show the difference, so the test puts a blue one
+> beneath. `color` is ARGB, alpha in the top byte: `0xffff0000` draws red. The
+> alignments are `textoverlay`'s own enums, not GES's `TextHAlign`, so they
+> are written by nick. The plan
+> (`docs/superpowers/plans/2026-09-29-editor-new-clip-types.md`) lists every
+> other place it departs from this design.
+
 - **`GESTitleSource`'s default background.** If it is opaque, a title clip
   hides everything beneath it until `"background"` is set with alpha 0. The fix
   is one line at creation; the risk is that it does not take. **Measurement,
