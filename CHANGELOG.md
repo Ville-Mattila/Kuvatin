@@ -14,6 +14,12 @@ the minor number moves when something new appears, the patch number when
 something is fixed.
 
 ## [Unreleased]
+The video editor gets tracks you can manage, dissolves and text. Each track
+can be muted, soloed, locked and renamed. Two clips on one track may now
+overlap, and they dissolve into each other for as long as they do; the
+Dissolve chip makes one with a click. The Text chip puts a title over the
+picture, typed and styled in the inspector. A project with text in it needs
+this version to open.
 
 ### Added
 - **Track controls.** Each track's header has M, S and L buttons. **Mute**
@@ -29,15 +35,17 @@ something is fixed.
 - **Cross-dissolves.** Drag a clip onto the one before it on its track and the
   two dissolve into each other for as long as they overlap; a band over the
   overlap shows it. The **Dissolve** chip makes a one-second dissolve with the
-  clip before the selected one, or takes it away again. A clip still cannot
-  cover another completely, pass the clip beside it, or reach the one beyond,
-  and trimming an edge now follows the same rule.
+  clip before the selected one, or takes it away again. A clip cannot cover
+  another completely or overlap more than the clip beside it, and trimming an
+  edge follows the same rule. In 2.13 and earlier a project saved with
+  overlapping clips opens with one clip hiding the other.
 - **Text.** The **Text** chip puts a five-second title on the top track. Type
   it in the inspector, over as many lines as you like, and pick its size,
   weight, colour and alignment; move, scale and fade it like any other clip.
   Typing a sentence is one undo step. A project with text in it needs this
-  version to open: 2.13 and earlier refuse it by name rather than open it
-  without the text. A project without text opens in them as before.
+  version to open: 2.13 and earlier refuse it, saying it was written by a
+  newer version, rather than open it without the text. A project without text
+  opens in them as before.
 
 ### Changed
 - A project from before this version that has clips overlapping on a track
