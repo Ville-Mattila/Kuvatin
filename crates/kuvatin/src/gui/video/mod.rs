@@ -139,6 +139,7 @@ pub(super) fn wire(
 ) {
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
+    titles::wire(ui, st);
     tracks::wire(ui, st);
     transport::wire(ui, st);
     export::wire(ui, st, ex, timers);

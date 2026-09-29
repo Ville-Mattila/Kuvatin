@@ -1,4 +1,4 @@
-import { ComboBox, ListView, LineEdit, SpinBox, CheckBox, ScrollView } from "std-widgets.slint";
+import { ComboBox, ListView, LineEdit, SpinBox, CheckBox, ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Modal } from "modal.slint";
 import {
@@ -246,7 +246,20 @@ export component AppWindow inherits Window {
     callback inspector-changed();              // any inspector slider moved
     callback inspector-duration-changed(int);  // Duration field (stills), whole seconds
     in-out property <int> insp-duration-s: 5;  // selected clip's length, whole seconds
-    in property <bool> insp-is-still: false;   // selected clip is a still image (duration is free)
+    // The selected clip's length is a free choice: a still or a title, which
+    // have no source length. A real clip's is set by trimming.
+    in property <bool> insp-free-duration: false;
+    // A title (text overlay) is selected: its text and style, edited here.
+    // gui/video/titles.rs turns them into a TitleRecord and back.
+    in property <bool> insp-is-title: false;
+    in-out property <string> insp-text: "";
+    in-out property <int> insp-font-size: 48;
+    in-out property <bool> insp-font-bold: true;
+    in-out property <string> insp-text-color: "#ffffff";
+    in-out property <int> insp-halign: 1;      // 0 left, 1 centre, 2 right
+    in-out property <int> insp-valign: 1;      // 0 top, 1 middle, 2 bottom
+    callback title-changed();                  // any of the above edited
+    callback timeline-add-text();              // the Text chip: a title at the end of the top track
     // Speed, for videos and image sequences. The labels come from SPEEDS in
     // gui/video/mod.rs; the index is the entry showing.
     in property <bool> insp-has-rate: false;
@@ -1746,6 +1759,79 @@ export component AppWindow inherits Window {
                                 text: "On a locked track. Unlock it to change this clip.";
                                 color: Theme.hint; font-size: 10px; wrap: word-wrap;
                             }
+                            // A title's own controls, above the sliders every clip has.
+                            if root.inspector-name != "" && root.insp-is-title : VerticalLayout {
+                                vertical-stretch: 0;
+                                spacing: 6px;
+                                Text { text: "Text"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; }
+                                TextEdit {
+                                    enabled: !root.insp-locked;
+                                    height: 58px;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                    text <=> root.insp-text;
+                                    accessible-label: "Title text";
+                                    edited(t) => { root.title-changed(); }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    NumberDropdown {
+                                        label: "Size"; value: root.insp-font-size; minimum: 8; maximum: 400;
+                                        edited(v) => {
+                                            if (!root.insp-locked) { root.insp-font-size = v; root.title-changed(); }
+                                        }
+                                    }
+                                    CheckBox {
+                                        text: "Bold";
+                                        enabled: !root.insp-locked;
+                                        checked <=> root.insp-font-bold;
+                                        toggled => { root.title-changed(); }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    for sw in [
+                                        { c: #ffffff, s: "#ffffff", n: "White" },
+                                        { c: #000000, s: "#000000", n: "Black" },
+                                        { c: #ffd34d, s: "#ffd34d", n: "Yellow" },
+                                        { c: #ff5f5f, s: "#ff5f5f", n: "Red" },
+                                        { c: #4dd2ff, s: "#4dd2ff", n: "Blue" },
+                                        { c: Theme.accent, s: "#2dd4bf", n: "Teal" },
+                                    ] : Rectangle {
+                                        width: 18px; height: 18px; border-radius: 9px;
+                                        background: sw.c;
+                                        border-width: root.insp-text-color == sw.s ? 2px : 1px;
+                                        border-color: root.insp-text-color == sw.s ? Theme.ink : Theme.line2;
+                                        accessible-role: button;
+                                        accessible-label: sw.n + " text";
+                                        accessible-checkable: true;
+                                        accessible-checked: root.insp-text-color == sw.s;
+                                        TouchArea {
+                                            enabled: !root.insp-locked;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.insp-text-color = sw.s; root.title-changed(); }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                SegToggle {
+                                    height: 24px;
+                                    labels: ["Left", "Centre", "Right"];
+                                    selected: root.insp-halign;
+                                    select(i) => {
+                                        if (!root.insp-locked) { root.insp-halign = i; root.title-changed(); }
+                                    }
+                                }
+                                SegToggle {
+                                    height: 24px;
+                                    labels: ["Top", "Middle", "Bottom"];
+                                    selected: root.insp-valign;
+                                    select(i) => {
+                                        if (!root.insp-locked) { root.insp-valign = i; root.title-changed(); }
+                                    }
+                                }
+                            }
                             if root.inspector-name != "" : VerticalLayout {
                                 // The spare height below the controls belongs to the filler
                                 // after this layout. Without this the layout took a share of
@@ -1775,9 +1861,9 @@ export component AppWindow inherits Window {
                                         selected(t) => { root.inspector-speed-changed(self.current-index); }
                                     }
                                 }
-                                // A still has no source length, so its duration is a free
-                                // choice; a real clip's is set by trimming on the timeline.
-                                if root.insp-is-still : VerticalLayout {
+                                // A still or a title has no source length, so its duration
+                                // is a free choice; a real clip's is set by trimming.
+                                if root.insp-free-duration : VerticalLayout {
                                     spacing: 4px;
                                     HorizontalLayout {
                                         Text { text: "Duration"; color: Theme.muted2; font-size: 9.5px; font-weight: 600; vertical-alignment: center; }
@@ -1840,6 +1926,16 @@ export component AppWindow inherits Window {
                                     enabled: root.timeline-selected >= 0 && !root.insp-locked && !root.modal-open() && !root.video-engine-down;
                                     focus-on-click: false;
                                     clicked => { root.timeline-split(); if (!split-chip.has-focus) { kbd.focus(); } }
+                                }
+                                text-chip := TimelineChip {
+                                    label: "Text";
+                                    wide: true;
+                                    hint: root.timeline-tracks[0].locked
+                                        ? "The top track is locked"
+                                        : "Add a text overlay to the timeline";
+                                    enabled: !root.timeline-tracks[0].locked && !root.modal-open() && !root.video-engine-down;
+                                    focus-on-click: false;
+                                    clicked => { root.timeline-add-text(); if (!text-chip.has-focus) { kbd.focus(); } }
                                 }
                                 // Zoom: discoverable buttons for the wheel gesture, and the
                                 // only way to reach it without a wheel.

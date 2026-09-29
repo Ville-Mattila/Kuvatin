@@ -51,8 +51,10 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
             ui.set_inspector_name(name);
             // Only real videos carry audio — stills and image sequences don't.
             ui.set_insp_has_audio(sel_kind == ClipKind::Video);
-            // Stills get a free Duration field; real media is trimmed instead.
-            ui.set_insp_is_still(sel_kind == ClipKind::Image);
+            // Stills and titles get a free Duration field; real media is
+            // trimmed instead.
+            ui.set_insp_free_duration(matches!(sel_kind, ClipKind::Image | ClipKind::Title));
+            ui.set_insp_is_title(sel_kind == ClipKind::Title);
             ui.set_insp_duration_s(sel_dur.round().max(1.0) as i32);
             // Speed is for clips with source time to stretch.
             ui.set_insp_has_rate(matches!(sel_kind, ClipKind::Video | ClipKind::Sequence));
@@ -71,6 +73,9 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                         ui.set_insp_volume((l.volume as f32 * 100.0).clamp(0.0, 100.0));
                     }
                     ui.set_insp_rate_index(speed_index(p.clip_rate(&cid)));
+                    if let Some(title) = p.title_of(&cid) {
+                        super::titles::show(&ui, &title);
+                    }
                     // Fit size drives the preview bounding box dimensions.
                     let (fw, fh) = p.clip_fit_size(&cid).unwrap_or((
                         kuvatin_video::CANVAS_W as u32,
