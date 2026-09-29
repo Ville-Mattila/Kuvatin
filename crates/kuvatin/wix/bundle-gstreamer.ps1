@@ -72,6 +72,11 @@ $Plugins = @(
     'gstimagefreeze', 'gstvideoconvertscale', 'gstvideorate', 'gstaudioconvert',
     'gstaudioresample', 'gstaudiorate', 'gstvolume', 'gstvideofilter', 'gstvideocrop',
     'gstvideobox', 'gstalpha', 'gstalphacolor', 'gstdeinterlace', 'gstinterleave',
+    # GES titles draw with textoverlay (pango), and the dissolve GES puts over
+    # an overlap is an smpte transition. Without either, the timeline crashes
+    # the moment it builds a title or a dissolve. Pango lays text out through
+    # pangowin32 and DirectWrite, so no fontconfig data (etc\fonts) ships.
+    'gstpango', 'gstsmpte',
     # audio output on Windows
     'gstwasapi2', 'gstwasapi', 'gstdirectsound',
     # containers

@@ -14,10 +14,14 @@ use gstreamer as gst;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// What this version of Kuvatin writes. A file from a LATER version is
-/// refused rather than half-understood: a project silently missing the clips
-/// it could not parse is worse than a project that will not open.
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest format this version of Kuvatin reads. A file from a LATER
+/// version is refused rather than half-understood: a project silently missing
+/// the clips it could not parse is worse than a project that will not open.
+///
+/// A file is stamped with the OLDEST format that can read it
+/// ([`required_version`]), not with this: a project of media clips alone is
+/// still format 1, and opens in every build ever shipped.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// A clip's transform, as stored. Mirrors [`crate::Layout`], which is not
 /// serialisable on purpose — the engine type can change shape without changing
@@ -80,6 +84,139 @@ pub struct ClipRecord {
     /// it afterwards, which the URI alone cannot describe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<crate::sequence::SequenceSpec>,
+    /// What kind of clip this record describes, when it is not a clip on a
+    /// media source. Absent, which is every record written before this
+    /// existed, means a URI clip, and `uri` is the whole of its identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ClipBody>,
+}
+
+/// What a record describes, when it is not a clip on a media source. One
+/// variant for now: the tag is what costs something to add later, so
+/// `[clips.body.title]` today makes another kind of clip a variant tomorrow,
+/// with no change to how a file is read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipBody {
+    /// A text overlay, built as a GES `TitleClip`.
+    Title(TitleRecord),
+}
+
+/// A text overlay's own state: what a title needs beyond the place, times
+/// and transform every clip has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TitleRecord {
+    /// What it says. May be empty and may hold newlines: an empty title is
+    /// still a clip you can see and select, which a half-typed one has to be.
+    pub text: String,
+    /// A Pango font description, "Sans Bold 48". Written whole, so a later
+    /// version can offer more than the interface does now without changing
+    /// the file.
+    #[serde(default = "default_font")]
+    pub font: String,
+    /// The text colour, `#rrggbb` or `#rrggbbaa`: a string, because a project
+    /// file is a document someone may read, the reason times are seconds.
+    #[serde(default = "default_text_color")]
+    pub color: String,
+    #[serde(default)]
+    pub halign: TitleHAlign,
+    #[serde(default)]
+    pub valign: TitleVAlign,
+}
+
+/// Where a title's lines sit across the frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleHAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// Where a title sits down the frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleVAlign {
+    Top,
+    #[default]
+    Center,
+    Bottom,
+}
+
+fn default_font() -> String {
+    "Sans Bold 48".into()
+}
+
+fn default_text_color() -> String {
+    "#ffffff".into()
+}
+
+impl Default for TitleRecord {
+    /// What "Add text" puts on the timeline.
+    fn default() -> Self {
+        TitleRecord {
+            text: "Text".into(),
+            font: default_font(),
+            color: default_text_color(),
+            halign: TitleHAlign::Center,
+            valign: TitleVAlign::Center,
+        }
+    }
+}
+
+impl TitleRecord {
+    /// The name a title shows on the timeline: its first line, cut to 24
+    /// characters, or "Text" when it has none.
+    pub fn name(&self) -> String {
+        let first = self.text.lines().next().unwrap_or("").trim();
+        if first.is_empty() {
+            return "Text".into();
+        }
+        let mut name: String = first.chars().take(24).collect();
+        if first.chars().count() > 24 {
+            name.push('…');
+        }
+        name
+    }
+}
+
+/// `#rrggbb` or `#rrggbbaa` as the value GES takes for a title's colour:
+/// ARGB, alpha in the top byte (measured: `0xffff0000` draws red). None for
+/// anything else.
+pub fn parse_color(s: &str) -> Option<u32> {
+    let hex = s.strip_prefix('#')?;
+    if !(hex.len() == 6 || hex.len() == 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(if hex.len() == 6 {
+        0xff00_0000 | v
+    } else {
+        // #rrggbbaa → aarrggbb
+        (v >> 8) | ((v & 0xff) << 24)
+    })
+}
+
+/// The inverse of [`parse_color`]: `#rrggbb`, or `#rrggbbaa` when the colour
+/// is not fully opaque.
+pub fn format_color(v: u32) -> String {
+    let (a, rgb) = (v >> 24, v & 0x00ff_ffff);
+    if a == 0xff {
+        format!("#{rgb:06x}")
+    } else {
+        format!("#{rgb:06x}{a:02x}")
+    }
+}
+
+/// The format a document needs: 2 once any clip is something a format-1
+/// reader has no shape for (a title), 1 otherwise.
+pub fn required_version(clips: &[ClipRecord]) -> u32 {
+    if clips.iter().any(|c| c.body.is_some()) {
+        2
+    } else {
+        1
+    }
 }
 
 fn unit_rate() -> f64 {
@@ -147,7 +284,7 @@ pub struct ProjectFile {
 impl ProjectFile {
     pub fn new(canvas_w: i32, canvas_h: i32, clips: Vec<ClipRecord>) -> Self {
         ProjectFile {
-            version: FORMAT_VERSION,
+            version: required_version(&clips),
             canvas_w,
             canvas_h,
             clips,
@@ -219,6 +356,7 @@ mod tests {
                     rate: 1.0,
                     layout: layout(),
                     sequence: None,
+                    body: None,
                 },
                 ClipRecord {
                     uri: "imagesequence://C:/render/frame_%04d.png?framerate=24/1".into(),
@@ -238,6 +376,7 @@ mod tests {
                         count: 48,
                         fps: 24,
                     }),
+                    body: None,
                 },
             ],
         )
@@ -410,5 +549,151 @@ volume = 1.0
             "{text}"
         );
         assert!(text.contains("version = 1"), "{text}");
+    }
+
+    fn title(text: &str) -> ClipRecord {
+        ClipRecord {
+            uri: String::new(),
+            name: String::new(),
+            track: 0,
+            start: 1.0,
+            inpoint: 0.0,
+            duration: 5.0,
+            rate: 1.0,
+            layout: layout(),
+            sequence: None,
+            body: Some(ClipBody::Title(TitleRecord {
+                text: text.into(),
+                font: "Serif 72".into(),
+                color: "#ffcc00".into(),
+                halign: TitleHAlign::Left,
+                valign: TitleVAlign::Bottom,
+            })),
+        }
+    }
+
+    /// Opaque colours read as ARGB with the alpha byte full; `#rrggbbaa`
+    /// moves its alpha to the top, where GES looks for it.
+    #[test]
+    fn title_colours_parse_to_argb() {
+        assert_eq!(parse_color("#ff0000"), Some(0xffff_0000));
+        assert_eq!(parse_color("#FFCC00"), Some(0xffff_cc00));
+        assert_eq!(parse_color("#11223380"), Some(0x8011_2233));
+        for bad in ["", "ff0000", "#ff00", "#ff00001", "#gg0000", "#ff0000ff00"] {
+            assert_eq!(parse_color(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn title_colours_format_back_to_what_they_parsed_from() {
+        for s in ["#ffffff", "#000000", "#ffcc00", "#11223380", "#00000000"] {
+            assert_eq!(format_color(parse_color(s).unwrap()), s);
+        }
+    }
+
+    #[test]
+    fn title_names_are_their_first_line_cut_short() {
+        let named = |text: &str| {
+            TitleRecord {
+                text: text.into(),
+                ..TitleRecord::default()
+            }
+            .name()
+        };
+        assert_eq!(
+            named(
+                "Opening
+second line"
+            ),
+            "Opening"
+        );
+        assert_eq!(named("   "), "Text");
+        assert_eq!(named(""), "Text");
+        assert_eq!(
+            named("A title far longer than twenty-four characters"),
+            "A title far longer than …"
+        );
+    }
+
+    /// A file of media clips alone stays format 1, so every build ever
+    /// shipped still opens it; one title makes it format 2, so a build that
+    /// cannot draw titles refuses it instead of dropping them.
+    #[test]
+    fn title_clips_raise_the_format_and_media_clips_do_not() {
+        assert_eq!(sample().version, 1);
+        let mut clips = sample().clips;
+        clips.push(title("Hello"));
+        assert_eq!(required_version(&clips), 2);
+        assert_eq!(ProjectFile::new(1920, 1080, clips).version, 2);
+    }
+
+    #[test]
+    fn title_clips_survive_the_round_trip_with_their_newlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("titled.kuvatin");
+        let mut clips = sample().clips;
+        clips.push(title(
+            "First line
+\"quoted\" second",
+        ));
+        let doc = ProjectFile::new(1920, 1080, clips);
+        doc.save(&path).unwrap();
+        assert_eq!(ProjectFile::load(&path).unwrap(), doc);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[clips.body.title]"), "{text}");
+        assert!(text.contains("version = 2"), "{text}");
+        assert_eq!(
+            text.matches("[clips.body").count(),
+            1,
+            "a media clip writes no body: {text}"
+        );
+    }
+
+    /// A title written with only its text gets the defaults for the rest.
+    #[test]
+    fn title_fields_left_out_take_their_defaults() {
+        let text = r#"version = 2
+canvas_w = 1280
+canvas_h = 720
+
+[[clips]]
+uri = ""
+track = 0
+start = 0.0
+inpoint = 0.0
+duration = 5.0
+
+[clips.layout]
+posx = 0
+posy = 0
+scale = 1.0
+alpha = 1.0
+volume = 1.0
+
+[clips.body.title]
+text = "Hi"
+"#;
+        let doc: ProjectFile = toml::from_str(text).unwrap();
+        let Some(ClipBody::Title(t)) = &doc.clips[0].body else {
+            panic!("a title: {:?}", doc.clips[0].body);
+        };
+        assert_eq!(
+            t,
+            &TitleRecord {
+                text: "Hi".into(),
+                ..TitleRecord::default()
+            }
+        );
+    }
+
+    #[test]
+    fn title_era_builds_refuse_a_format_three_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("three.kuvatin");
+        let mut doc = sample();
+        doc.version = 3;
+        doc.save(&path).unwrap();
+        let err = ProjectFile::load(&path).unwrap_err().to_string();
+        assert!(err.contains("format 3, this build reads 2"), "{err}");
     }
 }

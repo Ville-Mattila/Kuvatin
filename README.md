@@ -62,7 +62,9 @@ goes no faster than normal: GStreamer cannot play faster through a speed
 change. **Left/Right** walk the clips on the timeline,
 **Ctrl+Left/Right** slide the selected clip by a tenth of a second,
 **Ctrl+Up/Down** move it to another track, **Shift+Left/Right** trim its right
-edge, **S** splits it at the playhead, and **Delete** removes it.
+edge, **S** splits it at the playhead, and **Delete** removes it. The
+**Dissolve** chip cross-dissolves the selected clip with the one before it,
+and **Text** adds a title.
 Double-click a track's name to rename it; the M, S and L buttons beside it
 mute, solo and lock the track. **Ctrl+S**
 saves the project (to the file it came from, or asks the first time) and
@@ -87,6 +89,11 @@ lane; a plain wheel scrolls it.
   edge-trim, split at the playhead, and move clips across tracks with magnetic
   snapping; waveforms on video clips; reorder tracks; name, mute, solo and
   lock them; drop below the last track to create a new one
+- **Cross-dissolves** — overlap two clips on a track, or press **Dissolve**,
+  and they dissolve into each other for as long as they overlap
+- **Text** — titles over the picture, typed in the inspector, in any size,
+  bold or not, in six colours, aligned to any side; moved, scaled and faded
+  like any clip
 - **Overlays & transforms** — stack videos and still images; position, scale (up to 400 %),
   opacity and per-clip volume via the inspector or by dragging/resizing the clip
   right in the preview
@@ -329,7 +336,7 @@ are registered and then removed again. A tag publishes the result with a
 SHA-256 file and a CycloneDX SBOM that lists the Rust crates and every file of
 the bundled GStreamer runtime, with its hash.
 
-Deferred to later: audio-only tracks and transitions in the video editor, undo,
-and macOS/Linux packaging. The
+Deferred to later: audio-only tracks and transitions other than a
+cross-dissolve in the video editor, and macOS/Linux packaging. The
 top-level Windows 11 menu and signing of the menu package shipped in 2.9.1;
 the installer itself is still unsigned, so SmartScreen still prompts once.

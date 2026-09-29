@@ -36,11 +36,14 @@ pub(super) enum StepKind {
     MuteTrack,
     LockTrack,
     RenameTrack,
+    /// A title's text, font, colour or alignment. Its own kind so the hint
+    /// does not call typing a transform.
+    Text,
 }
 
 impl StepKind {
-    /// The kinds a continuous gesture produces, and a rename, whose
-    /// keystrokes are one renaming. Only these merge. A mute or a lock is one
+    /// The kinds a continuous gesture produces, and a rename or a title's
+    /// text, whose keystrokes are one edit. Only these merge. A mute or a lock is one
     /// click: muting and unmuting inside a second is two steps, not nothing.
     fn merges(self) -> bool {
         matches!(
@@ -50,6 +53,7 @@ impl StepKind {
                 | StepKind::Transform
                 | StepKind::Duration
                 | StepKind::RenameTrack
+                | StepKind::Text
         )
     }
 }
@@ -219,6 +223,7 @@ impl Step for TimelineStep {
             StepKind::LockTrack if self.turned_on(|t| t.locked) => format!("locking {name}"),
             StepKind::LockTrack => format!("unlocking {name}"),
             StepKind::RenameTrack => format!("renaming {name}"),
+            StepKind::Text => format!("editing the text of {name}"),
         }
     }
 
@@ -328,7 +333,7 @@ pub(super) fn rows_after(
             (Some(record), None) => {
                 let mut row = kept.get(&a.id).cloned().unwrap_or_else(|| TimelineClip {
                     name: record.name.as_str().into(),
-                    kind: kind_of(&record.uri),
+                    kind: kind_of(record),
                     ..Default::default()
                 });
                 row.selected = false;
@@ -340,9 +345,32 @@ pub(super) fn rows_after(
     out
 }
 
+/// The names of the clips among `restores` whose source is not there to
+/// bring back, as `available` answers for a URI. A title has no source, so it
+/// is never asked about: `available("")` would look for a file with no name.
+fn missing_sources(
+    restores: &[(String, ClipRecord)],
+    kept: &HashMap<String, TimelineClip>,
+    available: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    restores
+        .iter()
+        .filter(|(_, record)| record.body.is_none() && !available(&record.uri))
+        .map(|(id, record)| match kept.get(id) {
+            Some(row) => row.name.to_string(),
+            None => record.name.clone(),
+        })
+        .collect()
+}
+
 /// Put a row where `record` places its clip, under the ID the clip has now.
+/// A title's name is its text, so it follows the record; any other clip keeps
+/// the name its row has.
 fn place(row: &mut TimelineClip, id: &str, record: &ClipRecord) {
     row.id = id.into();
+    if record.body.is_some() {
+        row.name = record.name.as_str().into();
+    }
     row.track = record.track as i32;
     row.start = record.start as f32;
     row.duration = record.duration as f32;
@@ -497,6 +525,7 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
         let project = st.project.clone();
         let sel_idx = st.sel_idx.clone();
         let pending_xform = st.pending_xform.clone();
+        let pending_title = st.pending_title.clone();
         let active = ex.active.clone();
         let pending = ex.pending.clone();
         let rec = st.recorder(ui);
@@ -510,9 +539,10 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
             if active.get() || pending.get() || ui.get_video_engine_down() {
                 return;
             }
-            // A transform still waiting for the preview tick would be applied,
-            // and recorded, after the undo.
+            // A transform or a title still waiting for the preview tick would
+            // be applied, and recorded, after the undo.
             pending_xform.borrow_mut().take();
+            pending_title.borrow_mut().take();
             apply_step(&ui, &project, &rec, &sel_idx, dir, &waves);
         };
         match dir {
@@ -575,15 +605,7 @@ fn apply_step(
     };
 
     // A deleted clip whose file has gone since: say which, and change nothing.
-    let missing: Vec<String> = ops
-        .restores
-        .iter()
-        .filter(|(_, record)| !p.source_available(&record.uri))
-        .map(|(id, record)| match kept.get(id) {
-            Some(row) => row.name.to_string(),
-            None => record.name.clone(),
-        })
-        .collect();
+    let missing = missing_sources(&ops.restores, &kept, |uri| p.source_available(uri));
     if !missing.is_empty() {
         drop(slot);
         show_error(
@@ -801,6 +823,7 @@ mod tests {
                 volume: 1.0,
             },
             sequence: None,
+            body: None,
         }
     }
 
@@ -944,6 +967,7 @@ mod tests {
             StepKind::Trim,
             StepKind::Transform,
             StepKind::Duration,
+            StepKind::Text,
         ] {
             let first = step(kind, "a", &c0, &c1);
             assert!(first.merges_with(&step(kind, "a", &c1, &c0)), "{kind:?}");
@@ -1196,6 +1220,7 @@ mod tests {
         assert_eq!(d(StepKind::AddTrack), "adding a track");
         assert_eq!(d(StepKind::Split), "splitting intro.mp4");
         assert_eq!(d(StepKind::Speed), "changing the speed of intro.mp4");
+        assert_eq!(d(StepKind::Text), "editing the text of intro.mp4");
     }
 
     /// A step about track `t`, going from one table to another, named as the
@@ -1556,5 +1581,77 @@ mod tests {
                 restores: vec![],
             }
         );
+    }
+
+    fn title(text: &str, start: f64) -> ClipRecord {
+        let body = kuvatin_video::TitleRecord {
+            text: text.into(),
+            ..Default::default()
+        };
+        ClipRecord {
+            uri: String::new(),
+            name: body.name(),
+            body: Some(kuvatin_video::ClipBody::Title(body)),
+            ..rec(0, start, 5.0)
+        }
+    }
+
+    /// A title has no source: undo never asks whether one is there, and
+    /// never names it as gone.
+    #[test]
+    fn title_restores_never_ask_for_a_source() {
+        let restores = vec![
+            ("t".to_string(), title("Hello", 0.0)),
+            ("v".to_string(), rec(1, 0.0, 2.0)),
+        ];
+        let asked = RefCell::new(Vec::new());
+        let missing = missing_sources(&restores, &HashMap::new(), |uri| {
+            asked.borrow_mut().push(uri.to_string());
+            false
+        });
+        assert_eq!(missing, vec!["intro.mp4".to_string()]);
+        assert_eq!(
+            *asked.borrow(),
+            vec!["file:///C:/media/intro.mp4".to_string()]
+        );
+    }
+
+    /// A title coming back is amber and named by its text; a title whose
+    /// text changes takes the new name, which a media clip never does.
+    #[test]
+    fn title_rows_take_their_kind_and_name_from_the_record() {
+        let rows = vec![row("v", &rec(1, 0.0, 2.0)), {
+            let mut r = row("t", &title("Before", 0.0));
+            r.kind = ClipKind::Title;
+            r
+        }];
+        let mut renamed = rec(1, 0.0, 2.0);
+        renamed.name = "other.mp4".into();
+        let applied = vec![
+            Applied {
+                id: "t".into(),
+                now_id: "t".into(),
+                record: Some(title("After", 0.0)),
+            },
+            Applied {
+                id: "v".into(),
+                now_id: "v".into(),
+                record: Some(renamed),
+            },
+            Applied {
+                id: "back".into(),
+                now_id: "back".into(),
+                record: Some(title("Returned", 6.0)),
+            },
+        ];
+        let out = rows_after(&rows, &applied, &HashMap::new());
+        assert_eq!(
+            out[0].name.as_str(),
+            "intro.mp4",
+            "a media clip keeps its name"
+        );
+        assert_eq!(out[1].name.as_str(), "After");
+        assert_eq!(out[2].name.as_str(), "Returned");
+        assert_eq!(out[2].kind, ClipKind::Title);
     }
 }

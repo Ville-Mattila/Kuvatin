@@ -6,6 +6,7 @@ pub(super) mod export;
 pub(super) mod import;
 mod project_file;
 mod timeline;
+mod titles;
 mod tracks;
 mod transport;
 mod undo;
@@ -68,6 +69,9 @@ pub(super) struct VideoState {
     /// Latest inspector transform awaiting a coalesced apply on the UI timer.
     /// Rapid slider drags only stash a value here; no GES work per event.
     pub(super) pending_xform: Rc<RefCell<Option<(String, kuvatin_video::Layout)>>>,
+    /// Latest title edit awaiting the same apply: typing stashes the whole
+    /// title here per keystroke, and the tick writes it once.
+    pub(super) pending_title: Rc<RefCell<Option<(String, kuvatin_video::TitleRecord)>>>,
     /// Latest scrub target (seconds, frame-accurate?) awaiting the UI tick:
     /// one seek per tick instead of one per pointer event, and an ACCURATE
     /// landing on release so the picture matches the playhead.
@@ -101,6 +105,7 @@ impl VideoState {
             tracks,
             sel_idx: Rc::new(Cell::new(-1)),
             pending_xform: Rc::new(RefCell::new(None)),
+            pending_title: Rc::new(RefCell::new(None)),
             pending_seek: Rc::new(Cell::new(None)),
             history: Rc::new(RefCell::new(crate::gui::history::History::new())),
             waves: waves::Waves::default(),
@@ -134,6 +139,7 @@ pub(super) fn wire(
 ) {
     import::wire(ui, st, im, timers);
     timeline::wire(ui, st);
+    titles::wire(ui, st);
     tracks::wire(ui, st);
     transport::wire(ui, st);
     export::wire(ui, st, ex, timers);
@@ -327,6 +333,7 @@ pub(super) fn wire(
         let ui_weak = ui_weak.clone();
         let project_slot = project_slot.clone();
         let pending_xform = pending_xform.clone();
+        let pending_title = st.pending_title.clone();
         let pending_seek = pending_seek.clone();
         let export_active = export_active.clone();
         let export_pending = export_pending.clone();
@@ -348,6 +355,7 @@ pub(super) fn wire(
                 if ui.get_app_mode() != 1 {
                     return;
                 }
+                timeline::show_dissolves(&ui, &rec.tl_clips);
                 let mut slot = project_slot.borrow_mut();
                 let Some(project) = slot.as_mut() else {
                     return;
@@ -357,13 +365,16 @@ pub(super) fn wire(
                 // a locked track keeps its transform and the value is
                 // dropped: its sliders and preview box stand down, so only a
                 // value stashed just before the lock went on gets here.
-                if let Some((id, l)) = pending_xform.borrow_mut().take() {
+                let unlocked = |id: &str| {
                     let track = rec
                         .tl_clips
                         .iter()
                         .find(|r| r.id.as_str() == id)
                         .map_or(-1, |r| r.track);
-                    if !tracks::locked(&tracks::rows_of(&rec.tracks), track) {
+                    !tracks::locked(&tracks::rows_of(&rec.tracks), track)
+                };
+                if let Some((id, l)) = pending_xform.borrow_mut().take() {
+                    if unlocked(&id) {
                         let before = rec.before(Some(&*project));
                         project.set_clip_layout(&kuvatin_video::ClipId(id.clone()), l);
                         rec.record(
@@ -372,6 +383,23 @@ pub(super) fn wire(
                             Some(undo::Subject::Clip(id.clone())),
                             before,
                         );
+                    }
+                }
+                // The same for a title's text: one write and one step per
+                // tick, merged with the last if it is the same title. The
+                // row takes the name the text gives it, after the step has
+                // named itself by the old one.
+                if let Some((id, title)) = pending_title.borrow_mut().take() {
+                    if unlocked(&id) {
+                        let before = rec.before(Some(&*project));
+                        project.set_title(&kuvatin_video::ClipId(id.clone()), &title);
+                        rec.record(
+                            Some(&*project),
+                            undo::StepKind::Text,
+                            Some(undo::Subject::Clip(id.clone())),
+                            before,
+                        );
+                        titles::rename_row(&ui, &rec.tl_clips, &id, &title.name());
                     }
                 }
                 // Scrub target: one (keyframe) seek per tick during a drag,

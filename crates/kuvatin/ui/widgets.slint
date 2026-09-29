@@ -663,7 +663,8 @@ export component TimelineChip inherits Rectangle {
     in property <bool> focus-on-click: true;
     out property <bool> has-focus: fs.has-focus;
     callback clicked();
-    width: root.wide ? 34px : 22px;
+    // A wide chip grows with its label ("Remove dissolve"), never below 34px.
+    width: root.wide ? max(34px, chip-label.preferred-width + 12px) : 22px;
     height: 22px;
     border-radius: 5px;
     background: root.enabled && ta.has-hover ? Theme.hover : #1b1f27;
@@ -683,7 +684,7 @@ export component TimelineChip inherits Rectangle {
             Tooltip.text = root.hint;
         }
     }
-    Text {
+    chip-label := Text {
         text: root.label;
         color: root.enabled ? Theme.ink2 : Theme.disabled-ink;
         font-size: 10px;

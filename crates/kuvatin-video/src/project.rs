@@ -114,6 +114,10 @@ pub struct FrameView<'a> {
     pub height: u32,
     pub stride: usize,
     pub data: &'a [u8],
+    /// Where on the timeline the frame is, from its buffer's timestamp; None
+    /// for a buffer with none. A frame that arrives late from before a seek
+    /// carries its own, earlier time.
+    pub pts: Option<Duration>,
 }
 
 impl FrameView<'_> {
@@ -152,6 +156,7 @@ fn with_frame_view<R>(sample: &gst::Sample, f: impl FnOnce(FrameView<'_>) -> R) 
     let caps = sample.caps()?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer_owned()?;
+    let pts = buffer.pts().map(|t| Duration::from_nanos(t.nseconds()));
     let vframe = gstreamer_video::VideoFrame::from_buffer_readable(buffer, &info).ok()?;
     let stride = vframe.plane_stride()[0] as usize;
     let data = vframe.plane_data(0).ok()?;
@@ -164,6 +169,7 @@ fn with_frame_view<R>(sample: &gst::Sample, f: impl FnOnce(FrameView<'_>) -> R) 
         height,
         stride,
         data,
+        pts,
     }))
 }
 
@@ -579,40 +585,102 @@ fn room_after(start: i128, dur: i128, neighbours: &[(i128, i128)]) -> Option<i12
         .min()
 }
 
-/// Read a GES clip's current timeline geometry.
-/// Where a slid clip may actually land on its layer.
-///
-/// GES stacks whatever it is told to stack: drop one clip onto another on the
-/// same layer and the later one simply hides the earlier, with nothing on
-/// screen to say so. A clip therefore stays inside the gap it already occupies
-/// — it can butt up against a neighbour on either side, and no further.
-///
-/// `neighbours` is every OTHER clip on the layer as `(start, end)` in
-/// nanoseconds, in any order. A clip that is already overlapping something
-/// (a project made before this rule) is not frozen in place: it just gets the
-/// old clamp at zero, so it can be dragged out of the mess.
-fn slide_within_gap(start: i128, dur: i128, delta: i128, neighbours: &[(i128, i128)]) -> i128 {
-    let desired = (start + delta).max(0);
-    let end = start + dur;
-    // The gap around the clip's current position: the nearest neighbour edge
-    // on each side. Anything already overlapping it is not a boundary — it is
-    // the mess the user is trying to drag out of.
-    let mut floor = 0i128;
-    let mut ceil = i128::MAX;
-    for &(n_start, n_end) in neighbours {
-        if n_end <= start {
-            floor = floor.max(n_end);
-        } else if n_start >= end {
-            ceil = ceil.min(n_start);
-        }
-    }
-    if ceil == i128::MAX {
-        return desired.max(floor);
-    }
-    // A gap too small to hold the clip leaves it exactly where it was.
-    desired.clamp(floor, (ceil - dur).max(floor))
+/// The clips around one at `start` on its layer, from `neighbours` (every
+/// OTHER clip there as `(start, end)`, any order): the one before it and the
+/// one before that, the one after it and the one after that. A neighbour
+/// starting where the clip does counts as after it.
+type Around = (
+    Option<(i128, i128)>,
+    Option<(i128, i128)>,
+    Option<(i128, i128)>,
+    Option<(i128, i128)>,
+);
+
+fn around(start: i128, neighbours: &[(i128, i128)]) -> Around {
+    let mut sorted = neighbours.to_vec();
+    sorted.sort_unstable();
+    let split = sorted.partition_point(|&(n_start, _)| n_start < start);
+    let (before, after) = sorted.split_at(split);
+    let back = |k: usize| before.len().checked_sub(k).map(|i| before[i]);
+    (
+        back(1),
+        back(2),
+        after.first().copied(),
+        after.get(1).copied(),
+    )
 }
 
+/// Where a slid clip may actually land on its layer.
+///
+/// Clips on one layer may overlap, and GES draws a cross-dissolve where they
+/// do. What GES refuses is one clip wholly on top of another and three clips
+/// at one instant, so a slide stops short of those, the same rule
+/// [`trim_bounds`] gives a trim:
+///
+/// - the clip before (P) keeps at least [`MIN_TRIM_NS`] of its head, so the
+///   order on the track cannot change, and this clip keeps at least as much
+///   past P's end, so it is never swallowed;
+/// - the same two, mirrored, against the clip after (N);
+/// - it never reaches the clip beyond either of those.
+///
+/// `neighbours` is every OTHER clip on the layer as `(start, end)` in
+/// nanoseconds, in any order. The bounds come from where the neighbours are,
+/// not from where the clip is, so a clip already in a tangle (a project from
+/// before any rule) is moved out of it rather than frozen in it. A gap too
+/// small to hold it leaves it where it was.
+fn slide_within_layer(start: i128, dur: i128, delta: i128, neighbours: &[(i128, i128)]) -> i128 {
+    let desired = start + delta;
+    let (p, pp, n, nn) = around(start, neighbours);
+    let mut floor = 0i128;
+    if let Some((p_start, p_end)) = p {
+        floor = floor
+            .max(p_start + MIN_TRIM_NS)
+            .max(p_end + MIN_TRIM_NS - dur);
+    }
+    if let Some((_, pp_end)) = pp {
+        floor = floor.max(pp_end);
+    }
+    let mut ceil = i128::MAX;
+    if let Some((n_start, n_end)) = n {
+        ceil = ceil
+            .min(n_start - MIN_TRIM_NS)
+            .min(n_end - MIN_TRIM_NS - dur);
+    }
+    if let Some((nn_start, _)) = nn {
+        ceil = ceil.min(nn_start - dur);
+    }
+    if ceil < floor {
+        return start;
+    }
+    desired.clamp(floor, ceil)
+}
+
+/// How far a clip at `start` may be trimmed out on its layer, as (earliest
+/// start, latest end) in nanoseconds; `i128::MAX` when nothing bounds the
+/// end. The slide rule's bounds for an edge: a left edge keeps the clip before
+/// at least [`MIN_TRIM_NS`] of its head and never reaches the clip before
+/// that; a right edge leaves the clip after at least as much of its tail and
+/// never reaches the clip after that.
+fn trim_bounds(start: i128, neighbours: &[(i128, i128)]) -> (i128, i128) {
+    let (p, pp, n, nn) = around(start, neighbours);
+    let mut earliest = 0i128;
+    if let Some((p_start, _)) = p {
+        earliest = earliest.max(p_start + MIN_TRIM_NS);
+    }
+    if let Some((_, pp_end)) = pp {
+        earliest = earliest.max(pp_end);
+    }
+    let mut latest = i128::MAX;
+    if let Some((_, n_end)) = n {
+        latest = latest.min(n_end - MIN_TRIM_NS);
+    }
+    if let Some((nn_start, _)) = nn {
+        latest = latest.min(nn_start);
+    }
+    (earliest, latest)
+}
+
+/// Read a GES clip's current timeline geometry.
 fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     ClipGeom {
         start: Duration::from_nanos(clip.start().nseconds()),
@@ -635,6 +703,63 @@ fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> boo
         && clip.duration() == clock_time(record.duration)
         && clip.layer().map(|l| l.priority() as usize) == Some(record.track)
         && clip_rate_of(clip) == record.rate
+}
+
+/// The `textoverlay` nick for a title's horizontal alignment. The child
+/// property is textoverlay's own enum, not GES's `TextHAlign`, so it is
+/// written and read by nick.
+fn halign_nick(a: crate::document::TitleHAlign) -> &'static str {
+    use crate::document::TitleHAlign::*;
+    match a {
+        Left => "left",
+        Center => "center",
+        Right => "right",
+    }
+}
+
+fn valign_nick(a: crate::document::TitleVAlign) -> &'static str {
+    use crate::document::TitleVAlign::*;
+    match a {
+        Top => "top",
+        Center => "center",
+        Bottom => "bottom",
+    }
+}
+
+/// Set an enum child property by its nick. Nothing happens for a property
+/// the clip does not have or a nick its enum does not know.
+fn set_enum_child(clip: &ges::Clip, name: &str, nick: &str) {
+    let Some((_, pspec)) = clip.lookup_child(name) else {
+        return;
+    };
+    let value = gst::glib::EnumClass::with_type(pspec.value_type())
+        .and_then(|class| class.to_value_by_nick(nick));
+    if let Some(value) = value {
+        let _ = clip.set_child_property(name, &value);
+    }
+}
+
+/// The nick of an enum child property's current value.
+fn enum_child_nick(clip: &ges::Clip, name: &str) -> Option<String> {
+    let value = clip.child_property(name)?;
+    let (_, v) = gst::glib::EnumValue::from_value(&value)?;
+    Some(v.nick().to_string())
+}
+
+/// Write a title's text and styling onto a `TitleClip`'s text overlay, and
+/// make the frame behind the text transparent. GES draws a title over a
+/// `videotestsrc` filled with its `foreground-color`, opaque white unless
+/// told otherwise, which hid everything beneath the title (measured: a blue
+/// still read back white). There is no `background` child property.
+fn write_title(clip: &ges::Clip, title: &crate::document::TitleRecord) {
+    let _ = clip.set_child_property("foreground-color", &0u32.to_value());
+    let _ = clip.set_child_property("text", &title.text.to_value());
+    let _ = clip.set_child_property("font-desc", &title.font.to_value());
+    if let Some(color) = crate::document::parse_color(&title.color) {
+        let _ = clip.set_child_property("color", &color.to_value());
+    }
+    set_enum_child(clip, "halignment", halign_nick(title.halign));
+    set_enum_child(clip, "valignment", valign_nick(title.valign));
 }
 
 /// A clip's time effects: its speed change, when it has one.
@@ -1104,7 +1229,7 @@ fn set_clip_frame(clip: &ges::Clip, posx: i32, posy: i32, width: i32, height: i3
 }
 
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
-/// visual tracks, index 0 = bottom (top layers composite over lower ones).
+/// visual tracks, index 0 = top (it composites over the layers below it).
 pub struct Project {
     timeline: ges::Timeline,
     layers: Vec<ges::Layer>,
@@ -1187,7 +1312,12 @@ impl Project {
                 done
             })
             .collect();
+        // Where two clips on a layer overlap, GES puts a cross-dissolve of
+        // its own between them, resizes it as they move and takes it away
+        // when they part. It is never one of our clips (see `record_of`).
+        timeline.set_auto_transition(true);
         let layer = timeline.append_layer();
+        layer.set_auto_transition(true);
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
 
@@ -1319,11 +1449,13 @@ impl Project {
     }
 
     /// Ensure at least `index + 1` layers exist; return the layer at `index`.
+    /// Every layer draws a cross-dissolve where its clips overlap.
     /// A layer made for a muted position arrives silent: without that, a clip
     /// dropped onto a muted track that had no layer yet would be heard.
     fn layer(&mut self, index: usize) -> ges::Layer {
         while self.layers.len() <= index {
             let layer = self.timeline.append_layer();
+            layer.set_auto_transition(true);
             if self.mutes.get(self.layers.len()).copied().unwrap_or(false) {
                 self.apply_mute(&layer, true);
             }
@@ -1445,9 +1577,10 @@ impl Project {
     }
 
     /// Slide a clip along its track by `delta_secs` (may be negative); start is
-    /// clamped to >= 0 and to the gap the clip occupies on its layer, so a drag
-    /// cannot bury one clip under another (see [`slide_within_gap`]). Returns
-    /// the resulting geometry, or None for an unknown id.
+    /// clamped to >= 0 and to what its neighbours on the layer allow: it may
+    /// overlap one, for a cross-dissolve, but never bury one or be buried
+    /// (see [`slide_within_layer`]). Returns the resulting geometry, or None
+    /// for an unknown id.
     pub fn slide_clip(&mut self, id: &ClipId, delta_secs: f64) -> Option<ClipGeom> {
         if self.rendering.get() {
             return None;
@@ -1456,7 +1589,7 @@ impl Project {
         let start = clip.start().nseconds() as i128;
         let dur = clip.duration().nseconds() as i128;
         let delta = (delta_secs * 1e9) as i128;
-        let new_start = slide_within_gap(start, dur, delta, &self.layer_neighbours(id)) as u64;
+        let new_start = slide_within_layer(start, dur, delta, &self.layer_neighbours(id)) as u64;
         clip.set_start(gst::ClockTime::from_nseconds(new_start));
         self.commit();
         self.touched();
@@ -1484,8 +1617,10 @@ impl Project {
 
     /// Trim a clip by dragging an edge. `edge < 0` = left edge (keeps the right
     /// end fixed by moving start+inpoint and shrinking duration); `edge > 0` =
-    /// right edge (adjusts duration only). Clamped to the source bounds and a
-    /// 0.2 s minimum. Returns the resulting geometry.
+    /// right edge (adjusts duration only). Clamped to the source bounds, a
+    /// 0.2 s minimum and, outward, to what the neighbours on its layer allow
+    /// (see [`trim_bounds`]); trimming in is never refused. Returns the
+    /// resulting geometry.
     pub fn trim_clip(&mut self, id: &ClipId, edge: i32, delta_secs: f64) -> Option<ClipGeom> {
         if self.rendering.get() {
             return None;
@@ -1499,24 +1634,19 @@ impl Project {
         let max_ns = clip
             .property::<Option<gst::ClockTime>>("max-duration")
             .map(|m| m.nseconds() as i128);
-        let delta = (delta_secs * 1e9) as i128;
+        let mut delta = (delta_secs * 1e9) as i128;
         let rate = clip_rate_of(&clip);
+        let (earliest, latest) = trim_bounds(start, &self.layer_neighbours(id));
+        if edge < 0 && delta < 0 {
+            delta = delta.max((earliest - start).min(0));
+        } else if edge > 0 && delta > 0 && latest != i128::MAX {
+            delta = delta.min((latest - (start + dur)).max(0));
+        }
 
         if edge < 0 {
             let (ns, ni, nd) = trim_left_math(start, inpoint, dur, delta, rate);
-            let new_start = gst::ClockTime::from_nseconds(ns as u64);
-            let new_inp = gst::ClockTime::from_nseconds(ni as u64);
-            let new_dur = gst::ClockTime::from_nseconds(nd as u64);
-            // Apply the shrinking property first so inpoint + duration never
-            // transiently exceeds max-duration (which GES refuses).
-            if nd <= dur {
-                clip.set_duration(new_dur);
-                clip.set_inpoint(new_inp);
-            } else {
-                clip.set_inpoint(new_inp);
-                clip.set_duration(new_dur);
-            }
-            clip.set_start(new_start);
+            let ct = |n: i128| gst::ClockTime::from_nseconds(n as u64);
+            self.trim_left_in_one_move(&clip, ct(ns), ct(ni), ct(nd), rate);
         } else {
             let nd = trim_right_math(inpoint, dur, delta, max_ns, rate);
             clip.set_duration(gst::ClockTime::from_nseconds(nd as u64));
@@ -1524,6 +1654,50 @@ impl Project {
         self.commit();
         self.touched();
         Some(clip_geom(&clip))
+    }
+
+    /// Give a clip a new start, in-point and duration as one move. A left
+    /// trim is three writes, and GES refuses, without an error, any one of
+    /// them that passes through a state it forbids while the others still
+    /// land. With dissolves there is no safe order: trimmed in past the end of
+    /// the clip before, the shrink leaves the clip for a moment wholly inside
+    /// it; trimmed out in a chain, the growth reaches the clip two along.
+    /// So the clip is parked alone on a new layer below the timeline, set
+    /// there, where nothing can refuse it, and moved back, which GES checks
+    /// as one change, the way [`Self::set_clip_records`] writes undo. A move
+    /// back that is refused puts the clip back as it was.
+    fn trim_left_in_one_move(
+        &mut self,
+        clip: &ges::Clip,
+        start: gst::ClockTime,
+        inpoint: gst::ClockTime,
+        duration: gst::ClockTime,
+        rate: f64,
+    ) {
+        let home = clip.layer();
+        let was = (clip.start(), clip.inpoint(), clip.duration());
+        let parking = self.layers.len();
+        let park = self.layer(parking);
+        // If parking fails, the writes below meet the neighbours after all,
+        // and whatever GES refuses stays as it was.
+        let _ = clip.move_to_layer(&park);
+        // The speed is unchanged, so this is the order that keeps the source
+        // from being asked for more than it has: shrink, in-point, grow, start.
+        set_clip_placement(clip, start, inpoint, duration, rate);
+        if home.as_ref().is_none_or(|l| clip.move_to_layer(l).is_err()) {
+            set_clip_placement(clip, was.0, was.1, was.2, rate);
+            if let Some(l) = &home {
+                let _ = clip.move_to_layer(l);
+            }
+        }
+        while self.layers.len() > parking {
+            if self.layers.last().is_some_and(|l| !self.layer_is_empty(l)) {
+                break;
+            }
+            if let Some(last) = self.layers.pop() {
+                let _ = self.timeline.remove_layer(&last);
+            }
+        }
     }
 
     /// Set a clip's duration outright (the inspector's Duration field for
@@ -1794,16 +1968,21 @@ impl Project {
         }
         // Empty again, unless a clip could not go back to its place.
         while self.layers.len() > parking {
-            if self.layers.last().is_some_and(|l| !l.clips().is_empty()) {
+            if self.layers.last().is_some_and(|l| !self.layer_is_empty(l)) {
                 break;
             }
             if let Some(last) = self.layers.pop() {
                 let _ = self.timeline.remove_layer(&last);
             }
         }
-        // A refused clip is back as it was, transform included.
-        for (id, record, _) in found.iter().filter(|(id, _, _)| !failed.contains(*id)) {
+        // A refused clip is back as it was, transform and text included.
+        // Text is written whether or not the clip moved: parking decides on
+        // geometry alone, and undoing a typed word moves nothing.
+        for (id, record, clip) in found.iter().filter(|(id, _, _)| !failed.contains(*id)) {
             self.set_clip_layout(id, record.layout.into());
+            if let Some(crate::document::ClipBody::Title(title)) = &record.body {
+                write_title(clip, title);
+            }
         }
         if !found.is_empty() {
             self.commit();
@@ -1833,7 +2012,15 @@ impl Project {
         if self.clips.contains_key(&id.0) {
             anyhow::bail!("clip {} is already on the timeline", id.0);
         }
-        let clip = ges::UriClip::new(&record.uri)?;
+        let title = record.body.as_ref().map(|body| match body {
+            crate::document::ClipBody::Title(title) => title,
+        });
+        let clip: ges::Clip = match title {
+            Some(_) => ges::TitleClip::new()
+                .ok_or_else(|| anyhow::anyhow!("GES could not make a title clip"))?
+                .upcast(),
+            None => ges::UriClip::new(&record.uri)?.upcast(),
+        };
         clip.set_start(clock_time(record.start));
         clip.set_inpoint(clock_time(record.inpoint));
         // Slower than normal, a clip can be longer than its source lasts at
@@ -1847,8 +2034,11 @@ impl Project {
         }
         clip.set_duration(length);
         self.layer(record.track).add_clip(&clip)?;
+        if let Some(title) = title {
+            write_title(&clip, title);
+        }
         self.commit();
-        self.clips.insert(id.0.clone(), clip.upcast());
+        self.clips.insert(id.0.clone(), clip);
         self.set_clip_layout(id, record.layout.into());
         if record.rate != 1.0 {
             let was = self.before_time_effects();
@@ -1903,7 +2093,7 @@ impl Project {
         }
         let mut changed = false;
         while self.layers.len() > keep.max(1) {
-            if !self.layers[self.layers.len() - 1].clips().is_empty() {
+            if !self.layer_is_empty(&self.layers[self.layers.len() - 1]) {
                 break;
             }
             if let Some(last) = self.layers.pop() {
@@ -2058,7 +2248,7 @@ impl Project {
         // don't accumulate dead rows forever.
         while self.layers.len() > 1 {
             let last = self.layers.last().unwrap();
-            if !last.clips().is_empty() {
+            if !self.layer_is_empty(last) {
                 break;
             }
             let last = self.layers.pop().unwrap();
@@ -2144,37 +2334,9 @@ impl Project {
             .clips
             .iter()
             .filter_map(|(name, clip)| {
-                let uri = clip.downcast_ref::<ges::UriClip>()?.uri().to_string();
-                let secs = |t: gst::ClockTime| t.nseconds() as f64 / 1e9;
-                Some((
-                    ClipId(name.clone()),
-                    crate::document::ClipRecord {
-                        name: uri
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .map(|s| s.split('?').next().unwrap_or(s).to_string())
-                            .unwrap_or_default(),
-                        uri,
-                        track: clip.layer().map(|l| l.priority() as usize).unwrap_or(0),
-                        start: secs(clip.start()),
-                        inpoint: secs(clip.inpoint()),
-                        duration: secs(clip.duration()),
-                        rate: clip_rate_of(clip),
-                        layout: self
-                            .clip_layout(&ClipId(name.clone()))
-                            .map(Into::into)
-                            .unwrap_or(crate::document::LayoutRecord {
-                                posx: 0,
-                                posy: 0,
-                                scale: 1.0,
-                                alpha: 1.0,
-                                volume: 1.0,
-                            }),
-                        // Filled in by the caller, which is the only side that
-                        // knows how a sequence clip was described when it arrived.
-                        sequence: None,
-                    },
-                ))
+                let id = ClipId(name.clone());
+                let record = self.record_of(&id, clip)?;
+                Some((id, record))
             })
             .collect();
         clips.sort_by(|(_, a), (_, b)| {
@@ -2184,6 +2346,181 @@ impl Project {
                 .then(a.uri.cmp(&b.uri))
         });
         clips
+    }
+
+    /// One clip as a record, or None for a clip of a kind this engine never
+    /// puts on the timeline itself. Only the engine's own builders write
+    /// `self.clips`, and a transition GES inserts over an overlap is never
+    /// among them, so nothing reaches the last arm today: it says so once
+    /// rather than dropping a clip in silence, so a kind added later that
+    /// forgets this method is noisy instead of lossy.
+    fn record_of(&self, id: &ClipId, clip: &ges::Clip) -> Option<crate::document::ClipRecord> {
+        use crate::document::ClipBody;
+        let (uri, name, body) = if let Some(uri_clip) = clip.downcast_ref::<ges::UriClip>() {
+            let uri = uri_clip.uri().to_string();
+            let name = uri
+                .rsplit(['/', '\\'])
+                .next()
+                .map(|s| s.split('?').next().unwrap_or(s).to_string())
+                .unwrap_or_default();
+            (uri, name, None)
+        } else if clip.is::<ges::TitleClip>() {
+            let title = self.title_of(id)?;
+            (String::new(), title.name(), Some(ClipBody::Title(title)))
+        } else {
+            static UNKNOWN: std::sync::Once = std::sync::Once::new();
+            UNKNOWN.call_once(|| {
+                eprintln!(
+                    "kuvatin-video: a {} on the timeline has no record and is not saved",
+                    clip.type_().name()
+                )
+            });
+            return None;
+        };
+        let secs = |t: gst::ClockTime| t.nseconds() as f64 / 1e9;
+        Some(crate::document::ClipRecord {
+            uri,
+            name,
+            track: clip.layer().map(|l| l.priority() as usize).unwrap_or(0),
+            start: secs(clip.start()),
+            inpoint: secs(clip.inpoint()),
+            duration: secs(clip.duration()),
+            rate: clip_rate_of(clip),
+            layout: self
+                .clip_layout(id)
+                .map(Into::into)
+                .unwrap_or(crate::document::LayoutRecord {
+                    posx: 0,
+                    posy: 0,
+                    scale: 1.0,
+                    alpha: 1.0,
+                    volume: 1.0,
+                }),
+            // Filled in by the caller, which is the only side that knows how a
+            // sequence clip was described when it arrived.
+            sequence: None,
+            body,
+        })
+    }
+
+    /// A title clip's text and styling, read back from its text overlay; None
+    /// for any other clip. Child properties rather than `TitleSource`'s own
+    /// getters, which GES deprecated.
+    pub fn title_of(&self, id: &ClipId) -> Option<crate::document::TitleRecord> {
+        use crate::document::{TitleHAlign, TitleRecord, TitleVAlign};
+        let clip = self.clips.get(&id.0)?;
+        if !clip.is::<ges::TitleClip>() {
+            return None;
+        }
+        let string = |n: &str| {
+            clip.child_property(n)
+                .and_then(|v| v.get::<Option<String>>().ok().flatten())
+                .unwrap_or_default()
+        };
+        let color = clip
+            .child_property("color")
+            .and_then(|v| v.get::<u32>().ok())
+            .map(crate::document::format_color)
+            .unwrap_or_else(|| "#ffffff".into());
+        Some(TitleRecord {
+            text: string("text"),
+            font: string("font-desc"),
+            color,
+            halign: match enum_child_nick(clip, "halignment").as_deref() {
+                Some("left") => TitleHAlign::Left,
+                Some("right") => TitleHAlign::Right,
+                _ => TitleHAlign::Center,
+            },
+            valign: match enum_child_nick(clip, "valignment").as_deref() {
+                Some("top") => TitleVAlign::Top,
+                Some("bottom") => TitleVAlign::Bottom,
+                _ => TitleVAlign::Center,
+            },
+        })
+    }
+
+    /// Add a text overlay: a GES `TitleClip` on `track` at `start`, lasting
+    /// `duration`. It has no source, so nothing is discovered and nothing can
+    /// be missing.
+    pub fn add_title_clip(
+        &mut self,
+        title: &crate::document::TitleRecord,
+        track: usize,
+        start: Duration,
+        duration: Duration,
+    ) -> Result<ClipId> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
+        let clip = ges::TitleClip::new()
+            .ok_or_else(|| anyhow::anyhow!("GES could not make a title clip"))?;
+        clip.set_start(gst::ClockTime::from_nseconds(start.as_nanos() as u64));
+        clip.set_inpoint(gst::ClockTime::ZERO);
+        clip.set_duration(gst::ClockTime::from_nseconds(duration.as_nanos() as u64));
+        self.layer(track).add_clip(&clip)?;
+        // The text overlay belongs to the clip's track element, which only
+        // exists once the clip is on a layer.
+        write_title(clip.upcast_ref(), title);
+        // Async, as in add_clip_uri.
+        self.commit();
+        let name = clip
+            .name()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
+        self.clips.insert(name.clone(), clip.upcast());
+        self.touched();
+        Ok(ClipId(name))
+    }
+
+    /// [`Self::add_title_clip`] at the end of `track`, for "Add text".
+    pub fn append_title_clip(
+        &mut self,
+        title: &crate::document::TitleRecord,
+        track: usize,
+        duration: Duration,
+    ) -> Result<ClipInfo> {
+        let start = Duration::from_nanos(self.track_end(track).nseconds());
+        let id = self.add_title_clip(title, track, start, duration)?;
+        Ok(ClipInfo {
+            id,
+            track,
+            start,
+            duration,
+        })
+    }
+
+    /// Rewrite a title clip's text, font, colour and alignment. Inert for a
+    /// clip that is not a title, and while rendering.
+    pub fn set_title(&mut self, id: &ClipId, title: &crate::document::TitleRecord) {
+        if self.rendering.get() {
+            return;
+        }
+        let Some(clip) = self.clips.get(&id.0) else {
+            return;
+        };
+        if !clip.is::<ges::TitleClip>() {
+            return;
+        }
+        write_title(clip, title);
+        self.commit();
+        self.touched();
+    }
+
+    /// Whether no clip of ours is on `layer`. Not `layer.clips()`: over an
+    /// overlap GES puts a transition of its own on the layer, and a layer
+    /// holding only a stranded one is still empty.
+    fn layer_is_empty(&self, layer: &ges::Layer) -> bool {
+        !self
+            .clips
+            .values()
+            .any(|c| c.layer().is_some_and(|l| &l == layer))
+    }
+
+    /// Everything GES has on a track's layer, its own transitions included.
+    #[cfg(test)]
+    fn layer_clip_count(&self, track: usize) -> usize {
+        self.layers.get(track).map_or(0, |l| l.clips().len())
     }
 
     /// Replace the timeline with what `doc` describes.
@@ -2212,6 +2549,33 @@ impl Project {
             // file name in it. Discovery is the honest check — and it warms the
             // asset the clip is about to use. (It is bounded: see
             // `ensure_discovery_timeout`.)
+            if let Some(crate::document::ClipBody::Title(title)) = &rec.body {
+                // A title has no source: it can never be missing, and must
+                // never be named as such.
+                let placed = self.add_title_clip(
+                    title,
+                    rec.track,
+                    Duration::from_secs_f64(rec.start.max(0.0)),
+                    Duration::from_secs_f64(rec.duration.max(0.0)),
+                );
+                match placed {
+                    Ok(id) => {
+                        // A title trimmed from the left keeps its in-point,
+                        // as `restore_clip` does; the commit below takes it.
+                        if let Some(clip) = self.clips.get(&id.0) {
+                            clip.set_inpoint(clock_time(rec.inpoint));
+                        }
+                        self.set_clip_layout(&id, rec.layout.into());
+                    }
+                    // Not in `missing`, which names sources, but not dropped
+                    // in silence either: the next save would lose it for good.
+                    Err(e) => eprintln!(
+                        "kuvatin-video: the title \"{}\" could not be put back and is left out: {e}",
+                        title.name()
+                    ),
+                }
+                continue;
+            }
             let name = || {
                 if rec.name.is_empty() {
                     rec.uri.clone()
@@ -2847,45 +3211,120 @@ mod tests {
 
     #[test]
     fn a_clip_on_an_empty_layer_slides_freely() {
-        assert_eq!(slide_within_gap(2 * S, S, 3 * S, &[]), 5 * S);
-        assert_eq!(slide_within_gap(2 * S, S, -S, &[]), S);
+        assert_eq!(slide_within_layer(2 * S, S, 3 * S, &[]), 5 * S);
+        assert_eq!(slide_within_layer(2 * S, S, -S, &[]), S);
     }
 
     #[test]
     fn sliding_past_the_start_of_the_timeline_stops_at_zero() {
-        assert_eq!(slide_within_gap(2 * S, S, -5 * S, &[]), 0);
+        assert_eq!(slide_within_layer(2 * S, S, -5 * S, &[]), 0);
     }
 
-    /// GES stacks whatever it is told to stack: the later clip simply hides the
-    /// earlier one, with nothing on screen to say so.
+    /// Butting up is exact, and a slide further on overlaps the neighbour
+    /// for a dissolve, until this clip would be swallowed by it: it keeps
+    /// the trim minimum of its head clear of the neighbour's start.
     #[test]
-    fn a_clip_stops_against_the_neighbour_on_its_right() {
+    fn a_clip_overlaps_the_neighbour_on_its_right_but_is_never_swallowed() {
         // [2,3) sliding right into a neighbour at [5,8).
         let neighbours = [(5 * S, 8 * S)];
-        assert_eq!(slide_within_gap(2 * S, S, 10 * S, &neighbours), 4 * S);
+        assert_eq!(slide_within_layer(2 * S, S, 2 * S, &neighbours), 4 * S);
+        assert_eq!(
+            slide_within_layer(2 * S, S, 5 * S / 2, &neighbours),
+            9 * S / 2
+        );
+        assert_eq!(
+            slide_within_layer(2 * S, S, 10 * S, &neighbours),
+            5 * S - MIN_TRIM_NS
+        );
+        // A long clip stops where the neighbour keeps 0.2 s of its tail.
+        assert_eq!(
+            slide_within_layer(0, 5 * S, 10 * S, &neighbours),
+            8 * S - MIN_TRIM_NS - 5 * S
+        );
     }
 
     #[test]
-    fn a_clip_stops_against_the_neighbour_on_its_left() {
+    fn a_clip_overlaps_the_neighbour_on_its_left_but_never_swallows_it() {
         // [6,7) sliding left into a neighbour at [1,4).
         let neighbours = [(S, 4 * S)];
-        assert_eq!(slide_within_gap(6 * S, S, -10 * S, &neighbours), 4 * S);
+        assert_eq!(slide_within_layer(6 * S, S, -2 * S, &neighbours), 4 * S);
+        // Stops with 0.2 s of this clip past the neighbour's end.
+        assert_eq!(
+            slide_within_layer(6 * S, S, -10 * S, &neighbours),
+            4 * S + MIN_TRIM_NS - S
+        );
+        // A long clip stops where the neighbour keeps 0.2 s of its head.
+        assert_eq!(
+            slide_within_layer(6 * S, 5 * S, -10 * S, &neighbours),
+            S + MIN_TRIM_NS
+        );
     }
 
+    /// Order on the track never changes, and a clip never reaches the clip
+    /// beyond a neighbour, so three never overlap at one instant.
     #[test]
-    fn a_clip_is_confined_to_the_gap_it_is_already_in() {
-        // [4,6) between [0,4) and [6,9): it cannot move at all.
+    fn a_clip_is_confined_to_the_gap_between_the_neighbours_neighbours() {
+        // [4,6) between [0,4) and [6,9).
         let neighbours = [(0, 4 * S), (6 * S, 9 * S)];
-        assert_eq!(slide_within_gap(4 * S, 2 * S, 3 * S, &neighbours), 4 * S);
-        assert_eq!(slide_within_gap(4 * S, 2 * S, -3 * S, &neighbours), 4 * S);
+        assert_eq!(
+            slide_within_layer(4 * S, 2 * S, 3 * S, &neighbours),
+            6 * S - MIN_TRIM_NS
+        );
+        assert_eq!(
+            slide_within_layer(4 * S, 2 * S, -9 * S, &neighbours),
+            4 * S + MIN_TRIM_NS - 2 * S
+        );
+        // [0,5) before [6,9) and [7,12), which already dissolve into each
+        // other: it may overlap the first, and stops where the second starts.
+        let after = [(6 * S, 9 * S), (7 * S, 12 * S)];
+        assert_eq!(slide_within_layer(0, 5 * S, 10 * S, &after), 2 * S);
+        // [10,15) after [0,6) and [4,8), mirrored.
+        let before = [(0, 6 * S), (4 * S, 8 * S)];
+        assert_eq!(slide_within_layer(10 * S, 5 * S, -10 * S, &before), 6 * S);
     }
 
-    /// Clips that already overlap (a project from before this rule) must not be
-    /// frozen in place: the move is clamped to zero and nothing else.
+    /// A clip in a tangle with no legal place anywhere is left where it was.
+    #[test]
+    fn a_slid_clip_with_no_legal_place_stays_put() {
+        // [2,3) inside [0,4), with [3,4.1) after it.
+        let neighbours = [(0, 4 * S), (3 * S, 41 * S / 10)];
+        assert_eq!(slide_within_layer(2 * S, S, S, &neighbours), 2 * S);
+    }
+
+    /// Clips already in a tangle (a project from before any rule) are not
+    /// frozen in place: the bounds come from the neighbours, so the clip is
+    /// moved to where it is legal.
     #[test]
     fn an_already_overlapping_clip_can_still_be_moved() {
+        // [2,3) wholly inside [0,10): it comes out 0.2 s past the end.
         let neighbours = [(0, 10 * S)];
-        assert_eq!(slide_within_gap(2 * S, S, 3 * S, &neighbours), 5 * S);
+        assert_eq!(
+            slide_within_layer(2 * S, S, 3 * S, &neighbours),
+            10 * S + MIN_TRIM_NS - S
+        );
+    }
+
+    #[test]
+    fn a_trim_with_no_neighbour_is_bounded_only_by_zero() {
+        assert_eq!(trim_bounds(2 * S, &[]), (0, i128::MAX));
+    }
+
+    /// A right trim may cover the next clip for a dissolve, but leaves it
+    /// 0.2 s of its tail and never reaches the clip after it.
+    #[test]
+    fn a_right_trim_stops_short_of_covering_the_next_neighbour() {
+        let (_, latest) = trim_bounds(0, &[(3 * S, 5 * S)]);
+        assert_eq!(latest, 5 * S - MIN_TRIM_NS);
+        let (_, latest) = trim_bounds(0, &[(3 * S, 8 * S), (6 * S, 9 * S)]);
+        assert_eq!(latest, 6 * S);
+    }
+
+    #[test]
+    fn a_left_trim_stops_short_of_covering_the_previous_neighbour() {
+        let (earliest, _) = trim_bounds(6 * S, &[(S, 4 * S)]);
+        assert_eq!(earliest, S + MIN_TRIM_NS);
+        let (earliest, _) = trim_bounds(6 * S, &[(0, 2 * S), (S, 7 * S)]);
+        assert_eq!(earliest, 2 * S);
     }
 
     use super::*;
@@ -4261,8 +4700,9 @@ mod tests {
         project.set_clip_records(&owned).is_empty()
     }
 
-    /// The slide was clamped against a neighbour; reversing the amount would
-    /// not put the clip back, writing the old record does.
+    /// The slide was clamped against a neighbour, overlapping it as far as
+    /// the rule allows; reversing the amount would not put the clip back,
+    /// writing the old record does.
     #[test]
     fn undo_writes_a_clamped_slide_back_exactly() {
         let (dir, png, mut project) = undo_fixture("undo-slide");
@@ -4274,7 +4714,7 @@ mod tests {
             .expect("b");
         let before = record_of(&project, &b);
         let geom = project.slide_clip(&b, -10.0).expect("slide");
-        assert_eq!(geom.start, secs(2.0), "stopped against a");
+        assert_eq!(geom.start, secs(0.2), "a keeps 0.2 s of its head");
         assert!(write_back(&mut project, &[(&b, &before)]));
         assert_same_record(&record_of(&project, &b), &before);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5982,5 +6422,486 @@ mod tests {
             (secs - length.nseconds() as f64 / 1e9).abs() < 0.05,
             "{secs} vs {length}"
         );
+    }
+
+    fn title_record(text: &str) -> crate::document::TitleRecord {
+        crate::document::TitleRecord {
+            text: text.into(),
+            font: "Serif Italic 40".into(),
+            color: "#ffcc0080".into(),
+            halign: crate::document::TitleHAlign::Right,
+            valign: crate::document::TitleVAlign::Bottom,
+        }
+    }
+
+    /// The regression the record change exists for: a clip that is not a URI
+    /// clip used to be dropped from every record, and so from every file and
+    /// every undo step.
+    #[test]
+    fn title_is_not_dropped_by_clip_records() {
+        use crate::document::ClipBody;
+        let (dir, png, mut project) = undo_fixture("title-records");
+        let still = project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("still");
+        let title = project
+            .add_title_clip(&title_record("Hello"), 0, secs(0.5), secs(3.0))
+            .expect("title");
+        let records = project.clip_records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!((&records[0].0, &records[1].0), (&title, &still));
+        let r = &records[0].1;
+        assert_eq!((r.track, r.start, r.duration), (0, 0.5, 3.0));
+        assert_eq!((r.uri.as_str(), r.name.as_str()), ("", "Hello"));
+        assert_eq!(r.body, Some(ClipBody::Title(title_record("Hello"))));
+        assert!(records[1].1.body.is_none());
+        // A title's setter is inert on anything else.
+        project.set_title(&still, &title_record("Not a title"));
+        assert!(record_of(&project, &still).body.is_none());
+        assert_eq!(project.title_of(&still), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_appends_after_the_last_clip_on_its_track() {
+        let (dir, png, mut project) = undo_fixture("title-append");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("still");
+        let info = project
+            .append_title_clip(&crate::document::TitleRecord::default(), 0, secs(5.0))
+            .expect("title");
+        assert_eq!(
+            (info.track, info.start, info.duration),
+            (0, secs(2.0), secs(5.0))
+        );
+        let r = record_of(&project, &info.id);
+        assert_eq!((r.start, r.duration, r.name.as_str()), (2.0, 5.0, "Text"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Text over two lines, every style field, a transform and an in-point,
+    /// through a file and back. The in-point once came back as zero: a title
+    /// trimmed from the left reopened with its start moved and its in-point
+    /// lost.
+    #[test]
+    fn title_round_trips_through_a_document() {
+        let (dir, png, mut project) = undo_fixture("title-document");
+        project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(4.0))
+            .expect("still");
+        let title = project
+            .add_title_clip(&title_record("First line\nsecond"), 0, secs(1.0), secs(3.0))
+            .expect("title");
+        let g = project.trim_clip(&title, -1, 0.5).expect("trim");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(1.5), secs(0.5), secs(2.5))
+        );
+        project.set_clip_layout(
+            &title,
+            Layout {
+                posx: 40,
+                posy: -20,
+                scale: 0.5,
+                alpha: 0.75,
+                volume: 1.0,
+            },
+        );
+        let doc = project.to_document();
+        assert_eq!(doc.version, 2);
+        let path = dir.join("titled.kuvatin");
+        doc.save(&path).expect("save");
+        let loaded = crate::document::ProjectFile::load(&path).expect("load");
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let missing = reopened.apply_document(&loaded).expect("apply");
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(reopened.to_document().clips, doc.clips);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title has no source, so opening one can never report it missing.
+    #[test]
+    fn title_is_never_a_missing_source() {
+        let (dir, _png, mut project) = undo_fixture("title-missing");
+        project
+            .add_title_clip(&title_record("Only"), 0, secs(0.0), secs(2.0))
+            .expect("title");
+        let doc = project.to_document();
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let missing = reopened.apply_document(&doc).expect("apply");
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(reopened.clip_records().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_comes_back_after_being_removed() {
+        let (dir, _png, mut project) = undo_fixture("title-restore");
+        let id = project
+            .add_title_clip(&title_record("Back again"), 0, secs(1.0), secs(2.0))
+            .expect("title");
+        let before = record_of(&project, &id);
+        assert!(project.remove_clip(&id));
+        assert!(project.clip_records().is_empty());
+        project.restore_clip(&id, &before).expect("restore");
+        assert_eq!(project.clip_records().len(), 1);
+        assert_same_record(&record_of(&project, &id), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undoing a typed word writes the old text back, with or without a move,
+    /// and a clip whose place did not change is never parked to do it.
+    #[test]
+    fn title_text_is_written_back_by_set_clip_records() {
+        let (dir, _png, mut project) = undo_fixture("title-write-back");
+        let id = project
+            .add_title_clip(&title_record("Before"), 0, secs(1.0), secs(2.0))
+            .expect("title");
+        let before = record_of(&project, &id);
+        let layer = project.clips[&id.0].layer().expect("on a layer");
+        project.set_title(&id, &title_record("After"));
+        assert_eq!(record_of(&project, &id).name, "After");
+        assert!(write_back(&mut project, &[(&id, &before)]));
+        assert_same_record(&record_of(&project, &id), &before);
+        assert_eq!(project.clips[&id.0].layer(), Some(layer), "never parked");
+        // Text and place together.
+        let mut moved = before.clone();
+        moved.start = 3.0;
+        moved.name = "Moved".into();
+        moved.body = Some(crate::document::ClipBody::Title(title_record("Moved")));
+        assert!(write_back(&mut project, &[(&id, &moved)]));
+        assert_same_record(&record_of(&project, &id), &moved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title is a source, so it has a frame positioner like any other clip:
+    /// position, scale and opacity all work on it.
+    #[test]
+    fn title_scales_and_fades() {
+        let (dir, _png, mut project) = undo_fixture("title-layout");
+        let id = project
+            .add_title_clip(&title_record("Layout"), 0, secs(0.0), secs(2.0))
+            .expect("title");
+        let want = Layout {
+            posx: -60,
+            posy: 30,
+            scale: 0.4,
+            alpha: 0.5,
+            volume: 1.0,
+        };
+        project.set_clip_layout(&id, want);
+        let got = project.clip_layout(&id).expect("layout");
+        assert_eq!((got.posx, got.posy), (want.posx, want.posy));
+        assert!((got.scale - want.scale).abs() < 1e-3, "{}", got.scale);
+        assert!((got.alpha - want.alpha).abs() < 1e-9, "{}", got.alpha);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The preview's latest frame: where it sits on the timeline, its size
+    /// and its pixels.
+    type Shot = Arc<std::sync::Mutex<Option<(Option<Duration>, u32, u32, Vec<u8>)>>>;
+
+    /// A project whose preview frames land in the returned slot.
+    fn shooting_project() -> (Shot, Project) {
+        let shot: Shot = Arc::new(std::sync::Mutex::new(None));
+        let sink = shot.clone();
+        let project = Project::new(move |f| {
+            let mut buf = vec![0u8; (f.width * f.height * 4) as usize];
+            f.copy_packed_into(&mut buf);
+            *sink.lock().unwrap() = Some((f.pts, f.width, f.height, buf));
+        })
+        .expect("project");
+        (shot, project)
+    }
+
+    /// The preview frame at `at`, waited for up to five seconds. A frame from
+    /// before a seek can still arrive after it; it carries its own, earlier
+    /// time, so it is passed over rather than read. A fixed sleep once stood
+    /// here, which such a frame could beat.
+    fn frame_at(shot: &Shot, at: Duration) -> (u32, u32, Vec<u8>) {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let slot = shot.lock().unwrap();
+                if let Some((pts, w, h, px)) = slot.as_ref() {
+                    if pts.is_some_and(|p| p.abs_diff(at) < Duration::from_millis(50)) {
+                        return (*w, *h, px.clone());
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < end,
+                    "no frame at {at:?}; the last was at {:?}",
+                    slot.as_ref().map(|s| s.0)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A title draws over a transparent frame: away from its text, the blue
+    /// still beneath it shows. (Over a white still an opaque white frame
+    /// would pass, so the still is blue.) The text is the colour asked for,
+    /// which pins the byte order `parse_color` gives GES.
+    #[test]
+    fn title_composites_over_a_clip() {
+        let dir = scratch("title-composite");
+        let png = dir.join("blue.png");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([0, 0, 255, 255]))
+            .save(&png)
+            .expect("still");
+        let (shot, mut project) = shooting_project();
+        project
+            .add_clip(&png, 1, Duration::ZERO, Duration::ZERO, secs(3.0))
+            .expect("still");
+        let title = crate::document::TitleRecord {
+            text: "MMMM".into(),
+            font: "Sans Bold 60".into(),
+            color: "#ff0000".into(),
+            halign: crate::document::TitleHAlign::Left,
+            valign: crate::document::TitleVAlign::Top,
+        };
+        project
+            .add_title_clip(&title, 0, Duration::ZERO, secs(3.0))
+            .expect("title");
+        project.pause().expect("pause");
+        wait_settled(&project);
+        project.seek_accurate(secs(1.0)).expect("seek");
+        let (w, h, px) = frame_at(&shot, secs(1.0));
+        let at = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            (px[i], px[i + 1], px[i + 2])
+        };
+        let (r, g, b) = at(w - 5, h - 5);
+        assert!(
+            r < 15 && g < 15 && b > 240,
+            "the blue still shows: {:?}",
+            (r, g, b)
+        );
+        let red = (0..h / 4)
+            .flat_map(|y| (0..w / 3).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let (r, g, b) = at(x, y);
+                r > 200 && g < 60 && b < 60
+            })
+            .count();
+        assert!(red > 100, "red text at the top left: {red} pixels");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two stills on one track, the second starting 1 s before the first
+    /// ends: a 1 s dissolve.
+    fn overlapping_pair(project: &mut Project, png: &Path, track: usize) -> (ClipId, ClipId) {
+        let a = project
+            .add_clip(png, track, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let b = project
+            .add_clip(png, track, secs(2.0), Duration::ZERO, secs(3.0))
+            .expect("b");
+        (a, b)
+    }
+
+    /// The transition GES puts over an overlap is never one of our clips: it
+    /// reaches no record, no file and no undo step.
+    #[test]
+    fn dissolve_overlapping_clips_are_still_two_records() {
+        let (dir, png, mut project) = undo_fixture("dissolve-records");
+        overlapping_pair(&mut project, &png, 0);
+        assert_eq!(project.clip_records().len(), 2);
+        assert_eq!(project.to_document().clips.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dissolve_appears_on_the_layer_and_goes_when_the_clips_part() {
+        let (dir, png, mut project) = undo_fixture("dissolve-layer");
+        let (_, b) = overlapping_pair(&mut project, &png, 0);
+        assert_eq!(project.layer_clip_count(0), 3, "two clips and a dissolve");
+        project.slide_clip(&b, 1.0).expect("slide");
+        assert_eq!(project.layer_clip_count(0), 2, "butted up: no dissolve");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dissolve_survives_a_reopen() {
+        let (dir, png, mut project) = undo_fixture("dissolve-reopen");
+        overlapping_pair(&mut project, &png, 0);
+        let path = dir.join("dissolve.kuvatin");
+        project.to_document().save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(text.matches("[[clips]]").count(), 2, "{text}");
+        assert!(text.contains("version = 1"), "{text}");
+        let doc = crate::document::ProjectFile::load(&path).expect("load");
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        reopened.apply_document(&doc).expect("apply");
+        assert_eq!(reopened.layer_clip_count(0), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A layer is empty when none of OUR clips is on it, whatever GES has
+    /// left there: removing both clips of a dissolve takes the track.
+    #[test]
+    fn dissolve_leaves_no_dead_track_when_its_clips_go() {
+        let (dir, png, mut project) = undo_fixture("dissolve-prune");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("top");
+        let (a, b) = overlapping_pair(&mut project, &png, 1);
+        assert_eq!(project.track_count(), 2);
+        assert!(project.remove_clip(&b));
+        assert!(project.remove_clip(&a));
+        assert_eq!(project.track_count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undo writes an overlap back through the parking dance, and the
+    /// dissolve comes back with it.
+    #[test]
+    fn dissolve_comes_back_when_undo_writes_the_overlap_back() {
+        let (dir, png, mut project) = undo_fixture("dissolve-undo");
+        let (a, b) = overlapping_pair(&mut project, &png, 0);
+        let (ra, rb) = (record_of(&project, &a), record_of(&project, &b));
+        project.slide_clip(&b, 2.0).expect("part");
+        assert_eq!(project.layer_clip_count(0), 2);
+        assert!(write_back(&mut project, &[(&a, &ra), (&b, &rb)]));
+        assert_same_record(&record_of(&project, &b), &rb);
+        assert_eq!(project.layer_clip_count(0), 3);
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Found in review: a left trim was three writes, and GES refuses any
+    /// one of them that passes through a state it forbids while the others
+    /// still land. Trimmed in past the end of the clip before, the second
+    /// clip was for a moment wholly inside it, so the shrink was refused and
+    /// only the start moved: the clip came out at [7.25, 12.25) instead of
+    /// ending where it did.
+    #[test]
+    fn dissolve_left_trim_in_past_the_clip_before_keeps_the_end() {
+        let (dir, png, mut project) = undo_fixture("dissolve-trim-in");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(4.0))
+            .expect("p");
+        let b = project
+            .add_clip(&png, 0, secs(3.0), Duration::ZERO, secs(5.0))
+            .expect("b");
+        let g = project.trim_clip(&b, -1, 4.25).expect("trim");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(7.25), secs(4.25), secs(0.75))
+        );
+        assert_eq!(project.layer_clip_count(0), 2, "parted: no dissolve");
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same, outward, in a chain of dissolves: the growth went on before
+    /// the start moved, so for a moment the clip reached the clip two along,
+    /// three clips met at one instant, the growth was refused, and the clip
+    /// slid instead of growing.
+    #[test]
+    fn dissolve_left_trim_out_in_a_chain_grows_the_clip() {
+        // Six seconds of source.
+        let (dir, uri) = sequence_fixture("dissolve-trim-out", 60, 10);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let b = project
+            .add_clip_uri(&uri, 0, secs(2.0), secs(1.5), secs(3.0))
+            .expect("b");
+        project
+            .add_clip(&png, 0, secs(4.0), Duration::ZERO, secs(3.0))
+            .expect("c");
+        project
+            .add_clip(&png, 0, secs(6.0), Duration::ZERO, secs(3.0))
+            .expect("d");
+        let g = project.trim_clip(&b, -1, -1.5).expect("trim");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(0.5), Duration::ZERO, secs(4.5))
+        );
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A left trim still moves the in-point by the clip's speed: at 2x, half
+    /// a second of timeline is a second of source. The chain is the one that
+    /// made the growth collide above.
+    #[test]
+    fn dissolve_left_trim_of_a_sped_up_clip_follows_its_speed() {
+        // Six seconds of source.
+        let (dir, uri) = sequence_fixture("dissolve-trim-speed", 60, 10);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let b = project
+            .add_clip_uri(&uri, 0, secs(2.0), secs(2.0), secs(4.0))
+            .expect("b");
+        let g = project.set_clip_rate(&b, 2.0).expect("2x");
+        assert_eq!((g.start, g.duration), (secs(2.0), secs(2.0)));
+        project
+            .add_clip(&png, 0, secs(3.5), Duration::ZERO, secs(3.0))
+            .expect("c");
+        project
+            .add_clip(&png, 0, secs(4.25), Duration::ZERO, secs(3.0))
+            .expect("d");
+        let g = project.trim_clip(&b, -1, -0.5).expect("out");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(1.5), secs(1.0), secs(2.5))
+        );
+        let g = project.trim_clip(&b, -1, 1.0).expect("in");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(2.5), secs(3.0), secs(1.5))
+        );
+        assert_eq!(project.clip_rate(&b), 2.0);
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Halfway through a dissolve from white to black, the picture is grey.
+    #[test]
+    fn dissolve_blends_the_two_clips_in_the_preview() {
+        let dir = scratch("dissolve-blend");
+        let white = dir.join("white.png");
+        let black = dir.join("black.png");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([255, 255, 255, 255]))
+            .save(&white)
+            .expect("white");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([0, 0, 0, 255]))
+            .save(&black)
+            .expect("black");
+        let (shot, mut project) = shooting_project();
+        project
+            .add_clip(&white, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("white");
+        project
+            .add_clip(&black, 0, secs(2.0), Duration::ZERO, secs(3.0))
+            .expect("black");
+        project.pause().expect("pause");
+        wait_settled(&project);
+        project.seek_accurate(secs(2.5)).expect("seek");
+        let (w, h, px) = frame_at(&shot, secs(2.5));
+        let i = (((h / 2) * w + w / 2) * 4) as usize;
+        let (r, g, b) = (px[i], px[i + 1], px[i + 2]);
+        for v in [r, g, b] {
+            assert!(
+                (60..=200).contains(&v),
+                "grey mid-dissolve: {:?}",
+                (r, g, b)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

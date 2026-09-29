@@ -3,7 +3,7 @@
 //! recorded, and always safe to throw away and decode again. Only video
 //! files are listened to: a still or an image sequence has no sound.
 
-use super::project_file::kind_of;
+use super::project_file::kind_of_uri;
 use crate::gui::{AppWindow, ClipKind};
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer, SharedString};
 use std::collections::HashMap;
@@ -34,12 +34,13 @@ struct Inner {
 impl Inner {
     /// Sort `clips` (clip id, source URI) into those whose waveform is known
     /// and the sources to decode, each once however many clips wait on it. A
-    /// clip that is not a video, or whose source has no sound, gets nothing.
+    /// clip that is not a video, or whose source has no sound, gets nothing;
+    /// nor does a title, which has no source at all (its URI is empty).
     fn request(&mut self, clips: Vec<(SharedString, String)>) -> (Ready, Vec<String>) {
         let mut ready = Vec::new();
         let mut decode = Vec::new();
         for (id, uri) in clips {
-            if kind_of(&uri) != ClipKind::Video {
+            if uri.is_empty() || kind_of_uri(&uri) != ClipKind::Video {
                 continue;
             }
             match self.done.get(&uri) {
@@ -201,6 +202,7 @@ mod tests {
                 "b".into(),
                 "imagesequence://C:/r/f_%04d.png?start-index=1&framerate=24/1".into(),
             ),
+            ("c".into(), String::new()),
         ]);
         assert!(ready.is_empty() && decode.is_empty());
     }
