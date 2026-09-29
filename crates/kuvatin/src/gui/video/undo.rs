@@ -36,11 +36,14 @@ pub(super) enum StepKind {
     MuteTrack,
     LockTrack,
     RenameTrack,
+    /// A title's text, font, colour or alignment. Its own kind so the hint
+    /// does not call typing a transform.
+    Text,
 }
 
 impl StepKind {
-    /// The kinds a continuous gesture produces, and a rename, whose
-    /// keystrokes are one renaming. Only these merge. A mute or a lock is one
+    /// The kinds a continuous gesture produces, and a rename or a title's
+    /// text, whose keystrokes are one edit. Only these merge. A mute or a lock is one
     /// click: muting and unmuting inside a second is two steps, not nothing.
     fn merges(self) -> bool {
         matches!(
@@ -50,6 +53,7 @@ impl StepKind {
                 | StepKind::Transform
                 | StepKind::Duration
                 | StepKind::RenameTrack
+                | StepKind::Text
         )
     }
 }
@@ -219,6 +223,7 @@ impl Step for TimelineStep {
             StepKind::LockTrack if self.turned_on(|t| t.locked) => format!("locking {name}"),
             StepKind::LockTrack => format!("unlocking {name}"),
             StepKind::RenameTrack => format!("renaming {name}"),
+            StepKind::Text => format!("editing the text of {name}"),
         }
     }
 
@@ -520,6 +525,7 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
         let project = st.project.clone();
         let sel_idx = st.sel_idx.clone();
         let pending_xform = st.pending_xform.clone();
+        let pending_title = st.pending_title.clone();
         let active = ex.active.clone();
         let pending = ex.pending.clone();
         let rec = st.recorder(ui);
@@ -533,9 +539,10 @@ pub(super) fn wire(ui: &AppWindow, st: &super::VideoState, ex: &super::export::E
             if active.get() || pending.get() || ui.get_video_engine_down() {
                 return;
             }
-            // A transform still waiting for the preview tick would be applied,
-            // and recorded, after the undo.
+            // A transform or a title still waiting for the preview tick would
+            // be applied, and recorded, after the undo.
             pending_xform.borrow_mut().take();
+            pending_title.borrow_mut().take();
             apply_step(&ui, &project, &rec, &sel_idx, dir, &waves);
         };
         match dir {
@@ -960,6 +967,7 @@ mod tests {
             StepKind::Trim,
             StepKind::Transform,
             StepKind::Duration,
+            StepKind::Text,
         ] {
             let first = step(kind, "a", &c0, &c1);
             assert!(first.merges_with(&step(kind, "a", &c1, &c0)), "{kind:?}");
@@ -1212,6 +1220,7 @@ mod tests {
         assert_eq!(d(StepKind::AddTrack), "adding a track");
         assert_eq!(d(StepKind::Split), "splitting intro.mp4");
         assert_eq!(d(StepKind::Speed), "changing the speed of intro.mp4");
+        assert_eq!(d(StepKind::Text), "editing the text of intro.mp4");
     }
 
     /// A step about track `t`, going from one table to another, named as the
