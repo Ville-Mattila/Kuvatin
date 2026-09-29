@@ -637,6 +637,63 @@ fn clip_placed_as(clip: &ges::Clip, record: &crate::document::ClipRecord) -> boo
         && clip_rate_of(clip) == record.rate
 }
 
+/// The `textoverlay` nick for a title's horizontal alignment. The child
+/// property is textoverlay's own enum, not GES's `TextHAlign`, so it is
+/// written and read by nick.
+fn halign_nick(a: crate::document::TitleHAlign) -> &'static str {
+    use crate::document::TitleHAlign::*;
+    match a {
+        Left => "left",
+        Center => "center",
+        Right => "right",
+    }
+}
+
+fn valign_nick(a: crate::document::TitleVAlign) -> &'static str {
+    use crate::document::TitleVAlign::*;
+    match a {
+        Top => "top",
+        Center => "center",
+        Bottom => "bottom",
+    }
+}
+
+/// Set an enum child property by its nick. Nothing happens for a property
+/// the clip does not have or a nick its enum does not know.
+fn set_enum_child(clip: &ges::Clip, name: &str, nick: &str) {
+    let Some((_, pspec)) = clip.lookup_child(name) else {
+        return;
+    };
+    let value = gst::glib::EnumClass::with_type(pspec.value_type())
+        .and_then(|class| class.to_value_by_nick(nick));
+    if let Some(value) = value {
+        let _ = clip.set_child_property(name, &value);
+    }
+}
+
+/// The nick of an enum child property's current value.
+fn enum_child_nick(clip: &ges::Clip, name: &str) -> Option<String> {
+    let value = clip.child_property(name)?;
+    let (_, v) = gst::glib::EnumValue::from_value(&value)?;
+    Some(v.nick().to_string())
+}
+
+/// Write a title's text and styling onto a `TitleClip`'s text overlay, and
+/// make the frame behind the text transparent. GES draws a title over a
+/// `videotestsrc` filled with its `foreground-color`, opaque white unless
+/// told otherwise, which hid everything beneath the title (measured: a blue
+/// still read back white). There is no `background` child property.
+fn write_title(clip: &ges::Clip, title: &crate::document::TitleRecord) {
+    let _ = clip.set_child_property("foreground-color", &0u32.to_value());
+    let _ = clip.set_child_property("text", &title.text.to_value());
+    let _ = clip.set_child_property("font-desc", &title.font.to_value());
+    if let Some(color) = crate::document::parse_color(&title.color) {
+        let _ = clip.set_child_property("color", &color.to_value());
+    }
+    set_enum_child(clip, "halignment", halign_nick(title.halign));
+    set_enum_child(clip, "valignment", valign_nick(title.valign));
+}
+
 /// A clip's time effects: its speed change, when it has one.
 fn time_effects(clip: &ges::Clip) -> Vec<ges::BaseEffect> {
     clip.top_effects()
@@ -1794,16 +1851,21 @@ impl Project {
         }
         // Empty again, unless a clip could not go back to its place.
         while self.layers.len() > parking {
-            if self.layers.last().is_some_and(|l| !l.clips().is_empty()) {
+            if self.layers.last().is_some_and(|l| !self.layer_is_empty(l)) {
                 break;
             }
             if let Some(last) = self.layers.pop() {
                 let _ = self.timeline.remove_layer(&last);
             }
         }
-        // A refused clip is back as it was, transform included.
-        for (id, record, _) in found.iter().filter(|(id, _, _)| !failed.contains(*id)) {
+        // A refused clip is back as it was, transform and text included.
+        // Text is written whether or not the clip moved: parking decides on
+        // geometry alone, and undoing a typed word moves nothing.
+        for (id, record, clip) in found.iter().filter(|(id, _, _)| !failed.contains(*id)) {
             self.set_clip_layout(id, record.layout.into());
+            if let Some(crate::document::ClipBody::Title(title)) = &record.body {
+                write_title(clip, title);
+            }
         }
         if !found.is_empty() {
             self.commit();
@@ -1833,7 +1895,15 @@ impl Project {
         if self.clips.contains_key(&id.0) {
             anyhow::bail!("clip {} is already on the timeline", id.0);
         }
-        let clip = ges::UriClip::new(&record.uri)?;
+        let title = record.body.as_ref().map(|body| match body {
+            crate::document::ClipBody::Title(title) => title,
+        });
+        let clip: ges::Clip = match title {
+            Some(_) => ges::TitleClip::new()
+                .ok_or_else(|| anyhow::anyhow!("GES could not make a title clip"))?
+                .upcast(),
+            None => ges::UriClip::new(&record.uri)?.upcast(),
+        };
         clip.set_start(clock_time(record.start));
         clip.set_inpoint(clock_time(record.inpoint));
         // Slower than normal, a clip can be longer than its source lasts at
@@ -1847,8 +1917,11 @@ impl Project {
         }
         clip.set_duration(length);
         self.layer(record.track).add_clip(&clip)?;
+        if let Some(title) = title {
+            write_title(&clip, title);
+        }
         self.commit();
-        self.clips.insert(id.0.clone(), clip.upcast());
+        self.clips.insert(id.0.clone(), clip);
         self.set_clip_layout(id, record.layout.into());
         if record.rate != 1.0 {
             let was = self.before_time_effects();
@@ -1903,7 +1976,7 @@ impl Project {
         }
         let mut changed = false;
         while self.layers.len() > keep.max(1) {
-            if !self.layers[self.layers.len() - 1].clips().is_empty() {
+            if !self.layer_is_empty(&self.layers[self.layers.len() - 1]) {
                 break;
             }
             if let Some(last) = self.layers.pop() {
@@ -2058,7 +2131,7 @@ impl Project {
         // don't accumulate dead rows forever.
         while self.layers.len() > 1 {
             let last = self.layers.last().unwrap();
-            if !last.clips().is_empty() {
+            if !self.layer_is_empty(last) {
                 break;
             }
             let last = self.layers.pop().unwrap();
@@ -2144,38 +2217,9 @@ impl Project {
             .clips
             .iter()
             .filter_map(|(name, clip)| {
-                let uri = clip.downcast_ref::<ges::UriClip>()?.uri().to_string();
-                let secs = |t: gst::ClockTime| t.nseconds() as f64 / 1e9;
-                Some((
-                    ClipId(name.clone()),
-                    crate::document::ClipRecord {
-                        name: uri
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .map(|s| s.split('?').next().unwrap_or(s).to_string())
-                            .unwrap_or_default(),
-                        uri,
-                        track: clip.layer().map(|l| l.priority() as usize).unwrap_or(0),
-                        start: secs(clip.start()),
-                        inpoint: secs(clip.inpoint()),
-                        duration: secs(clip.duration()),
-                        rate: clip_rate_of(clip),
-                        layout: self
-                            .clip_layout(&ClipId(name.clone()))
-                            .map(Into::into)
-                            .unwrap_or(crate::document::LayoutRecord {
-                                posx: 0,
-                                posy: 0,
-                                scale: 1.0,
-                                alpha: 1.0,
-                                volume: 1.0,
-                            }),
-                        // Filled in by the caller, which is the only side that
-                        // knows how a sequence clip was described when it arrived.
-                        sequence: None,
-                        body: None,
-                    },
-                ))
+                let id = ClipId(name.clone());
+                let record = self.record_of(&id, clip)?;
+                Some((id, record))
             })
             .collect();
         clips.sort_by(|(_, a), (_, b)| {
@@ -2185,6 +2229,175 @@ impl Project {
                 .then(a.uri.cmp(&b.uri))
         });
         clips
+    }
+
+    /// One clip as a record, or None for a clip of a kind this engine never
+    /// puts on the timeline itself. Only the engine's own builders write
+    /// `self.clips`, and a transition GES inserts over an overlap is never
+    /// among them, so nothing reaches the last arm today: it says so once
+    /// rather than dropping a clip in silence, so a kind added later that
+    /// forgets this method is noisy instead of lossy.
+    fn record_of(&self, id: &ClipId, clip: &ges::Clip) -> Option<crate::document::ClipRecord> {
+        use crate::document::ClipBody;
+        let (uri, name, body) = if let Some(uri_clip) = clip.downcast_ref::<ges::UriClip>() {
+            let uri = uri_clip.uri().to_string();
+            let name = uri
+                .rsplit(['/', '\\'])
+                .next()
+                .map(|s| s.split('?').next().unwrap_or(s).to_string())
+                .unwrap_or_default();
+            (uri, name, None)
+        } else if clip.is::<ges::TitleClip>() {
+            let title = self.title_of(id)?;
+            (String::new(), title.name(), Some(ClipBody::Title(title)))
+        } else {
+            static UNKNOWN: std::sync::Once = std::sync::Once::new();
+            UNKNOWN.call_once(|| {
+                eprintln!(
+                    "kuvatin-video: a {} on the timeline has no record and is not saved",
+                    clip.type_().name()
+                )
+            });
+            return None;
+        };
+        let secs = |t: gst::ClockTime| t.nseconds() as f64 / 1e9;
+        Some(crate::document::ClipRecord {
+            uri,
+            name,
+            track: clip.layer().map(|l| l.priority() as usize).unwrap_or(0),
+            start: secs(clip.start()),
+            inpoint: secs(clip.inpoint()),
+            duration: secs(clip.duration()),
+            rate: clip_rate_of(clip),
+            layout: self
+                .clip_layout(id)
+                .map(Into::into)
+                .unwrap_or(crate::document::LayoutRecord {
+                    posx: 0,
+                    posy: 0,
+                    scale: 1.0,
+                    alpha: 1.0,
+                    volume: 1.0,
+                }),
+            // Filled in by the caller, which is the only side that knows how a
+            // sequence clip was described when it arrived.
+            sequence: None,
+            body,
+        })
+    }
+
+    /// A title clip's text and styling, read back from its text overlay; None
+    /// for any other clip. Child properties rather than `TitleSource`'s own
+    /// getters, which GES deprecated.
+    pub fn title_of(&self, id: &ClipId) -> Option<crate::document::TitleRecord> {
+        use crate::document::{TitleHAlign, TitleRecord, TitleVAlign};
+        let clip = self.clips.get(&id.0)?;
+        if !clip.is::<ges::TitleClip>() {
+            return None;
+        }
+        let string = |n: &str| {
+            clip.child_property(n)
+                .and_then(|v| v.get::<Option<String>>().ok().flatten())
+                .unwrap_or_default()
+        };
+        let color = clip
+            .child_property("color")
+            .and_then(|v| v.get::<u32>().ok())
+            .map(crate::document::format_color)
+            .unwrap_or_else(|| "#ffffff".into());
+        Some(TitleRecord {
+            text: string("text"),
+            font: string("font-desc"),
+            color,
+            halign: match enum_child_nick(clip, "halignment").as_deref() {
+                Some("left") => TitleHAlign::Left,
+                Some("right") => TitleHAlign::Right,
+                _ => TitleHAlign::Center,
+            },
+            valign: match enum_child_nick(clip, "valignment").as_deref() {
+                Some("top") => TitleVAlign::Top,
+                Some("bottom") => TitleVAlign::Bottom,
+                _ => TitleVAlign::Center,
+            },
+        })
+    }
+
+    /// Add a text overlay: a GES `TitleClip` on `track` at `start`, lasting
+    /// `duration`. It has no source, so nothing is discovered and nothing can
+    /// be missing.
+    pub fn add_title_clip(
+        &mut self,
+        title: &crate::document::TitleRecord,
+        track: usize,
+        start: Duration,
+        duration: Duration,
+    ) -> Result<ClipId> {
+        if self.rendering.get() {
+            anyhow::bail!("a render is in progress");
+        }
+        let clip = ges::TitleClip::new()
+            .ok_or_else(|| anyhow::anyhow!("GES could not make a title clip"))?;
+        clip.set_start(gst::ClockTime::from_nseconds(start.as_nanos() as u64));
+        clip.set_inpoint(gst::ClockTime::ZERO);
+        clip.set_duration(gst::ClockTime::from_nseconds(duration.as_nanos() as u64));
+        self.layer(track).add_clip(&clip)?;
+        // The text overlay belongs to the clip's track element, which only
+        // exists once the clip is on a layer.
+        write_title(clip.upcast_ref(), title);
+        // Async, as in add_clip_uri.
+        self.commit();
+        let name = clip
+            .name()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GES returned an unnamed clip"))?;
+        self.clips.insert(name.clone(), clip.upcast());
+        self.touched();
+        Ok(ClipId(name))
+    }
+
+    /// [`Self::add_title_clip`] at the end of `track`, for "Add text".
+    pub fn append_title_clip(
+        &mut self,
+        title: &crate::document::TitleRecord,
+        track: usize,
+        duration: Duration,
+    ) -> Result<ClipInfo> {
+        let start = Duration::from_nanos(self.track_end(track).nseconds());
+        let id = self.add_title_clip(title, track, start, duration)?;
+        Ok(ClipInfo {
+            id,
+            track,
+            start,
+            duration,
+        })
+    }
+
+    /// Rewrite a title clip's text, font, colour and alignment. Inert for a
+    /// clip that is not a title, and while rendering.
+    pub fn set_title(&mut self, id: &ClipId, title: &crate::document::TitleRecord) {
+        if self.rendering.get() {
+            return;
+        }
+        let Some(clip) = self.clips.get(&id.0) else {
+            return;
+        };
+        if !clip.is::<ges::TitleClip>() {
+            return;
+        }
+        write_title(clip, title);
+        self.commit();
+        self.touched();
+    }
+
+    /// Whether no clip of ours is on `layer`. Not `layer.clips()`: over an
+    /// overlap GES puts a transition of its own on the layer, and a layer
+    /// holding only a stranded one is still empty.
+    fn layer_is_empty(&self, layer: &ges::Layer) -> bool {
+        !self
+            .clips
+            .values()
+            .any(|c| c.layer().is_some_and(|l| &l == layer))
     }
 
     /// Replace the timeline with what `doc` describes.
@@ -2213,6 +2426,20 @@ impl Project {
             // file name in it. Discovery is the honest check — and it warms the
             // asset the clip is about to use. (It is bounded: see
             // `ensure_discovery_timeout`.)
+            if let Some(crate::document::ClipBody::Title(title)) = &rec.body {
+                // A title has no source: it can never be missing, and must
+                // never be named as such.
+                let placed = self.add_title_clip(
+                    title,
+                    rec.track,
+                    Duration::from_secs_f64(rec.start.max(0.0)),
+                    Duration::from_secs_f64(rec.duration.max(0.0)),
+                );
+                if let Ok(id) = placed {
+                    self.set_clip_layout(&id, rec.layout.into());
+                }
+                continue;
+            }
             let name = || {
                 if rec.name.is_empty() {
                     rec.uri.clone()
@@ -5983,5 +6210,233 @@ mod tests {
             (secs - length.nseconds() as f64 / 1e9).abs() < 0.05,
             "{secs} vs {length}"
         );
+    }
+
+    fn title_record(text: &str) -> crate::document::TitleRecord {
+        crate::document::TitleRecord {
+            text: text.into(),
+            font: "Serif Italic 40".into(),
+            color: "#ffcc0080".into(),
+            halign: crate::document::TitleHAlign::Right,
+            valign: crate::document::TitleVAlign::Bottom,
+        }
+    }
+
+    /// The regression the record change exists for: a clip that is not a URI
+    /// clip used to be dropped from every record, and so from every file and
+    /// every undo step.
+    #[test]
+    fn title_is_not_dropped_by_clip_records() {
+        use crate::document::ClipBody;
+        let (dir, png, mut project) = undo_fixture("title-records");
+        let still = project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("still");
+        let title = project
+            .add_title_clip(&title_record("Hello"), 0, secs(0.5), secs(3.0))
+            .expect("title");
+        let records = project.clip_records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!((&records[0].0, &records[1].0), (&title, &still));
+        let r = &records[0].1;
+        assert_eq!((r.track, r.start, r.duration), (0, 0.5, 3.0));
+        assert_eq!((r.uri.as_str(), r.name.as_str()), ("", "Hello"));
+        assert_eq!(r.body, Some(ClipBody::Title(title_record("Hello"))));
+        assert!(records[1].1.body.is_none());
+        // A title's setter is inert on anything else.
+        project.set_title(&still, &title_record("Not a title"));
+        assert!(record_of(&project, &still).body.is_none());
+        assert_eq!(project.title_of(&still), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_appends_after_the_last_clip_on_its_track() {
+        let (dir, png, mut project) = undo_fixture("title-append");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(2.0))
+            .expect("still");
+        let info = project
+            .append_title_clip(&crate::document::TitleRecord::default(), 0, secs(5.0))
+            .expect("title");
+        assert_eq!(
+            (info.track, info.start, info.duration),
+            (0, secs(2.0), secs(5.0))
+        );
+        let r = record_of(&project, &info.id);
+        assert_eq!((r.start, r.duration, r.name.as_str()), (2.0, 5.0, "Text"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Text over two lines, every style field and a transform, through a
+    /// file and back.
+    #[test]
+    fn title_round_trips_through_a_document() {
+        let (dir, png, mut project) = undo_fixture("title-document");
+        project
+            .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(4.0))
+            .expect("still");
+        let title = project
+            .add_title_clip(&title_record("First line\nsecond"), 0, secs(1.0), secs(2.5))
+            .expect("title");
+        project.set_clip_layout(
+            &title,
+            Layout {
+                posx: 40,
+                posy: -20,
+                scale: 0.5,
+                alpha: 0.75,
+                volume: 1.0,
+            },
+        );
+        let doc = project.to_document();
+        assert_eq!(doc.version, 2);
+        let path = dir.join("titled.kuvatin");
+        doc.save(&path).expect("save");
+        let loaded = crate::document::ProjectFile::load(&path).expect("load");
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let missing = reopened.apply_document(&loaded).expect("apply");
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(reopened.to_document().clips, doc.clips);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title has no source, so opening one can never report it missing.
+    #[test]
+    fn title_is_never_a_missing_source() {
+        let (dir, _png, mut project) = undo_fixture("title-missing");
+        project
+            .add_title_clip(&title_record("Only"), 0, secs(0.0), secs(2.0))
+            .expect("title");
+        let doc = project.to_document();
+        let mut reopened = Project::new(|_f| {}).expect("project");
+        let missing = reopened.apply_document(&doc).expect("apply");
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(reopened.clip_records().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_comes_back_after_being_removed() {
+        let (dir, _png, mut project) = undo_fixture("title-restore");
+        let id = project
+            .add_title_clip(&title_record("Back again"), 0, secs(1.0), secs(2.0))
+            .expect("title");
+        let before = record_of(&project, &id);
+        assert!(project.remove_clip(&id));
+        assert!(project.clip_records().is_empty());
+        project.restore_clip(&id, &before).expect("restore");
+        assert_eq!(project.clip_records().len(), 1);
+        assert_same_record(&record_of(&project, &id), &before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Undoing a typed word writes the old text back, with or without a move,
+    /// and a clip whose place did not change is never parked to do it.
+    #[test]
+    fn title_text_is_written_back_by_set_clip_records() {
+        let (dir, _png, mut project) = undo_fixture("title-write-back");
+        let id = project
+            .add_title_clip(&title_record("Before"), 0, secs(1.0), secs(2.0))
+            .expect("title");
+        let before = record_of(&project, &id);
+        let layer = project.clips[&id.0].layer().expect("on a layer");
+        project.set_title(&id, &title_record("After"));
+        assert_eq!(record_of(&project, &id).name, "After");
+        assert!(write_back(&mut project, &[(&id, &before)]));
+        assert_same_record(&record_of(&project, &id), &before);
+        assert_eq!(project.clips[&id.0].layer(), Some(layer), "never parked");
+        // Text and place together.
+        let mut moved = before.clone();
+        moved.start = 3.0;
+        moved.name = "Moved".into();
+        moved.body = Some(crate::document::ClipBody::Title(title_record("Moved")));
+        assert!(write_back(&mut project, &[(&id, &moved)]));
+        assert_same_record(&record_of(&project, &id), &moved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title is a source, so it has a frame positioner like any other clip:
+    /// position, scale and opacity all work on it.
+    #[test]
+    fn title_scales_and_fades() {
+        let (dir, _png, mut project) = undo_fixture("title-layout");
+        let id = project
+            .add_title_clip(&title_record("Layout"), 0, secs(0.0), secs(2.0))
+            .expect("title");
+        let want = Layout {
+            posx: -60,
+            posy: 30,
+            scale: 0.4,
+            alpha: 0.5,
+            volume: 1.0,
+        };
+        project.set_clip_layout(&id, want);
+        let got = project.clip_layout(&id).expect("layout");
+        assert_eq!((got.posx, got.posy), (want.posx, want.posy));
+        assert!((got.scale - want.scale).abs() < 1e-3, "{}", got.scale);
+        assert!((got.alpha - want.alpha).abs() < 1e-9, "{}", got.alpha);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title draws over a transparent frame: away from its text, the blue
+    /// still beneath it shows. (Over a white still an opaque white frame
+    /// would pass, so the still is blue.) The text is the colour asked for,
+    /// which pins the byte order `parse_color` gives GES.
+    #[test]
+    fn title_composites_over_a_clip() {
+        type Shot = Arc<std::sync::Mutex<Option<(u32, u32, Vec<u8>)>>>;
+        let shot: Shot = Arc::new(std::sync::Mutex::new(None));
+        let sink = shot.clone();
+        let dir = scratch("title-composite");
+        let png = dir.join("blue.png");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([0, 0, 255, 255]))
+            .save(&png)
+            .expect("still");
+        let mut project = Project::new(move |f| {
+            let mut buf = vec![0u8; (f.width * f.height * 4) as usize];
+            f.copy_packed_into(&mut buf);
+            *sink.lock().unwrap() = Some((f.width, f.height, buf));
+        })
+        .expect("project");
+        project
+            .add_clip(&png, 1, Duration::ZERO, Duration::ZERO, secs(3.0))
+            .expect("still");
+        let title = crate::document::TitleRecord {
+            text: "MMMM".into(),
+            font: "Sans Bold 60".into(),
+            color: "#ff0000".into(),
+            halign: crate::document::TitleHAlign::Left,
+            valign: crate::document::TitleVAlign::Top,
+        };
+        project
+            .add_title_clip(&title, 0, Duration::ZERO, secs(3.0))
+            .expect("title");
+        project.pause().expect("pause");
+        wait_settled(&project);
+        *shot.lock().unwrap() = None;
+        project.seek_accurate(secs(1.0)).expect("seek");
+        wait_settled(&project);
+        std::thread::sleep(Duration::from_millis(500));
+        let (w, h, px) = shot.lock().unwrap().clone().expect("a frame");
+        let at = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            (px[i], px[i + 1], px[i + 2])
+        };
+        let (r, g, b) = at(w - 5, h - 5);
+        assert!(
+            r < 15 && g < 15 && b > 240,
+            "the blue still shows: {:?}",
+            (r, g, b)
+        );
+        let red = (0..h / 4)
+            .flat_map(|y| (0..w / 3).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let (r, g, b) = at(x, y);
+                r > 200 && g < 60 && b < 60
+            })
+            .count();
+        assert!(red > 100, "red text at the top left: {red} pixels");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
