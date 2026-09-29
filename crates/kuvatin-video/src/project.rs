@@ -2552,8 +2552,21 @@ impl Project {
                     Duration::from_secs_f64(rec.start.max(0.0)),
                     Duration::from_secs_f64(rec.duration.max(0.0)),
                 );
-                if let Ok(id) = placed {
-                    self.set_clip_layout(&id, rec.layout.into());
+                match placed {
+                    Ok(id) => {
+                        // A title trimmed from the left keeps its in-point,
+                        // as `restore_clip` does; the commit below takes it.
+                        if let Some(clip) = self.clips.get(&id.0) {
+                            clip.set_inpoint(clock_time(rec.inpoint));
+                        }
+                        self.set_clip_layout(&id, rec.layout.into());
+                    }
+                    // Not in `missing`, which names sources, but not dropped
+                    // in silence either: the next save would lose it for good.
+                    Err(e) => eprintln!(
+                        "kuvatin-video: the title \"{}\" could not be put back and is left out: {e}",
+                        title.name()
+                    ),
                 }
                 continue;
             }
@@ -6461,8 +6474,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Text over two lines, every style field and a transform, through a
-    /// file and back.
+    /// Text over two lines, every style field, a transform and an in-point,
+    /// through a file and back. The in-point once came back as zero: a title
+    /// trimmed from the left reopened with its start moved and its in-point
+    /// lost.
     #[test]
     fn title_round_trips_through_a_document() {
         let (dir, png, mut project) = undo_fixture("title-document");
@@ -6470,8 +6485,13 @@ mod tests {
             .add_clip(&png, 1, secs(0.0), Duration::ZERO, secs(4.0))
             .expect("still");
         let title = project
-            .add_title_clip(&title_record("First line\nsecond"), 0, secs(1.0), secs(2.5))
+            .add_title_clip(&title_record("First line\nsecond"), 0, secs(1.0), secs(3.0))
             .expect("title");
+        let g = project.trim_clip(&title, -1, 0.5).expect("trim");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(1.5), secs(0.5), secs(2.5))
+        );
         project.set_clip_layout(
             &title,
             Layout {
