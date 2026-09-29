@@ -1639,19 +1639,8 @@ impl Project {
 
         if edge < 0 {
             let (ns, ni, nd) = trim_left_math(start, inpoint, dur, delta, rate);
-            let new_start = gst::ClockTime::from_nseconds(ns as u64);
-            let new_inp = gst::ClockTime::from_nseconds(ni as u64);
-            let new_dur = gst::ClockTime::from_nseconds(nd as u64);
-            // Apply the shrinking property first so inpoint + duration never
-            // transiently exceeds max-duration (which GES refuses).
-            if nd <= dur {
-                clip.set_duration(new_dur);
-                clip.set_inpoint(new_inp);
-            } else {
-                clip.set_inpoint(new_inp);
-                clip.set_duration(new_dur);
-            }
-            clip.set_start(new_start);
+            let ct = |n: i128| gst::ClockTime::from_nseconds(n as u64);
+            self.trim_left_in_one_move(&clip, ct(ns), ct(ni), ct(nd), rate);
         } else {
             let nd = trim_right_math(inpoint, dur, delta, max_ns, rate);
             clip.set_duration(gst::ClockTime::from_nseconds(nd as u64));
@@ -1659,6 +1648,50 @@ impl Project {
         self.commit();
         self.touched();
         Some(clip_geom(&clip))
+    }
+
+    /// Give a clip a new start, in-point and duration as one move. A left
+    /// trim is three writes, and GES refuses, without an error, any one of
+    /// them that passes through a state it forbids while the others still
+    /// land. With dissolves there is no safe order: trimmed in past the end of
+    /// the clip before, the shrink leaves the clip for a moment wholly inside
+    /// it; trimmed out in a chain, the growth reaches the clip two along.
+    /// So the clip is parked alone on a new layer below the timeline, set
+    /// there, where nothing can refuse it, and moved back, which GES checks
+    /// as one change, the way [`Self::set_clip_records`] writes undo. A move
+    /// back that is refused puts the clip back as it was.
+    fn trim_left_in_one_move(
+        &mut self,
+        clip: &ges::Clip,
+        start: gst::ClockTime,
+        inpoint: gst::ClockTime,
+        duration: gst::ClockTime,
+        rate: f64,
+    ) {
+        let home = clip.layer();
+        let was = (clip.start(), clip.inpoint(), clip.duration());
+        let parking = self.layers.len();
+        let park = self.layer(parking);
+        // If parking fails, the writes below meet the neighbours after all,
+        // and whatever GES refuses stays as it was.
+        let _ = clip.move_to_layer(&park);
+        // The speed is unchanged, so this is the order that keeps the source
+        // from being asked for more than it has: shrink, in-point, grow, start.
+        set_clip_placement(clip, start, inpoint, duration, rate);
+        if home.as_ref().is_none_or(|l| clip.move_to_layer(l).is_err()) {
+            set_clip_placement(clip, was.0, was.1, was.2, rate);
+            if let Some(l) = &home {
+                let _ = clip.move_to_layer(l);
+            }
+        }
+        while self.layers.len() > parking {
+            if self.layers.last().is_some_and(|l| !self.layer_is_empty(l)) {
+                break;
+            }
+            if let Some(last) = self.layers.pop() {
+                let _ = self.timeline.remove_layer(&last);
+            }
+        }
     }
 
     /// Set a clip's duration outright (the inspector's Duration field for
@@ -6677,6 +6710,106 @@ mod tests {
         assert!(write_back(&mut project, &[(&a, &ra), (&b, &rb)]));
         assert_same_record(&record_of(&project, &b), &rb);
         assert_eq!(project.layer_clip_count(0), 3);
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Found in review: a left trim was three writes, and GES refuses any
+    /// one of them that passes through a state it forbids while the others
+    /// still land. Trimmed in past the end of the clip before, the second
+    /// clip was for a moment wholly inside it, so the shrink was refused and
+    /// only the start moved: the clip came out at [7.25, 12.25) instead of
+    /// ending where it did.
+    #[test]
+    fn dissolve_left_trim_in_past_the_clip_before_keeps_the_end() {
+        let (dir, png, mut project) = undo_fixture("dissolve-trim-in");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(4.0))
+            .expect("p");
+        let b = project
+            .add_clip(&png, 0, secs(3.0), Duration::ZERO, secs(5.0))
+            .expect("b");
+        let g = project.trim_clip(&b, -1, 4.25).expect("trim");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(7.25), secs(4.25), secs(0.75))
+        );
+        assert_eq!(project.layer_clip_count(0), 2, "parted: no dissolve");
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same, outward, in a chain of dissolves: the growth went on before
+    /// the start moved, so for a moment the clip reached the clip two along,
+    /// three clips met at one instant, the growth was refused, and the clip
+    /// slid instead of growing.
+    #[test]
+    fn dissolve_left_trim_out_in_a_chain_grows_the_clip() {
+        // Six seconds of source.
+        let (dir, uri) = sequence_fixture("dissolve-trim-out", 60, 10);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let b = project
+            .add_clip_uri(&uri, 0, secs(2.0), secs(1.5), secs(3.0))
+            .expect("b");
+        project
+            .add_clip(&png, 0, secs(4.0), Duration::ZERO, secs(3.0))
+            .expect("c");
+        project
+            .add_clip(&png, 0, secs(6.0), Duration::ZERO, secs(3.0))
+            .expect("d");
+        let g = project.trim_clip(&b, -1, -1.5).expect("trim");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(0.5), Duration::ZERO, secs(4.5))
+        );
+        assert_eq!(project.track_count(), 1, "no parking layer left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A left trim still moves the in-point by the clip's speed: at 2x, half
+    /// a second of timeline is a second of source. The chain is the one that
+    /// made the growth collide above.
+    #[test]
+    fn dissolve_left_trim_of_a_sped_up_clip_follows_its_speed() {
+        // Six seconds of source.
+        let (dir, uri) = sequence_fixture("dissolve-trim-speed", 60, 10);
+        let png = dir.join("still.png");
+        image::RgbaImage::from_pixel(64, 36, image::Rgba([10, 120, 200, 255]))
+            .save(&png)
+            .expect("still");
+        let mut project = Project::new(|_f| {}).expect("project");
+        project
+            .add_clip(&png, 0, secs(0.0), Duration::ZERO, secs(3.0))
+            .expect("a");
+        let b = project
+            .add_clip_uri(&uri, 0, secs(2.0), secs(2.0), secs(4.0))
+            .expect("b");
+        let g = project.set_clip_rate(&b, 2.0).expect("2x");
+        assert_eq!((g.start, g.duration), (secs(2.0), secs(2.0)));
+        project
+            .add_clip(&png, 0, secs(3.5), Duration::ZERO, secs(3.0))
+            .expect("c");
+        project
+            .add_clip(&png, 0, secs(4.25), Duration::ZERO, secs(3.0))
+            .expect("d");
+        let g = project.trim_clip(&b, -1, -0.5).expect("out");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(1.5), secs(1.0), secs(2.5))
+        );
+        let g = project.trim_clip(&b, -1, 1.0).expect("in");
+        assert_eq!(
+            (g.start, g.inpoint, g.duration),
+            (secs(2.5), secs(3.0), secs(1.5))
+        );
+        assert_eq!(project.clip_rate(&b), 2.0);
         assert_eq!(project.track_count(), 1, "no parking layer left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
