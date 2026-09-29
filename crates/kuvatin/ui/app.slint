@@ -548,6 +548,13 @@ export component AppWindow inherits Window {
             root.video-open-project();
             return EventResult.accept;
         }
+        // Every key below edits a clip or moves the playhead, and a focused
+        // text field keeps them all, as undo-keys keeps Ctrl+Z. A key the
+        // field does not take itself would otherwise land on the timeline:
+        // Ctrl+Up in a title's text box would move the title to another track
+        // while it is being typed into. Space and letters never get this far
+        // then; the field takes them as text.
+        if (TextInputInterface.text-input-focused) { return EventResult.reject; }
         if (event.text == " ") { root.video-playpause(); return EventResult.accept; }
         if (event.text == Key.Delete || event.text == Key.Backspace) { root.delete-selected-clip(); return EventResult.accept; }
         // Plain S splits the selected clip at the playhead; Ctrl+S, above, saves.
