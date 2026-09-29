@@ -200,12 +200,7 @@ pub(super) fn wire(ui: &AppWindow, st: &VideoState) {
                 return;
             };
             let rows: Vec<TimelineClip> = tl_clips.iter().collect();
-            let want = match dissolve_of(&rows, sel) {
-                Some(d) if d > 0.0 => 0.0,
-                Some(_) => DISSOLVE_SECS,
-                None => return,
-            };
-            if let Some((_, delta)) = dissolve_slide(&rows, sel, want) {
+            if let Some(delta) = dissolve_chip(&rows, Some(sel)).slide {
                 ui.invoke_timeline_clip_dropped(sel as i32, delta, 0);
             }
         });
@@ -706,17 +701,38 @@ fn previous_on_track(rows: &[TimelineClip], sel: usize) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// The row after row `sel` on its own track: the first one starting later.
+fn next_on_track(rows: &[TimelineClip], sel: usize) -> Option<usize> {
+    let s = rows.get(sel)?;
+    rows.iter()
+        .enumerate()
+        .filter(|(i, r)| *i != sel && r.track == s.track && r.start > s.start)
+        .min_by(|(_, a), (_, b)| a.start.total_cmp(&b.start))
+        .map(|(i, _)| i)
+}
+
 /// The clip before `sel` on its own track and the slide that would give them
 /// a `want` second dissolve: negative to make one, positive to take one away.
-/// None when nothing precedes it on the track, or when the clip before it is
-/// too short to give up `want` and still keep 0.2 s of its own.
+/// None when nothing precedes it on the track, when the clip before it is
+/// too short to give up `want` and still keep 0.2 s of its own, or when a
+/// slide to the right would reach the clip after it. The slide rule would
+/// let it overlap that one, and taking one dissolve away would make another.
 fn dissolve_slide(rows: &[TimelineClip], sel: usize, want: f32) -> Option<(usize, f32)> {
     let p = previous_on_track(rows, sel)?;
     let (prev, s) = (&rows[p], &rows[sel]);
     if prev.duration < want + 0.2 {
         return None;
     }
-    Some((p, prev.start + prev.duration - want - s.start))
+    let delta = prev.start + prev.duration - want - s.start;
+    if delta > 0.0 {
+        if let Some(n) = next_on_track(rows, sel) {
+            let room = rows[n].start - (s.start + s.duration);
+            if delta > room + OVERLAP_EPS {
+                return None;
+            }
+        }
+    }
+    Some((p, delta))
 }
 
 /// How far the selected clip dissolves from the one before it, when there
@@ -725,6 +741,54 @@ fn dissolve_of(rows: &[TimelineClip], sel: usize) -> Option<f32> {
     let p = previous_on_track(rows, sel)?;
     let overlap = rows[p].start + rows[p].duration - rows[sel].start;
     Some(if overlap > OVERLAP_EPS { overlap } else { 0.0 })
+}
+
+/// What the Dissolve chip offers for the selected clip.
+#[derive(Debug, Clone, PartialEq)]
+struct DissolveChip {
+    /// Whether a click would change anything: the chip is enabled only then.
+    possible: bool,
+    /// The slide a click makes: negative to make a dissolve, positive to
+    /// take one away.
+    slide: Option<f32>,
+    /// The selected clip already dissolves from the one before it.
+    present: bool,
+    /// What a click would do or, when it would do nothing, why.
+    hint: String,
+}
+
+fn dissolve_chip(rows: &[TimelineClip], sel: Option<usize>) -> DissolveChip {
+    let found = sel.and_then(|s| Some((s, dissolve_of(rows, s)?)));
+    let Some((sel, d)) = found else {
+        return DissolveChip {
+            possible: false,
+            slide: None,
+            present: false,
+            hint: "Select a clip with another before it on its track".to_string(),
+        };
+    };
+    let present = d > 0.0;
+    let want = if present { 0.0 } else { DISSOLVE_SECS };
+    let slide = dissolve_slide(rows, sel, want).map(|(_, delta)| delta);
+    // Where there is no slide, only one thing can stand in the way of each:
+    // taking a dissolve away needs room after the clip, and making one needs
+    // a clip before it long enough to give up the length.
+    let hint = match (present, slide.is_some()) {
+        (true, true) => format!("Remove the {d:.1} s dissolve with the clip before it"),
+        (true, false) => {
+            format!("The clip after it leaves no room to take the {d:.1} s dissolve away")
+        }
+        (false, true) => format!("Cross-dissolve with the clip before it ({DISSOLVE_SECS:.1} s)"),
+        (false, false) => {
+            format!("The clip before it is too short for a {DISSOLVE_SECS:.1} s dissolve")
+        }
+    };
+    DissolveChip {
+        possible: slide.is_some(),
+        slide,
+        present,
+        hint,
+    }
 }
 
 /// Show the cross-dissolves on the timeline and what the Dissolve chip would
@@ -738,18 +802,11 @@ pub(super) fn show_dissolves(ui: &AppWindow, rows: &VecModel<TimelineClip>) {
     if shown.row_count() != now.len() || shown.iter().zip(&now).any(|(a, b)| a != *b) {
         ui.set_timeline_overlaps(ModelRc::new(VecModel::from(now)));
     }
-    let dissolve = usize::try_from(ui.get_timeline_selected())
-        .ok()
-        .and_then(|sel| dissolve_of(&rows, sel));
-    let hint = match dissolve {
-        None => "Select a clip with another before it on its track".to_string(),
-        Some(d) if d > 0.0 => format!("Remove the {d:.1} s dissolve with the clip before it"),
-        Some(_) => format!("Cross-dissolve with the clip before it ({DISSOLVE_SECS:.1} s)"),
-    };
-    ui.set_dissolve_possible(dissolve.is_some());
-    ui.set_dissolve_present(dissolve.is_some_and(|d| d > 0.0));
-    if ui.get_dissolve_hint() != hint.as_str() {
-        ui.set_dissolve_hint(hint.into());
+    let chip = dissolve_chip(&rows, usize::try_from(ui.get_timeline_selected()).ok());
+    ui.set_dissolve_possible(chip.possible);
+    ui.set_dissolve_present(chip.present);
+    if ui.get_dissolve_hint() != chip.hint.as_str() {
+        ui.set_dissolve_hint(chip.hint.into());
     }
 }
 
@@ -1032,5 +1089,96 @@ mod tests {
             "1.1 s cannot give up 1.0 s"
         );
         assert!(dissolve_slide(&short, 1, 0.5).is_some());
+    }
+
+    /// Found in review: taking a dissolve away slides the clip right, and the
+    /// slide rule lets it overlap the clip after it, so A>B butted up against
+    /// C became A|B>C. The slide stops at the clip after it or not at all.
+    #[test]
+    fn dissolve_slide_never_takes_one_away_into_the_next_clip() {
+        let butted = [
+            clip_at(0, 0.0, 4.0),
+            clip_at(0, 3.0, 3.0),
+            clip_at(0, 6.0, 3.0),
+        ];
+        assert_eq!(
+            dissolve_slide(&butted, 1, 0.0),
+            None,
+            "no room after it to slide into"
+        );
+        let short_gap = [
+            clip_at(0, 0.0, 4.0),
+            clip_at(0, 3.0, 3.0),
+            clip_at(0, 6.5, 3.0),
+        ];
+        assert_eq!(dissolve_slide(&short_gap, 1, 0.0), None, "0.5 s of room");
+        let room = [
+            clip_at(0, 0.0, 4.0),
+            clip_at(0, 3.0, 3.0),
+            clip_at(0, 7.0, 3.0),
+            clip_at(1, 6.0, 3.0),
+        ];
+        let (_, delta) = dissolve_slide(&room, 1, 0.0).expect("exactly enough room");
+        assert!(near(delta, 1.0), "{delta}");
+        // Making one slides left, away from the clip after it.
+        let chain = [
+            clip_at(0, 0.0, 4.0),
+            clip_at(0, 5.0, 3.0),
+            clip_at(0, 7.0, 3.0),
+        ];
+        assert!(dissolve_slide(&chain, 1, 1.0).is_some());
+    }
+
+    /// Found in review: the chip was enabled whenever a clip came before the
+    /// selected one, even where its click then did nothing.
+    #[test]
+    fn dissolve_chip_is_enabled_only_when_a_click_does_something() {
+        let make = [clip_at(0, 0.0, 4.0), clip_at(0, 5.0, 3.0)];
+        let chip = dissolve_chip(&make, Some(1));
+        assert!(chip.possible && !chip.present);
+        assert!(near(chip.slide.expect("a slide"), -2.0));
+        assert_eq!(chip.hint, "Cross-dissolve with the clip before it (1.0 s)");
+
+        let remove = [clip_at(0, 0.0, 4.0), clip_at(0, 3.0, 3.0)];
+        let chip = dissolve_chip(&remove, Some(1));
+        assert!(chip.possible && chip.present);
+        assert!(near(chip.slide.expect("a slide"), 1.0));
+        assert_eq!(
+            chip.hint,
+            "Remove the 1.0 s dissolve with the clip before it"
+        );
+
+        let short = [clip_at(0, 0.0, 1.1), clip_at(0, 2.0, 3.0)];
+        let chip = dissolve_chip(&short, Some(1));
+        assert!(!chip.possible && !chip.present && chip.slide.is_none());
+        assert_eq!(
+            chip.hint,
+            "The clip before it is too short for a 1.0 s dissolve"
+        );
+
+        let butted = [
+            clip_at(0, 0.0, 4.0),
+            clip_at(0, 3.0, 3.0),
+            clip_at(0, 6.0, 3.0),
+        ];
+        let chip = dissolve_chip(&butted, Some(1));
+        assert!(!chip.possible && chip.present && chip.slide.is_none());
+        assert_eq!(
+            chip.hint,
+            "The clip after it leaves no room to take the 1.0 s dissolve away"
+        );
+
+        for (rows, sel) in [
+            (&make[..], None),
+            (&make[..], Some(0)),
+            (&make[..], Some(9)),
+        ] {
+            let chip = dissolve_chip(rows, sel);
+            assert!(!chip.possible && !chip.present && chip.slide.is_none());
+            assert_eq!(
+                chip.hint,
+                "Select a clip with another before it on its track"
+            );
+        }
     }
 }

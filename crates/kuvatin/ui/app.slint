@@ -271,9 +271,9 @@ export component AppWindow inherits Window {
     // The cross-dissolves on the timeline, and the Dissolve chip's state for
     // the selected clip (gui/video/timeline.rs, `show_dissolves`).
     in property <[TimelineOverlap]> timeline-overlaps;
-    in property <bool> dissolve-possible: false;   // the selected clip has one before it on its track
-    in property <bool> dissolve-present: false;    // and already dissolves from it
-    in property <string> dissolve-hint: "";
+    in property <bool> dissolve-possible: false;   // a click would make or take away a dissolve
+    in property <bool> dissolve-present: false;    // the selected clip dissolves from the one before it
+    in property <string> dissolve-hint: "";        // what a click does, or why it cannot
     callback timeline-dissolve();                  // make the dissolve, or take it away
     // Speed, for videos and image sequences. The labels come from SPEEDS in
     // gui/video/mod.rs; the index is the entry showing.
