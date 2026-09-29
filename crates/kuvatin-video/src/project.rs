@@ -579,40 +579,102 @@ fn room_after(start: i128, dur: i128, neighbours: &[(i128, i128)]) -> Option<i12
         .min()
 }
 
-/// Read a GES clip's current timeline geometry.
-/// Where a slid clip may actually land on its layer.
-///
-/// GES stacks whatever it is told to stack: drop one clip onto another on the
-/// same layer and the later one simply hides the earlier, with nothing on
-/// screen to say so. A clip therefore stays inside the gap it already occupies
-/// — it can butt up against a neighbour on either side, and no further.
-///
-/// `neighbours` is every OTHER clip on the layer as `(start, end)` in
-/// nanoseconds, in any order. A clip that is already overlapping something
-/// (a project made before this rule) is not frozen in place: it just gets the
-/// old clamp at zero, so it can be dragged out of the mess.
-fn slide_within_gap(start: i128, dur: i128, delta: i128, neighbours: &[(i128, i128)]) -> i128 {
-    let desired = (start + delta).max(0);
-    let end = start + dur;
-    // The gap around the clip's current position: the nearest neighbour edge
-    // on each side. Anything already overlapping it is not a boundary — it is
-    // the mess the user is trying to drag out of.
-    let mut floor = 0i128;
-    let mut ceil = i128::MAX;
-    for &(n_start, n_end) in neighbours {
-        if n_end <= start {
-            floor = floor.max(n_end);
-        } else if n_start >= end {
-            ceil = ceil.min(n_start);
-        }
-    }
-    if ceil == i128::MAX {
-        return desired.max(floor);
-    }
-    // A gap too small to hold the clip leaves it exactly where it was.
-    desired.clamp(floor, (ceil - dur).max(floor))
+/// The clips around one at `start` on its layer, from `neighbours` (every
+/// OTHER clip there as `(start, end)`, any order): the one before it and the
+/// one before that, the one after it and the one after that. A neighbour
+/// starting where the clip does counts as after it.
+type Around = (
+    Option<(i128, i128)>,
+    Option<(i128, i128)>,
+    Option<(i128, i128)>,
+    Option<(i128, i128)>,
+);
+
+fn around(start: i128, neighbours: &[(i128, i128)]) -> Around {
+    let mut sorted = neighbours.to_vec();
+    sorted.sort_unstable();
+    let split = sorted.partition_point(|&(n_start, _)| n_start < start);
+    let (before, after) = sorted.split_at(split);
+    let back = |k: usize| before.len().checked_sub(k).map(|i| before[i]);
+    (
+        back(1),
+        back(2),
+        after.first().copied(),
+        after.get(1).copied(),
+    )
 }
 
+/// Where a slid clip may actually land on its layer.
+///
+/// Clips on one layer may overlap, and GES draws a cross-dissolve where they
+/// do. What GES refuses is one clip wholly on top of another and three clips
+/// at one instant, so a slide stops short of those, the same rule
+/// [`trim_bounds`] gives a trim:
+///
+/// - the clip before (P) keeps at least [`MIN_TRIM_NS`] of its head, so the
+///   order on the track cannot change, and this clip keeps at least as much
+///   past P's end, so it is never swallowed;
+/// - the same two, mirrored, against the clip after (N);
+/// - it never reaches the clip beyond either of those.
+///
+/// `neighbours` is every OTHER clip on the layer as `(start, end)` in
+/// nanoseconds, in any order. The bounds come from where the neighbours are,
+/// not from where the clip is, so a clip already in a tangle (a project from
+/// before any rule) is moved out of it rather than frozen in it. A gap too
+/// small to hold it leaves it where it was.
+fn slide_within_layer(start: i128, dur: i128, delta: i128, neighbours: &[(i128, i128)]) -> i128 {
+    let desired = start + delta;
+    let (p, pp, n, nn) = around(start, neighbours);
+    let mut floor = 0i128;
+    if let Some((p_start, p_end)) = p {
+        floor = floor
+            .max(p_start + MIN_TRIM_NS)
+            .max(p_end + MIN_TRIM_NS - dur);
+    }
+    if let Some((_, pp_end)) = pp {
+        floor = floor.max(pp_end);
+    }
+    let mut ceil = i128::MAX;
+    if let Some((n_start, n_end)) = n {
+        ceil = ceil
+            .min(n_start - MIN_TRIM_NS)
+            .min(n_end - MIN_TRIM_NS - dur);
+    }
+    if let Some((nn_start, _)) = nn {
+        ceil = ceil.min(nn_start - dur);
+    }
+    if ceil < floor {
+        return start;
+    }
+    desired.clamp(floor, ceil)
+}
+
+/// How far a clip at `start` may be trimmed out on its layer, as (earliest
+/// start, latest end) in nanoseconds; `i128::MAX` when nothing bounds the
+/// end. The slide rule's bounds for an edge: a left edge keeps the clip before
+/// at least [`MIN_TRIM_NS`] of its head and never reaches the clip before
+/// that; a right edge leaves the clip after at least as much of its tail and
+/// never reaches the clip after that.
+fn trim_bounds(start: i128, neighbours: &[(i128, i128)]) -> (i128, i128) {
+    let (p, pp, n, nn) = around(start, neighbours);
+    let mut earliest = 0i128;
+    if let Some((p_start, _)) = p {
+        earliest = earliest.max(p_start + MIN_TRIM_NS);
+    }
+    if let Some((_, pp_end)) = pp {
+        earliest = earliest.max(pp_end);
+    }
+    let mut latest = i128::MAX;
+    if let Some((_, n_end)) = n {
+        latest = latest.min(n_end - MIN_TRIM_NS);
+    }
+    if let Some((nn_start, _)) = nn {
+        latest = latest.min(nn_start);
+    }
+    (earliest, latest)
+}
+
+/// Read a GES clip's current timeline geometry.
 fn clip_geom(clip: &ges::Clip) -> ClipGeom {
     ClipGeom {
         start: Duration::from_nanos(clip.start().nseconds()),
@@ -1161,7 +1223,7 @@ fn set_clip_frame(clip: &ges::Clip, posx: i32, posy: i32, width: i32, height: i3
 }
 
 /// A GES-backed editing project: one timeline, one preview pipeline. Layers are
-/// visual tracks, index 0 = bottom (top layers composite over lower ones).
+/// visual tracks, index 0 = top (it composites over the layers below it).
 pub struct Project {
     timeline: ges::Timeline,
     layers: Vec<ges::Layer>,
@@ -1502,9 +1564,10 @@ impl Project {
     }
 
     /// Slide a clip along its track by `delta_secs` (may be negative); start is
-    /// clamped to >= 0 and to the gap the clip occupies on its layer, so a drag
-    /// cannot bury one clip under another (see [`slide_within_gap`]). Returns
-    /// the resulting geometry, or None for an unknown id.
+    /// clamped to >= 0 and to what its neighbours on the layer allow: it may
+    /// overlap one, for a cross-dissolve, but never bury one or be buried
+    /// (see [`slide_within_layer`]). Returns the resulting geometry, or None
+    /// for an unknown id.
     pub fn slide_clip(&mut self, id: &ClipId, delta_secs: f64) -> Option<ClipGeom> {
         if self.rendering.get() {
             return None;
@@ -1513,7 +1576,7 @@ impl Project {
         let start = clip.start().nseconds() as i128;
         let dur = clip.duration().nseconds() as i128;
         let delta = (delta_secs * 1e9) as i128;
-        let new_start = slide_within_gap(start, dur, delta, &self.layer_neighbours(id)) as u64;
+        let new_start = slide_within_layer(start, dur, delta, &self.layer_neighbours(id)) as u64;
         clip.set_start(gst::ClockTime::from_nseconds(new_start));
         self.commit();
         self.touched();
@@ -1541,8 +1604,10 @@ impl Project {
 
     /// Trim a clip by dragging an edge. `edge < 0` = left edge (keeps the right
     /// end fixed by moving start+inpoint and shrinking duration); `edge > 0` =
-    /// right edge (adjusts duration only). Clamped to the source bounds and a
-    /// 0.2 s minimum. Returns the resulting geometry.
+    /// right edge (adjusts duration only). Clamped to the source bounds, a
+    /// 0.2 s minimum and, outward, to what the neighbours on its layer allow
+    /// (see [`trim_bounds`]); trimming in is never refused. Returns the
+    /// resulting geometry.
     pub fn trim_clip(&mut self, id: &ClipId, edge: i32, delta_secs: f64) -> Option<ClipGeom> {
         if self.rendering.get() {
             return None;
@@ -1556,8 +1621,14 @@ impl Project {
         let max_ns = clip
             .property::<Option<gst::ClockTime>>("max-duration")
             .map(|m| m.nseconds() as i128);
-        let delta = (delta_secs * 1e9) as i128;
+        let mut delta = (delta_secs * 1e9) as i128;
         let rate = clip_rate_of(&clip);
+        let (earliest, latest) = trim_bounds(start, &self.layer_neighbours(id));
+        if edge < 0 && delta < 0 {
+            delta = delta.max((earliest - start).min(0));
+        } else if edge > 0 && delta > 0 && latest != i128::MAX {
+            delta = delta.min((latest - (start + dur)).max(0));
+        }
 
         if edge < 0 {
             let (ns, ni, nd) = trim_left_math(start, inpoint, dur, delta, rate);
@@ -3075,45 +3146,120 @@ mod tests {
 
     #[test]
     fn a_clip_on_an_empty_layer_slides_freely() {
-        assert_eq!(slide_within_gap(2 * S, S, 3 * S, &[]), 5 * S);
-        assert_eq!(slide_within_gap(2 * S, S, -S, &[]), S);
+        assert_eq!(slide_within_layer(2 * S, S, 3 * S, &[]), 5 * S);
+        assert_eq!(slide_within_layer(2 * S, S, -S, &[]), S);
     }
 
     #[test]
     fn sliding_past_the_start_of_the_timeline_stops_at_zero() {
-        assert_eq!(slide_within_gap(2 * S, S, -5 * S, &[]), 0);
+        assert_eq!(slide_within_layer(2 * S, S, -5 * S, &[]), 0);
     }
 
-    /// GES stacks whatever it is told to stack: the later clip simply hides the
-    /// earlier one, with nothing on screen to say so.
+    /// Butting up is exact, and a slide further on overlaps the neighbour
+    /// for a dissolve, until this clip would be swallowed by it: it keeps
+    /// the trim minimum of its head clear of the neighbour's start.
     #[test]
-    fn a_clip_stops_against_the_neighbour_on_its_right() {
+    fn a_clip_overlaps_the_neighbour_on_its_right_but_is_never_swallowed() {
         // [2,3) sliding right into a neighbour at [5,8).
         let neighbours = [(5 * S, 8 * S)];
-        assert_eq!(slide_within_gap(2 * S, S, 10 * S, &neighbours), 4 * S);
+        assert_eq!(slide_within_layer(2 * S, S, 2 * S, &neighbours), 4 * S);
+        assert_eq!(
+            slide_within_layer(2 * S, S, 5 * S / 2, &neighbours),
+            9 * S / 2
+        );
+        assert_eq!(
+            slide_within_layer(2 * S, S, 10 * S, &neighbours),
+            5 * S - MIN_TRIM_NS
+        );
+        // A long clip stops where the neighbour keeps 0.2 s of its tail.
+        assert_eq!(
+            slide_within_layer(0, 5 * S, 10 * S, &neighbours),
+            8 * S - MIN_TRIM_NS - 5 * S
+        );
     }
 
     #[test]
-    fn a_clip_stops_against_the_neighbour_on_its_left() {
+    fn a_clip_overlaps_the_neighbour_on_its_left_but_never_swallows_it() {
         // [6,7) sliding left into a neighbour at [1,4).
         let neighbours = [(S, 4 * S)];
-        assert_eq!(slide_within_gap(6 * S, S, -10 * S, &neighbours), 4 * S);
+        assert_eq!(slide_within_layer(6 * S, S, -2 * S, &neighbours), 4 * S);
+        // Stops with 0.2 s of this clip past the neighbour's end.
+        assert_eq!(
+            slide_within_layer(6 * S, S, -10 * S, &neighbours),
+            4 * S + MIN_TRIM_NS - S
+        );
+        // A long clip stops where the neighbour keeps 0.2 s of its head.
+        assert_eq!(
+            slide_within_layer(6 * S, 5 * S, -10 * S, &neighbours),
+            S + MIN_TRIM_NS
+        );
     }
 
+    /// Order on the track never changes, and a clip never reaches the clip
+    /// beyond a neighbour, so three never overlap at one instant.
     #[test]
-    fn a_clip_is_confined_to_the_gap_it_is_already_in() {
-        // [4,6) between [0,4) and [6,9): it cannot move at all.
+    fn a_clip_is_confined_to_the_gap_between_the_neighbours_neighbours() {
+        // [4,6) between [0,4) and [6,9).
         let neighbours = [(0, 4 * S), (6 * S, 9 * S)];
-        assert_eq!(slide_within_gap(4 * S, 2 * S, 3 * S, &neighbours), 4 * S);
-        assert_eq!(slide_within_gap(4 * S, 2 * S, -3 * S, &neighbours), 4 * S);
+        assert_eq!(
+            slide_within_layer(4 * S, 2 * S, 3 * S, &neighbours),
+            6 * S - MIN_TRIM_NS
+        );
+        assert_eq!(
+            slide_within_layer(4 * S, 2 * S, -9 * S, &neighbours),
+            4 * S + MIN_TRIM_NS - 2 * S
+        );
+        // [0,5) before [6,9) and [7,12), which already dissolve into each
+        // other: it may overlap the first, and stops where the second starts.
+        let after = [(6 * S, 9 * S), (7 * S, 12 * S)];
+        assert_eq!(slide_within_layer(0, 5 * S, 10 * S, &after), 2 * S);
+        // [10,15) after [0,6) and [4,8), mirrored.
+        let before = [(0, 6 * S), (4 * S, 8 * S)];
+        assert_eq!(slide_within_layer(10 * S, 5 * S, -10 * S, &before), 6 * S);
     }
 
-    /// Clips that already overlap (a project from before this rule) must not be
-    /// frozen in place: the move is clamped to zero and nothing else.
+    /// A clip in a tangle with no legal place anywhere is left where it was.
+    #[test]
+    fn a_slid_clip_with_no_legal_place_stays_put() {
+        // [2,3) inside [0,4), with [3,4.1) after it.
+        let neighbours = [(0, 4 * S), (3 * S, 41 * S / 10)];
+        assert_eq!(slide_within_layer(2 * S, S, S, &neighbours), 2 * S);
+    }
+
+    /// Clips already in a tangle (a project from before any rule) are not
+    /// frozen in place: the bounds come from the neighbours, so the clip is
+    /// moved to where it is legal.
     #[test]
     fn an_already_overlapping_clip_can_still_be_moved() {
+        // [2,3) wholly inside [0,10): it comes out 0.2 s past the end.
         let neighbours = [(0, 10 * S)];
-        assert_eq!(slide_within_gap(2 * S, S, 3 * S, &neighbours), 5 * S);
+        assert_eq!(
+            slide_within_layer(2 * S, S, 3 * S, &neighbours),
+            10 * S + MIN_TRIM_NS - S
+        );
+    }
+
+    #[test]
+    fn a_trim_with_no_neighbour_is_bounded_only_by_zero() {
+        assert_eq!(trim_bounds(2 * S, &[]), (0, i128::MAX));
+    }
+
+    /// A right trim may cover the next clip for a dissolve, but leaves it
+    /// 0.2 s of its tail and never reaches the clip after it.
+    #[test]
+    fn a_right_trim_stops_short_of_covering_the_next_neighbour() {
+        let (_, latest) = trim_bounds(0, &[(3 * S, 5 * S)]);
+        assert_eq!(latest, 5 * S - MIN_TRIM_NS);
+        let (_, latest) = trim_bounds(0, &[(3 * S, 8 * S), (6 * S, 9 * S)]);
+        assert_eq!(latest, 6 * S);
+    }
+
+    #[test]
+    fn a_left_trim_stops_short_of_covering_the_previous_neighbour() {
+        let (earliest, _) = trim_bounds(6 * S, &[(S, 4 * S)]);
+        assert_eq!(earliest, S + MIN_TRIM_NS);
+        let (earliest, _) = trim_bounds(6 * S, &[(0, 2 * S), (S, 7 * S)]);
+        assert_eq!(earliest, 2 * S);
     }
 
     use super::*;
@@ -4489,8 +4635,9 @@ mod tests {
         project.set_clip_records(&owned).is_empty()
     }
 
-    /// The slide was clamped against a neighbour; reversing the amount would
-    /// not put the clip back, writing the old record does.
+    /// The slide was clamped against a neighbour, overlapping it as far as
+    /// the rule allows; reversing the amount would not put the clip back,
+    /// writing the old record does.
     #[test]
     fn undo_writes_a_clamped_slide_back_exactly() {
         let (dir, png, mut project) = undo_fixture("undo-slide");
@@ -4502,7 +4649,7 @@ mod tests {
             .expect("b");
         let before = record_of(&project, &b);
         let geom = project.slide_clip(&b, -10.0).expect("slide");
-        assert_eq!(geom.start, secs(2.0), "stopped against a");
+        assert_eq!(geom.start, secs(0.2), "a keeps 0.2 s of its head");
         assert!(write_back(&mut project, &[(&b, &before)]));
         assert_same_record(&record_of(&project, &b), &before);
         let _ = std::fs::remove_dir_all(&dir);

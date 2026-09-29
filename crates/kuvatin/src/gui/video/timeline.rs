@@ -592,6 +592,10 @@ fn remove_timeline_clip(
 /// smallest nudge; on a tie the earlier target wins, the origin first. The
 /// start never goes before zero. `pps` is the zoom in pixels per second, and
 /// with none yet the drag comes back untouched.
+///
+/// Snapping to a neighbour's edge is the "butt up, no dissolve" place. A drag
+/// further than the magnet overlaps the neighbour, for a cross-dissolve, as far
+/// as the engine's slide rule allows.
 fn snap_slide(start: f32, duration: f32, others: &[(f32, f32)], dx_s: f32, pps: f32) -> f32 {
     if pps <= 0.0 {
         return dx_s;
