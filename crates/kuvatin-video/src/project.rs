@@ -114,6 +114,10 @@ pub struct FrameView<'a> {
     pub height: u32,
     pub stride: usize,
     pub data: &'a [u8],
+    /// Where on the timeline the frame is, from its buffer's timestamp; None
+    /// for a buffer with none. A frame that arrives late from before a seek
+    /// carries its own, earlier time.
+    pub pts: Option<Duration>,
 }
 
 impl FrameView<'_> {
@@ -152,6 +156,7 @@ fn with_frame_view<R>(sample: &gst::Sample, f: impl FnOnce(FrameView<'_>) -> R) 
     let caps = sample.caps()?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer_owned()?;
+    let pts = buffer.pts().map(|t| Duration::from_nanos(t.nseconds()));
     let vframe = gstreamer_video::VideoFrame::from_buffer_readable(buffer, &info).ok()?;
     let stride = vframe.plane_stride()[0] as usize;
     let data = vframe.plane_data(0).ok()?;
@@ -164,6 +169,7 @@ fn with_frame_view<R>(sample: &gst::Sample, f: impl FnOnce(FrameView<'_>) -> R) 
         height,
         stride,
         data,
+        pts,
     }))
 }
 
@@ -6592,26 +6598,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The preview's latest frame: where it sits on the timeline, its size
+    /// and its pixels.
+    type Shot = Arc<std::sync::Mutex<Option<(Option<Duration>, u32, u32, Vec<u8>)>>>;
+
+    /// A project whose preview frames land in the returned slot.
+    fn shooting_project() -> (Shot, Project) {
+        let shot: Shot = Arc::new(std::sync::Mutex::new(None));
+        let sink = shot.clone();
+        let project = Project::new(move |f| {
+            let mut buf = vec![0u8; (f.width * f.height * 4) as usize];
+            f.copy_packed_into(&mut buf);
+            *sink.lock().unwrap() = Some((f.pts, f.width, f.height, buf));
+        })
+        .expect("project");
+        (shot, project)
+    }
+
+    /// The preview frame at `at`, waited for up to five seconds. A frame from
+    /// before a seek can still arrive after it; it carries its own, earlier
+    /// time, so it is passed over rather than read. A fixed sleep once stood
+    /// here, which such a frame could beat.
+    fn frame_at(shot: &Shot, at: Duration) -> (u32, u32, Vec<u8>) {
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            {
+                let slot = shot.lock().unwrap();
+                if let Some((pts, w, h, px)) = slot.as_ref() {
+                    if pts.is_some_and(|p| p.abs_diff(at) < Duration::from_millis(50)) {
+                        return (*w, *h, px.clone());
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < end,
+                    "no frame at {at:?}; the last was at {:?}",
+                    slot.as_ref().map(|s| s.0)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// A title draws over a transparent frame: away from its text, the blue
     /// still beneath it shows. (Over a white still an opaque white frame
     /// would pass, so the still is blue.) The text is the colour asked for,
     /// which pins the byte order `parse_color` gives GES.
     #[test]
     fn title_composites_over_a_clip() {
-        type Shot = Arc<std::sync::Mutex<Option<(u32, u32, Vec<u8>)>>>;
-        let shot: Shot = Arc::new(std::sync::Mutex::new(None));
-        let sink = shot.clone();
         let dir = scratch("title-composite");
         let png = dir.join("blue.png");
         image::RgbaImage::from_pixel(320, 180, image::Rgba([0, 0, 255, 255]))
             .save(&png)
             .expect("still");
-        let mut project = Project::new(move |f| {
-            let mut buf = vec![0u8; (f.width * f.height * 4) as usize];
-            f.copy_packed_into(&mut buf);
-            *sink.lock().unwrap() = Some((f.width, f.height, buf));
-        })
-        .expect("project");
+        let (shot, mut project) = shooting_project();
         project
             .add_clip(&png, 1, Duration::ZERO, Duration::ZERO, secs(3.0))
             .expect("still");
@@ -6627,11 +6666,8 @@ mod tests {
             .expect("title");
         project.pause().expect("pause");
         wait_settled(&project);
-        *shot.lock().unwrap() = None;
         project.seek_accurate(secs(1.0)).expect("seek");
-        wait_settled(&project);
-        std::thread::sleep(Duration::from_millis(500));
-        let (w, h, px) = shot.lock().unwrap().clone().expect("a frame");
+        let (w, h, px) = frame_at(&shot, secs(1.0));
         let at = |x: u32, y: u32| {
             let i = ((y * w + x) * 4) as usize;
             (px[i], px[i + 1], px[i + 2])
@@ -6837,9 +6873,6 @@ mod tests {
     /// Halfway through a dissolve from white to black, the picture is grey.
     #[test]
     fn dissolve_blends_the_two_clips_in_the_preview() {
-        type Shot = Arc<std::sync::Mutex<Option<(u32, u32, Vec<u8>)>>>;
-        let shot: Shot = Arc::new(std::sync::Mutex::new(None));
-        let sink = shot.clone();
         let dir = scratch("dissolve-blend");
         let white = dir.join("white.png");
         let black = dir.join("black.png");
@@ -6849,12 +6882,7 @@ mod tests {
         image::RgbaImage::from_pixel(320, 180, image::Rgba([0, 0, 0, 255]))
             .save(&black)
             .expect("black");
-        let mut project = Project::new(move |f| {
-            let mut buf = vec![0u8; (f.width * f.height * 4) as usize];
-            f.copy_packed_into(&mut buf);
-            *sink.lock().unwrap() = Some((f.width, f.height, buf));
-        })
-        .expect("project");
+        let (shot, mut project) = shooting_project();
         project
             .add_clip(&white, 0, secs(0.0), Duration::ZERO, secs(3.0))
             .expect("white");
@@ -6863,11 +6891,8 @@ mod tests {
             .expect("black");
         project.pause().expect("pause");
         wait_settled(&project);
-        *shot.lock().unwrap() = None;
         project.seek_accurate(secs(2.5)).expect("seek");
-        wait_settled(&project);
-        std::thread::sleep(Duration::from_millis(500));
-        let (w, h, px) = shot.lock().unwrap().clone().expect("a frame");
+        let (w, h, px) = frame_at(&shot, secs(2.5));
         let i = (((h / 2) * w + w / 2) * 4) as usize;
         let (r, g, b) = (px[i], px[i + 1], px[i + 2]);
         for v in [r, g, b] {
