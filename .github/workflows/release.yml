@@ -520,6 +520,33 @@ jobs:
             "$hash  kuvatin-x86_64.msi`n")
           Get-ChildItem target\wix
 
+      # Titles and dissolves need plugins nothing else loads (pango for the
+      # text, smpte for the transition), and the installed exe has no way to
+      # draw either from the command line. So the engine's own title and
+      # dissolve tests run against the staged runtime, the way the installed
+      # app loads it: the runner's GStreamer off PATH, the staged DLLs on it,
+      # and the staged plugin folder as the only plugin path. A plugin missing
+      # from the allow-list crashes or fails a test here.
+      - name: Test (titles and dissolves on the staged runtime — gates the release)
+        if: env.PACKAGE == 'true'
+        shell: pwsh
+        run: |
+          $env:RUST_BACKTRACE = "1"
+          # Found while the runner's GStreamer is still on PATH, so cargo sees
+          # the same environment the engine step built the binary in.
+          $exe = cargo test -p kuvatin-video --release --no-run --message-format=json |
+            ConvertFrom-Json | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.target.name -eq 'kuvatin_video' } |
+            Select-Object -ExpandProperty executable -First 1
+          if (-not $exe) { throw "kuvatin-video test binary not found" }
+          $stage = "$env:GITHUB_WORKSPACE\target\gst-staging"
+          $env:Path = (@($stage) + (($env:Path -split ';') | Where-Object { $_ -notlike '*gstreamer*' })) -join ';'
+          $env:GST_PLUGIN_PATH = "$stage\gstreamer-plugins"
+          $env:GST_PLUGIN_SYSTEM_PATH = ''
+          # A registry of its own, outside the stage: nothing else wrote it.
+          $env:GST_REGISTRY = "$env:RUNNER_TEMP\kuvatin-staged-registry.bin"
+          & $exe --test-threads=1 title_ dissolve_
+          if ($LASTEXITCODE -ne 0) { throw "title and dissolve tests failed on the staged runtime ($LASTEXITCODE)" }
+
       # Install the MSI the way a user would and drive the INSTALLED exe with
       # the runner's GStreamer hidden from PATH: only the bundled runtime may
       # satisfy it. A plugin missing from the allow-list fails here.
