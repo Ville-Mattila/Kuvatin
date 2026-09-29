@@ -801,6 +801,7 @@ mod tests {
                 volume: 1.0,
             },
             sequence: None,
+            body: None,
         }
     }
 

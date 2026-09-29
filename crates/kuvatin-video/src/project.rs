@@ -2173,6 +2173,7 @@ impl Project {
                         // Filled in by the caller, which is the only side that
                         // knows how a sequence clip was described when it arrived.
                         sequence: None,
+                        body: None,
                     },
                 ))
             })
