@@ -115,23 +115,57 @@ pub fn stage(
 }
 
 /// Start the staged updater, then the caller quits. `relaunch` is the
-/// executable to start afterwards, normally this one's own path.
+/// executable to start afterwards, normally this one's own path. The Windows
+/// 11 menu handler beside it is named too, so the updater can end the COM
+/// Surrogate holding it, which the installer cannot close by itself.
 pub fn hand_off(staged: &Staged, relaunch: &Path) -> Result<()> {
     std::process::Command::new(&staged.helper)
-        .arg("--apply-update")
-        .arg(&staged.msi)
-        .arg("--after")
-        .arg(std::process::id().to_string())
-        .arg("--relaunch")
-        .arg(relaunch)
+        .args(helper_args(&staged.msi, std::process::id(), relaunch))
         .spawn()
         .with_context(|| format!("could not start {}", staged.helper.display()))?;
     Ok(())
 }
 
+/// The updater's command line: install `msi` once process `pid` has gone,
+/// start `relaunch` again, and release the menu handler beside it first.
+fn helper_args(msi: &Path, pid: u32, relaunch: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "--apply-update".into(),
+        msi.into(),
+        "--after".into(),
+        pid.to_string().into(),
+        "--relaunch".into(),
+        relaunch.into(),
+        "--shell-dll".into(),
+        relaunch.with_file_name("kuvatin_shellext.dll").into(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The updater ends the COM Surrogate holding the Windows 11 menu handler
+    /// before the installer runs, so it has to be told where the handler is:
+    /// beside the app it will start again.
+    #[test]
+    fn the_updater_is_told_where_the_menu_handler_is() {
+        let args = helper_args(
+            Path::new(r"C:\t\k.msi"),
+            42,
+            Path::new(r"C:\Program Files\kuvatin\bin\kuvatin.exe"),
+        );
+        let at = args
+            .iter()
+            .position(|a| a == "--shell-dll")
+            .expect("--shell-dll is passed");
+        assert_eq!(
+            Path::new(&args[at + 1]),
+            Path::new(r"C:\Program Files\kuvatin\bin\kuvatin_shellext.dll")
+        );
+        let after = args.iter().position(|a| a == "--after").expect("--after");
+        assert_eq!(args[after + 1], "42");
+    }
 
     #[test]
     fn staging_sits_inside_the_tree_the_uninstall_sweeps() {
