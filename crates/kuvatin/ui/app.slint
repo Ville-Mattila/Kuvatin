@@ -18,7 +18,7 @@ export struct FileRow {
 }
 
 // What a timeline clip is (drives its colour and whether it has audio).
-export enum ClipKind { video, image, sequence }
+export enum ClipKind { video, image, sequence, title }
 
 // A clip placed on the video timeline. Positions are in seconds; the UI maps
 // them to pixels via the pixels-per-second zoom.
@@ -2139,7 +2139,9 @@ export component AppWindow inherits Window {
                                                 ? @linear-gradient(135deg, #3f7df5 0%, #1f4fc0 100%)
                                                 : clip.kind == ClipKind.sequence
                                                     ? @linear-gradient(135deg, #8b5cf6 0%, #5b34c9 100%)
-                                                    : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
+                                                    : clip.kind == ClipKind.title
+                                                        ? @linear-gradient(135deg, #f5a742 0%, #c07a1f 100%)
+                                                        : @linear-gradient(135deg, #1fd3b6 0%, #0f9d84 100%);
                                             border-width: clip.selected ? 2px : 1px;
                                             border-color: clip.selected ? Theme.accent : #00000055;
                                             animate border-color { duration: 130ms; }

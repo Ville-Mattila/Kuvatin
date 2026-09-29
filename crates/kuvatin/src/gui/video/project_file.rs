@@ -222,7 +222,7 @@ fn restore_models(
             duration: rec.duration as f32,
             inpoint: rec.inpoint as f32,
             name: rec.name.clone().into(),
-            kind: kind_of(&rec.uri),
+            kind: kind_of(rec),
             selected: false,
             thumb: Image::default(),
             rate: rec.rate as f32,
@@ -315,7 +315,8 @@ pub(super) fn spawn_thumbnails(
     let _ = std::thread::Builder::new()
         .name("kuvatin-project-thumbs".into())
         .spawn(move || {
-            for (id, rec) in records {
+            // A title has no source to picture: its name on the block is all.
+            for (id, rec) in records.into_iter().filter(|(_, r)| !r.uri.is_empty()) {
                 let Some(frame) = kuvatin_video::thumbnail_uri(&rec.uri, 160) else {
                     continue;
                 };
@@ -350,8 +351,17 @@ pub(super) fn spawn_thumbnails(
         });
 }
 
-/// What a saved URI is, for the clip's colour on the timeline.
-pub(super) fn kind_of(uri: &str) -> ClipKind {
+/// What a clip is, for its colour on the timeline: a title by its body,
+/// anything else by its URI.
+pub(super) fn kind_of(record: &kuvatin_video::ClipRecord) -> ClipKind {
+    match record.body {
+        Some(kuvatin_video::ClipBody::Title(_)) => ClipKind::Title,
+        None => kind_of_uri(&record.uri),
+    }
+}
+
+/// What a saved URI is.
+pub(super) fn kind_of_uri(uri: &str) -> ClipKind {
     if uri.starts_with("imagesequence://") {
         return ClipKind::Sequence;
     }
@@ -402,14 +412,45 @@ mod tests {
     #[test]
     fn a_uri_says_what_kind_of_clip_it_is() {
         assert_eq!(
-            kind_of("imagesequence://C:/r/f_%04d.png?start-index=1&framerate=24/1"),
+            kind_of_uri("imagesequence://C:/r/f_%04d.png?start-index=1&framerate=24/1"),
             ClipKind::Sequence
         );
-        assert_eq!(kind_of("file:///C:/shots/take1.mp4"), ClipKind::Video);
-        assert_eq!(kind_of("file:///C:/shots/logo.png"), ClipKind::Image);
+        assert_eq!(kind_of_uri("file:///C:/shots/take1.mp4"), ClipKind::Video);
+        assert_eq!(kind_of_uri("file:///C:/shots/logo.png"), ClipKind::Image);
         // A query on a plain file URI must not be read as part of the
         // extension: `.png?x=1` is still a PNG.
-        assert_eq!(kind_of("file:///C:/shots/logo.png?x=1"), ClipKind::Image);
+        assert_eq!(
+            kind_of_uri("file:///C:/shots/logo.png?x=1"),
+            ClipKind::Image
+        );
+    }
+
+    /// A title is known by its body, whatever its URI says.
+    #[test]
+    fn a_title_record_is_a_title_clip() {
+        let record = |body| kuvatin_video::ClipRecord {
+            uri: String::new(),
+            name: "Hello".into(),
+            track: 0,
+            start: 0.0,
+            inpoint: 0.0,
+            duration: 5.0,
+            rate: 1.0,
+            layout: kuvatin_video::LayoutRecord {
+                posx: 0,
+                posy: 0,
+                scale: 1.0,
+                alpha: 1.0,
+                volume: 1.0,
+            },
+            sequence: None,
+            body,
+        };
+        let title = kuvatin_video::ClipBody::Title(kuvatin_video::TitleRecord::default());
+        assert_eq!(kind_of(&record(Some(title))), ClipKind::Title);
+        let mut still = record(None);
+        still.uri = "file:///C:/shots/logo.png".into();
+        assert_eq!(kind_of(&still), ClipKind::Image);
     }
 
     fn named(name: &str) -> kuvatin_video::TrackRecord {

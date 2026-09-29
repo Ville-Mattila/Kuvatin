@@ -328,7 +328,7 @@ pub(super) fn rows_after(
             (Some(record), None) => {
                 let mut row = kept.get(&a.id).cloned().unwrap_or_else(|| TimelineClip {
                     name: record.name.as_str().into(),
-                    kind: kind_of(&record.uri),
+                    kind: kind_of(record),
                     ..Default::default()
                 });
                 row.selected = false;
@@ -340,9 +340,32 @@ pub(super) fn rows_after(
     out
 }
 
+/// The names of the clips among `restores` whose source is not there to
+/// bring back, as `available` answers for a URI. A title has no source, so it
+/// is never asked about: `available("")` would look for a file with no name.
+fn missing_sources(
+    restores: &[(String, ClipRecord)],
+    kept: &HashMap<String, TimelineClip>,
+    available: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    restores
+        .iter()
+        .filter(|(_, record)| record.body.is_none() && !available(&record.uri))
+        .map(|(id, record)| match kept.get(id) {
+            Some(row) => row.name.to_string(),
+            None => record.name.clone(),
+        })
+        .collect()
+}
+
 /// Put a row where `record` places its clip, under the ID the clip has now.
+/// A title's name is its text, so it follows the record; any other clip keeps
+/// the name its row has.
 fn place(row: &mut TimelineClip, id: &str, record: &ClipRecord) {
     row.id = id.into();
+    if record.body.is_some() {
+        row.name = record.name.as_str().into();
+    }
     row.track = record.track as i32;
     row.start = record.start as f32;
     row.duration = record.duration as f32;
@@ -575,15 +598,7 @@ fn apply_step(
     };
 
     // A deleted clip whose file has gone since: say which, and change nothing.
-    let missing: Vec<String> = ops
-        .restores
-        .iter()
-        .filter(|(_, record)| !p.source_available(&record.uri))
-        .map(|(id, record)| match kept.get(id) {
-            Some(row) => row.name.to_string(),
-            None => record.name.clone(),
-        })
-        .collect();
+    let missing = missing_sources(&ops.restores, &kept, |uri| p.source_available(uri));
     if !missing.is_empty() {
         drop(slot);
         show_error(
@@ -1557,5 +1572,77 @@ mod tests {
                 restores: vec![],
             }
         );
+    }
+
+    fn title(text: &str, start: f64) -> ClipRecord {
+        let body = kuvatin_video::TitleRecord {
+            text: text.into(),
+            ..Default::default()
+        };
+        ClipRecord {
+            uri: String::new(),
+            name: body.name(),
+            body: Some(kuvatin_video::ClipBody::Title(body)),
+            ..rec(0, start, 5.0)
+        }
+    }
+
+    /// A title has no source: undo never asks whether one is there, and
+    /// never names it as gone.
+    #[test]
+    fn title_restores_never_ask_for_a_source() {
+        let restores = vec![
+            ("t".to_string(), title("Hello", 0.0)),
+            ("v".to_string(), rec(1, 0.0, 2.0)),
+        ];
+        let asked = RefCell::new(Vec::new());
+        let missing = missing_sources(&restores, &HashMap::new(), |uri| {
+            asked.borrow_mut().push(uri.to_string());
+            false
+        });
+        assert_eq!(missing, vec!["intro.mp4".to_string()]);
+        assert_eq!(
+            *asked.borrow(),
+            vec!["file:///C:/media/intro.mp4".to_string()]
+        );
+    }
+
+    /// A title coming back is amber and named by its text; a title whose
+    /// text changes takes the new name, which a media clip never does.
+    #[test]
+    fn title_rows_take_their_kind_and_name_from_the_record() {
+        let rows = vec![row("v", &rec(1, 0.0, 2.0)), {
+            let mut r = row("t", &title("Before", 0.0));
+            r.kind = ClipKind::Title;
+            r
+        }];
+        let mut renamed = rec(1, 0.0, 2.0);
+        renamed.name = "other.mp4".into();
+        let applied = vec![
+            Applied {
+                id: "t".into(),
+                now_id: "t".into(),
+                record: Some(title("After", 0.0)),
+            },
+            Applied {
+                id: "v".into(),
+                now_id: "v".into(),
+                record: Some(renamed),
+            },
+            Applied {
+                id: "back".into(),
+                now_id: "back".into(),
+                record: Some(title("Returned", 6.0)),
+            },
+        ];
+        let out = rows_after(&rows, &applied, &HashMap::new());
+        assert_eq!(
+            out[0].name.as_str(),
+            "intro.mp4",
+            "a media clip keeps its name"
+        );
+        assert_eq!(out[1].name.as_str(), "After");
+        assert_eq!(out[2].name.as_str(), "Returned");
+        assert_eq!(out[2].kind, ClipKind::Title);
     }
 }

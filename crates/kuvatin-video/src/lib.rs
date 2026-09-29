@@ -12,7 +12,10 @@ pub struct Frame {
 pub mod document;
 pub mod project;
 pub mod sequence;
-pub use document::{path_from_uri, ClipRecord, LayoutRecord, ProjectFile, TrackRecord};
+pub use document::{
+    format_color, parse_color, path_from_uri, ClipBody, ClipRecord, LayoutRecord, ProjectFile,
+    TitleHAlign, TitleRecord, TitleVAlign, TrackRecord,
+};
 pub use project::{
     hardware_encoding_available, is_hardware_encoder, normalize_render_size, thumbnail,
     thumbnail_uri, warm_asset, warm_asset_uri, waveform_uri, ClipGeom, ClipId, ClipInfo, Encoder,
