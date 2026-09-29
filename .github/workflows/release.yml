@@ -676,9 +676,35 @@ jobs:
           # --after wants a process that has already exited, which is what the
           # updater will find in the real flow by the time it looks.
           $dead = Start-Process cmd -ArgumentList '/c','exit' -PassThru -Wait
-          # No --relaunch: nothing should open a window on the runner.
-          $p = Start-Process $helper -ArgumentList '--apply-update',"`"$msi`"",'--after',$dead.Id -PassThru -Wait
+
+          # A right-click on an image leaves the Windows 11 menu handler loaded
+          # in a COM Surrogate for as long as Explorer holds it, and the
+          # installer's Restart Manager check cannot close that surrogate: it
+          # stopped a real update. Hold the handler the same way here, by
+          # having COM create the menu object and keeping it, so the update
+          # below meets what a user's does. The install step above has already
+          # required the menu package to be registered on this runner.
+          $shellDll = "C:\Program Files\kuvatin\bin\kuvatin_shellext.dll"
+          $keeper = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',
+            "`$o = [Activator]::CreateInstance([Type]::GetTypeFromCLSID([Guid]'7a3e2b6c-9d14-4f58-8b2a-1c6e5d4f3a90')); Start-Sleep 600"
+          $held = $null
+          foreach ($i in 1..50) {
+            $held = Get-Process dllhost -ErrorAction SilentlyContinue |
+              Where-Object { $_.Modules | Where-Object FileName -eq $shellDll }
+            if ($held) { break }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $held) { throw "no COM Surrogate took up the menu handler: the update below would not meet a held DLL, and would prove nothing" }
+          Write-Host "COM Surrogate $($held.Id -join ', ') holds the menu handler, as after a right-click"
+
+          # No --relaunch: nothing should open a window on the runner. The app
+          # names the handler beside itself; here it is named outright.
+          $p = Start-Process $helper -ArgumentList '--apply-update',"`"$msi`"",'--after',$dead.Id,'--shell-dll',"`"$shellDll`"" -PassThru -Wait
+          Stop-Process -Id $keeper.Id -Force -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "the staged updater exited $($p.ExitCode)" }
+          $ended = Get-Content "$env:LOCALAPPDATA\Kuvatin\kuvatin.log" -ErrorAction SilentlyContinue |
+            Select-String 'update: ended COM Surrogate'
+          if (-not $ended) { throw 'the updater did not say it ended the COM Surrogate holding the menu handler' }
 
           if (-not (Test-Path $installed)) { throw 'the update removed the app instead of replacing it' }
           # The upgrade removes the old product before installing the new one,
