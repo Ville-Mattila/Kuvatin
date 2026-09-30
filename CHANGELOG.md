@@ -14,6 +14,8 @@ the minor number moves when something new appears, the patch number when
 something is fixed.
 
 ## [Unreleased]
+A fix for updating from the app, which could stop at "COM Surrogate" after
+Kuvatin's Windows 11 menu had been used.
 
 ### Fixed
 - Updating from the app no longer stops at "COM Surrogate" when Kuvatin's
