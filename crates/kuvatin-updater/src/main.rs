@@ -14,6 +14,8 @@
 //! parser, no error library: every dependency is a file that would have to be
 //! beside it, and there is nothing beside it.
 
+mod surrogate;
+
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -100,14 +102,26 @@ fn msiexec_args(msi: &Path) -> Vec<String> {
 }
 
 /// Wait, install, and start the app again. Returns the process exit code: 0
-/// when the update installed, 1 when it did not.
-pub fn run_helper(msi: &Path, after: u32, relaunch: Option<&Path>) -> i32 {
+/// when the update installed, 1 when it did not. `shell_dll` is the installed
+/// Windows 11 menu handler, whose COM Surrogate is ended first (see
+/// `surrogate`).
+pub fn run_helper(
+    msi: &Path,
+    after: u32,
+    relaunch: Option<&Path>,
+    shell_dll: Option<&Path>,
+) -> i32 {
     log(&format!(
         "update: waiting for process {after}, then installing {}",
         msi.display()
     ));
     if !wait_for_exit(after, WAIT_FOR_APP) {
         log("update: gave up waiting; installing anyway");
+    }
+    if let Some(dll) = shell_dll {
+        for line in release_lines(&surrogate::release(dll)) {
+            log(&line);
+        }
     }
 
     let status = std::process::Command::new("msiexec")
@@ -146,6 +160,20 @@ pub fn run_helper(msi: &Path, after: u32, relaunch: Option<&Path>) -> i32 {
         }
     }
     0
+}
+
+/// What releasing the menu handler did, as log lines: one per surrogate
+/// ended and one per holder left alone, nothing when nothing held it.
+fn release_lines(released: &surrogate::Released) -> Vec<String> {
+    let ended = released
+        .ended
+        .iter()
+        .map(|pid| format!("update: ended COM Surrogate {pid}, which held the menu handler"));
+    let left = released
+        .left
+        .iter()
+        .map(|(pid, why)| format!("update: left process {pid} holding the menu handler: {why}"));
+    ended.chain(left).collect()
 }
 
 /// No window is left by this point, so failures go to a message box as well
@@ -218,21 +246,24 @@ struct Parsed {
     msi: PathBuf,
     after: u32,
     relaunch: Option<PathBuf>,
+    shell_dll: Option<PathBuf>,
 }
 
-/// Three flags, parsed by hand: this program exists to start when nothing is
+/// Four flags, parsed by hand: this program exists to start when nothing is
 /// beside it, and a command line parser is a dependency it does not need. The
 /// `Err` is the complaint to print before exiting 2.
 fn parse(args: impl Iterator<Item = OsString>) -> Result<Parsed, String> {
     let mut msi: Option<PathBuf> = None;
     let mut after: Option<u32> = None;
     let mut relaunch: Option<PathBuf> = None;
+    let mut shell_dll: Option<PathBuf> = None;
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--apply-update" => msi = args.next().map(PathBuf::from),
             "--after" => after = args.next().and_then(|v| v.to_string_lossy().parse().ok()),
             "--relaunch" => relaunch = args.next().map(PathBuf::from),
+            "--shell-dll" => shell_dll = args.next().map(PathBuf::from),
             other => return Err(format!("unexpected argument {other}")),
         }
     }
@@ -241,12 +272,14 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Parsed, String> {
             msi,
             after,
             relaunch,
+            shell_dll,
         }),
         _ => Err("--apply-update <MSI> and --after <PID> are both required".to_string()),
     }
 }
 
 /// Usage: kuvatin-updater --apply-update <MSI> --after <PID> [--relaunch <EXE>]
+///        [--shell-dll <DLL>]
 ///
 /// Started by Kuvatin from the staging folder as it closes. A command line it
 /// cannot act on is exit 2, so the mistake is visible rather than mistaken for
@@ -257,6 +290,7 @@ fn main() {
             &asked.msi,
             asked.after,
             asked.relaunch.as_deref(),
+            asked.shell_dll.as_deref(),
         )),
         Err(complaint) => {
             eprintln!("kuvatin-updater: {complaint}");
@@ -293,6 +327,13 @@ mod tests {
         for code in [0u32, 3010, 1602, 1223, 1603, 7] {
             let said = describe(install_outcome(code));
             assert!(said.is_ascii(), "{said:?}");
+        }
+        let released = surrogate::Released {
+            ended: vec![4321],
+            left: vec![(8765, r"not a COM Surrogate (C:\x\y.exe)".to_string())],
+        };
+        for line in release_lines(&released) {
+            assert!(line.is_ascii(), "{line:?}");
         }
         for complaint in [
             parsed(&["--wat"]).expect_err("a flag it does not know"),
@@ -350,6 +391,30 @@ mod tests {
         assert_eq!(p.msi, PathBuf::from(r"C:\t\k.msi"));
         assert_eq!(p.after, 42);
         assert_eq!(p.relaunch, Some(PathBuf::from(r"C:\p\k.exe")));
+    }
+
+    #[test]
+    fn reads_the_menu_handler_to_release() {
+        let p = parsed(&[
+            "--apply-update",
+            r"C:\t\k.msi",
+            "--after",
+            "42",
+            "--shell-dll",
+            r"C:\p\kuvatin_shellext.dll",
+        ])
+        .expect("with the handler");
+        assert_eq!(
+            p.shell_dll,
+            Some(PathBuf::from(r"C:\p\kuvatin_shellext.dll"))
+        );
+        let without = parsed(&["--apply-update", r"C:\t\k.msi", "--after", "42"]).expect("two");
+        assert_eq!(without.shell_dll, None, "an older app does not pass it");
+    }
+
+    #[test]
+    fn nothing_held_says_nothing() {
+        assert!(release_lines(&surrogate::Released::default()).is_empty());
     }
 
     #[test]
