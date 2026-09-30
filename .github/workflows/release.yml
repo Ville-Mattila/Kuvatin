@@ -677,6 +677,66 @@ jobs:
           # updater will find in the real flow by the time it looks.
           $dead = Start-Process cmd -ArgumentList '/c','exit' -PassThru -Wait
 
+          # Make the update a real one. This package over itself is a
+          # maintenance run that replaces no files (measured: one second), so
+          # the Restart Manager check that stopped a real update would never
+          # run. Swap the installed product for an older copy of this package:
+          # the same files and upgrade code, version 1.0.0, and product and
+          # package codes of its own. Updating from it removes that product and
+          # replaces every file, the menu handler included, as a real update
+          # does, and ends on this package, which the uninstall test expects.
+          $flags = [Reflection.BindingFlags]
+          function Invoke-Com($o, $m, $a) { $o.GetType().InvokeMember($m, $flags::InvokeMethod, $null, $o, $a) }
+          function Get-MsiProperty($path, $name) {
+            $wi = New-Object -ComObject WindowsInstaller.Installer
+            # A plain string: Join-Path and friends hand back a wrapped one,
+            # which COM rejects as a type mismatch (measured).
+            $db = Invoke-Com $wi 'OpenDatabase' @([string]$path, 0)
+            $view = Invoke-Com $db 'OpenView' @("SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = '$name'")
+            [void](Invoke-Com $view 'Execute' $null)
+            $record = Invoke-Com $view 'Fetch' $null
+            $value = $record.GetType().InvokeMember('StringData', $flags::GetProperty, $null, $record, @(1))
+            foreach ($com in $record, $view, $db) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }
+            $value
+          }
+          $builtVersion = Get-MsiProperty $built 'ProductVersion'
+          $older = Join-Path $env:TEMP 'kuvatin-older.msi'
+          Copy-Item $built $older -Force
+          $wi = New-Object -ComObject WindowsInstaller.Installer
+          $db = Invoke-Com $wi 'OpenDatabase' @([string]$older, 1)
+          $code = '{' + [guid]::NewGuid().ToString().ToUpper() + '}'
+          foreach ($sql in @(
+              'UPDATE `Property` SET `Value` = ''1.0.0'' WHERE `Property` = ''ProductVersion''',
+              ('UPDATE `Property` SET `Value` = ''{0}'' WHERE `Property` = ''ProductCode''' -f $code))) {
+            $view = Invoke-Com $db 'OpenView' @($sql)
+            [void](Invoke-Com $view 'Execute' $null)
+            [void](Invoke-Com $view 'Close' $null)
+          }
+          # The package code (summary property 9) must differ too, or Windows
+          # Installer takes it for the package it already has cached.
+          $si = $db.GetType().InvokeMember('SummaryInformation', $flags::GetProperty, $null, $db, @(1))
+          $si.GetType().InvokeMember('Property', $flags::SetProperty, $null, $si, @(9, ('{' + [guid]::NewGuid().ToString().ToUpper() + '}')))
+          [void](Invoke-Com $si 'Persist' $null)
+          [void](Invoke-Com $db 'Commit' $null)
+          # Every reference let go, or the database stays open and msiexec
+          # cannot read it (measured).
+          foreach ($com in $view, $si, $db) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }
+          $view = $si = $db = $null
+          [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+          if ((Get-MsiProperty $older 'ProductVersion') -ne '1.0.0') { throw 'the older copy did not take its version' }
+
+          $swap = Start-Process msiexec -ArgumentList '/x',"`"$built`"",'/qn','/norestart' -Wait -PassThru
+          if ($swap.ExitCode -ne 0) { throw "removing the installed product for the older copy exited $($swap.ExitCode)" }
+          $swap = Start-Process msiexec -ArgumentList '/i',"`"$older`"",'/qn','/norestart' -Wait -PassThru
+          if ($swap.ExitCode -ne 0) { throw "installing the older copy exited $($swap.ExitCode)" }
+          $keys = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $was = (Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1).DisplayVersion
+          if ($was -ne '1.0.0') { throw "the older copy is not what is installed (found '$was')" }
+          Write-Host "installed an older copy (1.0.0) to update from, to ${builtVersion}"
+
           # A right-click on an image leaves the Windows 11 menu handler loaded
           # in a COM Surrogate for as long as Explorer holds it, and the
           # installer's Restart Manager check cannot close that surrogate: it
@@ -721,6 +781,9 @@ jobs:
           $product = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1
           if (-not $product) { throw 'Kuvatin is no longer registered as installed' }
+          if ($product.DisplayVersion -ne $builtVersion) {
+            throw "the update left $($product.DisplayVersion) installed, not ${builtVersion}: it did not replace the older copy"
+          }
           $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
           if (-not (Test-Path (Join-Path $startMenu 'Kuvatin.lnk'))) {
             throw 'the update left the all-users Start menu shortcut behind'
