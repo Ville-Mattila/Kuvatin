@@ -680,11 +680,13 @@ jobs:
           # Make the update a real one. This package over itself is a
           # maintenance run that replaces no files (measured: one second), so
           # the Restart Manager check that stopped a real update would never
-          # run. Swap the installed product for an older copy of this package:
-          # the same files and upgrade code, version 1.0.0, and product and
-          # package codes of its own. Updating from it removes that product and
+          # run. So the staged installer becomes a newer copy of this package:
+          # the same files and upgrade code, the next patch version, product
+          # and package codes of its own, and an upgrade table that reaches the
+          # installed version. Updating to it removes the installed product and
           # replaces every file, the menu handler included, as a real update
-          # does, and ends on this package, which the uninstall test expects.
+          # does. (An older copy installed after an uninstall was tried first:
+          # the menu then never took up the handler on the runner.)
           $flags = [Reflection.BindingFlags]
           function Invoke-Com($o, $m, $a) { $o.GetType().InvokeMember($m, $flags::InvokeMethod, $null, $o, $a) }
           function Get-MsiProperty($path, $name) {
@@ -696,26 +698,48 @@ jobs:
             [void](Invoke-Com $view 'Execute' $null)
             $record = Invoke-Com $view 'Fetch' $null
             $value = $record.GetType().InvokeMember('StringData', $flags::GetProperty, $null, $record, @(1))
+            # Not the installer object: it is shared, and releasing it breaks
+            # the next New-Object (measured).
             foreach ($com in $record, $view, $db) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }
             $value
           }
           $builtVersion = Get-MsiProperty $built 'ProductVersion'
-          $older = Join-Path $env:TEMP 'kuvatin-older.msi'
-          Copy-Item $built $older -Force
+          $parts = $builtVersion.Split('.')
+          $newerVersion = '{0}.{1}.{2}' -f $parts[0], $parts[1], ([int]$parts[2] + 1)
           $wi = New-Object -ComObject WindowsInstaller.Installer
-          $db = Invoke-Com $wi 'OpenDatabase' @([string]$older, 1)
+          $db = Invoke-Com $wi 'OpenDatabase' @([string]$msi, 1)
           $code = '{' + [guid]::NewGuid().ToString().ToUpper() + '}'
           foreach ($sql in @(
-              'UPDATE `Property` SET `Value` = ''1.0.0'' WHERE `Property` = ''ProductVersion''',
+              ('UPDATE `Property` SET `Value` = ''{0}'' WHERE `Property` = ''ProductVersion''' -f $newerVersion),
               ('UPDATE `Property` SET `Value` = ''{0}'' WHERE `Property` = ''ProductCode''' -f $code))) {
             $view = Invoke-Com $db 'OpenView' @($sql)
             [void](Invoke-Com $view 'Execute' $null)
             [void](Invoke-Com $view 'Close' $null)
           }
+          # The upgrade rows that find the installed product (up to its
+          # version, to remove it) and a newer one (to refuse a downgrade)
+          # move to the new version. The versions are part of the table's key,
+          # which UPDATE cannot change (measured), so each row is fetched,
+          # changed and written back with Modify's replace mode (4), which
+          # deletes and reinserts a row whose key changed.
+          $view = Invoke-Com $db 'OpenView' @('SELECT * FROM `Upgrade`')
+          [void](Invoke-Com $view 'Execute' $null)
+          $moved = 0
+          while ($row = Invoke-Com $view 'Fetch' $null) {
+            foreach ($field in 2, 3) {
+              if ($row.GetType().InvokeMember('StringData', $flags::GetProperty, $null, $row, @([int]$field)) -eq $builtVersion) {
+                [void]$row.GetType().InvokeMember('StringData', $flags::SetProperty, $null, $row, @([int]$field, [string]$newerVersion))
+                [void](Invoke-Com $view 'Modify' @(4, $row))
+                $moved++
+              }
+            }
+          }
+          [void](Invoke-Com $view 'Close' $null)
+          if ($moved -ne 2) { throw "moved $moved upgrade row(s) to $newerVersion; expected the two that name $builtVersion" }
           # The package code (summary property 9) must differ too, or Windows
           # Installer takes it for the package it already has cached.
           $si = $db.GetType().InvokeMember('SummaryInformation', $flags::GetProperty, $null, $db, @(1))
-          $si.GetType().InvokeMember('Property', $flags::SetProperty, $null, $si, @(9, ('{' + [guid]::NewGuid().ToString().ToUpper() + '}')))
+          [void]$si.GetType().InvokeMember('Property', $flags::SetProperty, $null, $si, @(9, ('{' + [guid]::NewGuid().ToString().ToUpper() + '}')))
           [void](Invoke-Com $si 'Persist' $null)
           [void](Invoke-Com $db 'Commit' $null)
           # Every reference let go, or the database stays open and msiexec
@@ -723,19 +747,8 @@ jobs:
           foreach ($com in $view, $si, $db) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }
           $view = $si = $db = $null
           [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-          if ((Get-MsiProperty $older 'ProductVersion') -ne '1.0.0') { throw 'the older copy did not take its version' }
-
-          $swap = Start-Process msiexec -ArgumentList '/x',"`"$built`"",'/qn','/norestart' -Wait -PassThru
-          if ($swap.ExitCode -ne 0) { throw "removing the installed product for the older copy exited $($swap.ExitCode)" }
-          $swap = Start-Process msiexec -ArgumentList '/i',"`"$older`"",'/qn','/norestart' -Wait -PassThru
-          if ($swap.ExitCode -ne 0) { throw "installing the older copy exited $($swap.ExitCode)" }
-          $keys = @(
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-          )
-          $was = (Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1).DisplayVersion
-          if ($was -ne '1.0.0') { throw "the older copy is not what is installed (found '$was')" }
-          Write-Host "installed an older copy (1.0.0) to update from, to ${builtVersion}"
+          if ((Get-MsiProperty $msi 'ProductVersion') -ne $newerVersion) { throw 'the staged installer did not take its newer version' }
+          Write-Host "staged a newer copy ($newerVersion) of this package to update to from ${builtVersion}"
 
           # A right-click on an image leaves the Windows 11 menu handler loaded
           # in a COM Surrogate for as long as Explorer holds it, and the
@@ -781,8 +794,8 @@ jobs:
           $product = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1
           if (-not $product) { throw 'Kuvatin is no longer registered as installed' }
-          if ($product.DisplayVersion -ne $builtVersion) {
-            throw "the update left $($product.DisplayVersion) installed, not ${builtVersion}: it did not replace the older copy"
+          if ($product.DisplayVersion -ne $newerVersion) {
+            throw "the update left $($product.DisplayVersion) installed, not ${newerVersion}: it did not replace the installed product"
           }
           $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Kuvatin'
           if (-not (Test-Path (Join-Path $startMenu 'Kuvatin.lnk'))) {
@@ -820,7 +833,6 @@ jobs:
           # wevtutil are chatty: native exit codes must not abort this step.
           $PSNativeCommandUseErrorActionPreference = $false
           $exe = 'C:\Program Files\kuvatin\bin\kuvatin.exe'
-          $msi = (Get-ChildItem target\wix\kuvatin-*-x86_64.msi | Select-Object -First 1).FullName
           # The install test's $build went with its step.
           $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
           # Every package assertion below is written `SIGNED -eq true -and …`,
@@ -1019,7 +1031,13 @@ jobs:
 
             # Uninstall as the runner, verbosely: WixQuietExec64 copies the
             # SYSTEM action's stdout into this log.
-            $p = Start-Process msiexec -ArgumentList "/x","`"$msi`"","/qn","/norestart","/l*v","`"$log`"" -Wait -PassThru
+            # By the installed product's code, not the built MSI: the update
+            # test left a newer copy of this package installed, with a
+            # product code of its own.
+            $installedCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -eq 'Kuvatin' } | Select-Object -First 1).PSChildName
+            if (-not $installedCode) { throw 'no installed Kuvatin to uninstall' }
+            $p = Start-Process msiexec -ArgumentList "/x",$installedCode,"/qn","/norestart","/l*v","`"$log`"" -Wait -PassThru
             if ($p.ExitCode -ne 0) { throw "msiexec /x exited $($p.ExitCode)" }
             $report = @(Get-Content $log | Select-String 'KuvatinUnregisterAllUsers|Kuvatin: ')
             $report | Select-Object -Last 30 | ForEach-Object { $_.Line }
