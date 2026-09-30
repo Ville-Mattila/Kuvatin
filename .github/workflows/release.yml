@@ -758,16 +758,48 @@ jobs:
           # below meets what a user's does. The install step above has already
           # required the menu package to be registered on this runner.
           $shellDll = "C:\Program Files\kuvatin\bin\kuvatin_shellext.dll"
-          $keeper = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',
-            "`$o = [Activator]::CreateInstance([Type]::GetTypeFromCLSID([Guid]'7a3e2b6c-9d14-4f58-8b2a-1c6e5d4f3a90')); Start-Sleep 600"
+          # The keeper retries and writes down every attempt: on a 2.14.1 tag
+          # run no surrogate appeared within ten seconds, and a hidden
+          # process that fails says nothing unless it is asked to.
+          $keeperLog = Join-Path $env:TEMP 'kuvatin-keeper.log'
+          $keeperScript = Join-Path $env:TEMP 'kuvatin-keeper.ps1'
+          Remove-Item $keeperLog -ErrorAction SilentlyContinue
+          Set-Content $keeperScript -Encoding utf8 -Value @'
+          param($Log)
+          for ($i = 1; $i -le 10; $i++) {
+            try {
+              $o = [Activator]::CreateInstance([Type]::GetTypeFromCLSID([Guid]'7a3e2b6c-9d14-4f58-8b2a-1c6e5d4f3a90'))
+              "attempt ${i}: created the menu object" | Add-Content $Log
+              break
+            } catch {
+              "attempt ${i}: $($_.Exception.Message)" | Add-Content $Log
+              Start-Sleep -Seconds 3
+            }
+          }
+          Start-Sleep -Seconds 900
+          '@
+          $keeper = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$keeperScript`"",'-Log',"`"$keeperLog`""
           $held = $null
-          foreach ($i in 1..50) {
+          foreach ($i in 1..150) {
             $held = Get-Process dllhost -ErrorAction SilentlyContinue |
               Where-Object { $_.Modules | Where-Object FileName -eq $shellDll }
             if ($held) { break }
             Start-Sleep -Milliseconds 200
           }
-          if (-not $held) { throw "no COM Surrogate took up the menu handler: the update below would not meet a held DLL, and would prove nothing" }
+          if (-not $held) {
+            Write-Host '--- keeper log:'
+            Get-Content $keeperLog -ErrorAction SilentlyContinue
+            Write-Host "--- keeper still running: $(-not $keeper.HasExited)"
+            Write-Host '--- menu package:'
+            Get-AppxPackage VilleMattila.Kuvatin | Format-List Name, Version, Status, SignatureKind, InstallLocation
+            Write-Host '--- COM Surrogates and what they load from the install folder:'
+            Get-Process dllhost -ErrorAction SilentlyContinue | ForEach-Object {
+              "$($_.Id): $((@($_.Modules | Where-Object FileName -like 'C:\Program Files\kuvatin\*').FileName) -join ', ')"
+            }
+            Stop-Process -Id $keeper.Id -Force -ErrorAction SilentlyContinue
+            throw "no COM Surrogate took up the menu handler in 30 s: the update below would not meet a held DLL, and would prove nothing"
+          }
+          Write-Host "keeper: $((Get-Content $keeperLog -ErrorAction SilentlyContinue) -join '; ')"
           Write-Host "COM Surrogate $($held.Id -join ', ') holds the menu handler, as after a right-click"
 
           # No --relaunch: nothing should open a window on the runner. The app

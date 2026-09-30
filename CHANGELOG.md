@@ -14,10 +14,23 @@ the minor number moves when something new appears, the patch number when
 something is fixed.
 
 ## [Unreleased]
+A fix for updating from the app, which could stop at "COM Surrogate" after
+Kuvatin's Windows 11 menu had been used. It was first tagged as 2.14.1, which
+was never published.
+
+### Fixed
+- Updating from the app no longer stops at "COM Surrogate" when Kuvatin's
+  Windows 11 menu was used shortly before. That menu runs in a COM Surrogate,
+  which keeps its file open while Explorer holds the menu, and the installer
+  cannot close it. The updater now ends that surrogate itself before the
+  installer starts. The app runs the updater of the version already
+  installed, so this helps updates from this version on. To update to it from
+  an earlier one, press Update again a minute later, or end "COM Surrogate" in
+  Task Manager first.
 
 ## [2.14.1] - 2026-09-30
-A fix for updating from the app, which could stop at "COM Surrogate" after
-Kuvatin's Windows 11 menu had been used.
+Never published: its release build stopped on two of its own tests before
+anything was uploaded. Its fix ships in 2.14.2.
 
 ### Fixed
 - Updating from the app no longer stops at "COM Surrogate" when Kuvatin's

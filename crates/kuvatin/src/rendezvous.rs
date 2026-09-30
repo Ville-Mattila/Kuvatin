@@ -458,21 +458,21 @@ mod tests {
     #[test]
     fn a_lone_arrival_does_not_wait_the_full_quiet_window() {
         let root = tempfile::tempdir().unwrap();
+        // A window far wider than QUIET, so a capped wait and a full one are
+        // seconds apart. With 1.5 s and 300 ms of slack, a loaded release
+        // runner waited 954 ms and failed a tag run.
+        let window = Duration::from_secs(5);
         let t0 = Instant::now();
-        let role = gather_in(
-            root.path(),
-            "g",
-            &[p("only.png")],
-            Duration::from_millis(1500),
-        );
+        let role = gather_in(root.path(), "g", &[p("only.png")], window);
         let took = t0.elapsed();
         assert_eq!(role, Role::Leader(vec![p("only.png")]));
         // The lone wait is capped at QUIET however wide the caller's window is
-        // (this test process is old, so `lone_grace` returns the cap); the
-        // slack is the 40 ms poll plus whatever else the machine is doing.
+        // (this test process is old, so `lone_grace` returns the cap). The
+        // slack is the 40 ms poll plus whatever else the machine is doing,
+        // and still leaves more than two seconds short of the window.
         assert!(
-            took < QUIET + Duration::from_millis(300),
-            "waited {took:?} for a lone arrival"
+            took < QUIET + Duration::from_secs(2),
+            "waited {took:?} for a lone arrival; the window was {window:?}"
         );
     }
 
