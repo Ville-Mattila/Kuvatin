@@ -18,6 +18,10 @@ Rust with a custom-framed [Slint](https://slint.dev) UI on a
   oxipng-only optimization. This is the default preset.
 - **Convert** between PNG, JPEG, WebP, BMP, TIFF, GIF (quality control for the
   lossy formats; the quality slider hides itself when it doesn't apply)
+- **iPhone photos (HEIC/HEIF)** open and convert like any other input, upright
+  and with their EXIF and colour profile, and drop into the video editor as
+  stills. They are read with Windows' own codecs, so they need "HEIF Image
+  Extensions" and "HEVC Video Extensions" from the Microsoft Store
 - **Lossless WebP** for screenshots, logos and flat colour, where the lossy
   encoder throws away detail and saves little. Every pixel comes back
   unchanged, alpha and the colour underneath it included

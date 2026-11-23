@@ -104,16 +104,29 @@ fn peak_factor(job: &Job) -> u64 {
 /// decode fails straight away and allocates nothing.
 pub fn estimate_cost(input: &Path, job: &Job) -> u64 {
     use image::ImageDecoder;
-    let Some(decoder) = image::ImageReader::open(input)
-        .ok()
-        .and_then(|r| r.with_guessed_format().ok())
-        .and_then(|r| r.into_decoder().ok())
-    else {
-        return 0;
+    let (w, h, bytes_per_pixel) = if crate::heif::is_heif_path(input) {
+        // HEIC: the size is in the container; the decode hands back RGBA8
+        // (or RGBA16 for a 10-bit photo — counted as such, to be safe).
+        match crate::heif::dimensions(input) {
+            Some((w, h)) => (w, h, 8),
+            None => return 0,
+        }
+    } else {
+        let Some(decoder) = image::ImageReader::open(input)
+            .ok()
+            .and_then(|r| r.with_guessed_format().ok())
+            .and_then(|r| r.into_decoder().ok())
+        else {
+            return 0;
+        };
+        let (w, h) = decoder.dimensions();
+        // A 16-bit source keeps 8 bytes a pixel through plain PNG and TIFF.
+        (
+            w,
+            h,
+            u64::from(decoder.color_type().bytes_per_pixel()).max(4),
+        )
     };
-    let (w, h) = decoder.dimensions();
-    // A 16-bit source keeps 8 bytes a pixel through plain PNG and TIFF.
-    let bytes_per_pixel = u64::from(decoder.color_type().bytes_per_pixel()).max(4);
     let (_, _, cw, ch) = compute_crop_rect(job.crop, w, h);
     let (tw, th) = compute_target_dimensions(job.resize, cw, ch);
     let pixels = (u64::from(w) * u64::from(h)).max(u64::from(tw) * u64::from(th));

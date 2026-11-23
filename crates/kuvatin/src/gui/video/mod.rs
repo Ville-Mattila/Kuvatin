@@ -3,6 +3,7 @@
 //! editing and export live in the submodules.
 
 pub(super) mod export;
+mod heic;
 pub(super) mod import;
 mod project_file;
 mod timeline;

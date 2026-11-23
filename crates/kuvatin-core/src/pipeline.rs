@@ -470,6 +470,16 @@ fn decode_within(input: &Path, limits: image::Limits) -> CoreResult<(DynamicImag
         path: input.to_path_buf(),
         source: e,
     };
+    // HEIC/HEIF (iPhone photos): the `image` crate has no codec for them;
+    // Windows' own does, and hands the picture back upright.
+    if crate::heif::is_heif_path(input) {
+        return crate::heif::decode(
+            input,
+            crate::heif::Colour::AsStored,
+            limits.max_image_width.unwrap_or(u32::MAX),
+            limits.max_alloc.unwrap_or(u64::MAX),
+        );
+    }
     let mut reader = image::ImageReader::open(input)
         .map_err(io_err)?
         .with_guessed_format()
