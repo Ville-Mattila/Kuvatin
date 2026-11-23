@@ -12,6 +12,8 @@ description = "GStreamer Editing Services-backed video engine for Kuvatin: layer
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
+# The in-process HDR-to-SDR filter (hdr.rs) subclasses BaseTransform.
+gstreamer-base = "0.23"
 # v1_20 enables set_element_properties (per-encoder bitrate) on EncodingProfile.
 gstreamer-pbutils = { version = "0.23", features = ["v1_20"] }
 # v1_20 enables GESVideoSource::natural_size (aspect-correct scaling); v1_24

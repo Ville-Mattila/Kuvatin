@@ -18,6 +18,28 @@ use std::sync::{Arc, Mutex};
 /// (generation, path, thumbnail, Some(error) if discovery failed → not addable).
 type ImportItem = (u64, PathBuf, Option<kuvatin_video::Frame>, Option<String>);
 
+/// One line of the "could not be imported" dialog: the file's name and why,
+/// the reason cut to its first line and to a length a dialog can hold.
+fn failure_line(path: &Path, reason: &str) -> String {
+    const MAX: usize = 120;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let first = reason.lines().next().unwrap_or("").trim();
+    let why = if first.chars().count() > MAX {
+        let cut: String = first.chars().take(MAX).collect();
+        format!("{cut}\u{2026}")
+    } else {
+        first.to_string()
+    };
+    if why.is_empty() {
+        name
+    } else {
+        format!("{name}: {why}")
+    }
+}
+
 /// Worker → UI handoff for a finished sequence import.
 struct SeqResult {
     /// The original sequence's first frame (identity in bin/"seen").
@@ -397,14 +419,18 @@ pub(super) fn wire(
                         continue; // cancelled batch: neither counted nor added
                     }
                     import_q.done.set(import_q.done.get() + 1);
-                    if let Some(_e) = err {
+                    if let Some(e) = err {
                         // Unreadable/undiscoverable → don't add a dead bin entry.
+                        // The reason goes in the dialog and the log: without
+                        // it, a file that won't import can't be looked into.
                         import_q.seen.borrow_mut().remove(&path);
-                        import_failures.borrow_mut().push(
-                            path.file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.display().to_string()),
-                        );
+                        crate::applog::log(&format!(
+                            "import failed: {}: {e}",
+                            path.display()
+                        ));
+                        import_failures
+                            .borrow_mut()
+                            .push(failure_line(&path, &e));
                         continue;
                     }
                     let thumb = frame_to_image(thumb_frame);
@@ -489,7 +515,7 @@ pub(super) fn wire(
                                     &ui,
                                     "Some files could not be imported",
                                     format!(
-                                        "{} file(s) couldn't be read as media:\n{}",
+                                        "{} file(s) couldn't be read as media:\n{}\n\nThe reasons are also in kuvatin.log.",
                                         failures.len(),
                                         name_list(&failures)
                                     ),
@@ -755,6 +781,22 @@ mod tests {
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()
+    }
+
+    /// A failed import says which file and why — the first line of the
+    /// reason, cut short enough for the dialog.
+    #[test]
+    fn a_failure_line_names_the_file_and_the_reason() {
+        let p = Path::new(r"C:\clips\IMG_0001.MOV");
+        assert_eq!(
+            failure_line(p, "Resource not found.\nmore detail"),
+            "IMG_0001.MOV: Resource not found."
+        );
+        assert_eq!(failure_line(p, "  "), "IMG_0001.MOV");
+        let long = "x".repeat(300);
+        let line = failure_line(p, &long);
+        assert!(line.ends_with('\u{2026}'), "{line}");
+        assert_eq!(line.chars().count(), "IMG_0001.MOV: ".len() + 120 + 1);
     }
 
     /// The drain timer sleeps while nothing is in flight, so a scan that has

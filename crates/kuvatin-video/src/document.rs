@@ -258,7 +258,9 @@ fn untouched(tracks: &[TrackRecord]) -> bool {
 /// `imagesequence://` clip is a run of files, not one). The interface needs
 /// this to put a reopened project's sources back in the media bin.
 pub fn path_from_uri(uri: &str) -> Option<std::path::PathBuf> {
-    gst::glib::filename_from_uri(uri).ok().map(|(p, _)| p)
+    gst::glib::filename_from_uri(uri)
+        .ok()
+        .map(|(p, _)| crate::longpath::expanded(p))
 }
 
 /// A whole project.

@@ -10,6 +10,8 @@ pub struct Frame {
 }
 
 pub mod document;
+mod hdr;
+mod longpath;
 pub mod project;
 pub mod sequence;
 pub use document::{
