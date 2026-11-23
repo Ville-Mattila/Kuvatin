@@ -41,8 +41,9 @@ interface toolkit uses were updated for security advisories.
   import, iCloud's original) keeps it. Such clips showed dim and washed out in
   the preview, the media bin and the export. They are now mapped to normal
   (SDR) brightness and colour. HDR10 (PQ) video gets the same treatment.
-- Videos and pictures in folders deeper than 260 characters import and export.
-  They used to fail with "Resource not found".
+- Videos and pictures in folders deeper than 260 characters import and export
+  on a drive that keeps Windows' short file names, as the system drive does
+  by default. They used to fail with "Resource not found".
 - When files can't be imported, the message now says why for each file, and
   the reasons are also written to kuvatin.log.
 

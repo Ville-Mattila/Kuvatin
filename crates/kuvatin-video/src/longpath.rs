@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 /// (248), so anything from there on is shortened.
 #[cfg(windows)]
 const LIMIT: usize = 248;
+/// The C runtime's own limit, which GStreamer's file elements meet.
+#[cfg(windows)]
+const MAX_PATH: usize = 260;
 
 /// The `file://` URI GStreamer can open for `path`.
 pub fn file_uri(path: &Path) -> Result<String, gstreamer::glib::Error> {
@@ -31,12 +34,15 @@ pub fn openable(path: &Path) -> PathBuf {
         if utf16_len(path) < LIMIT {
             return path.to_path_buf();
         }
-        if let Some(short) = win::short(path) {
+        // A shortened form still past the limit (a volume that keeps 8.3
+        // names for only some of the folders, or none) helps nothing.
+        let fits = |p: &PathBuf| utf16_len(p) < MAX_PATH;
+        if let Some(short) = win::short(path).filter(fits) {
             return short;
         }
         if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
-            if let Some(short_dir) = win::short(dir) {
-                return short_dir.join(name);
+            if let Some(short) = win::short(dir).map(|d| d.join(name)).filter(fits) {
+                return short;
             }
         }
         path.to_path_buf()
