@@ -15,6 +15,17 @@ something is fixed.
 
 ## [Unreleased]
 
+### Fixed
+- iPhone HDR video now looks right in the video editor. An iPhone records HDR
+  (HLG) by default, and a copy that arrives untouched (AirDrop, a cable
+  import, iCloud's original) keeps it. Such clips showed dim and washed out in
+  the preview, the media bin and the export. They are now mapped to normal
+  (SDR) brightness and colour. HDR10 (PQ) video gets the same treatment.
+- Videos and pictures in folders deeper than 260 characters import and export.
+  They used to fail with "Resource not found".
+- When files can't be imported, the message now says why for each file, and
+  the reasons are also written to kuvatin.log.
+
 ## [2.14.2] - 2026-09-30
 A fix for updating from the app, which could stop at "COM Surrogate" after
 Kuvatin's Windows 11 menu had been used. It was first tagged as 2.14.1, which

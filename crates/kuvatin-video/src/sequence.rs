@@ -121,7 +121,7 @@ impl SequenceSpec {
     /// and spaces are escaped — all verified against gst-discoverer), then the
     /// scheme is swapped and the start/framerate query appended.
     pub fn uri(&self) -> Result<String> {
-        let pattern_path = self.dir.join(self.pattern_name());
+        let pattern_path = crate::longpath::openable(&self.dir).join(self.pattern_name());
         let file_uri = gst::glib::filename_to_uri(&pattern_path, None)
             .with_context(|| format!("not an absolute path: {}", pattern_path.display()))?;
         let rest = file_uri

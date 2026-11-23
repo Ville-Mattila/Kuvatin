@@ -3071,6 +3071,7 @@ dependencies = [
  "anyhow",
  "gstreamer",
  "gstreamer-app",
+ "gstreamer-base",
  "gstreamer-editing-services",
  "gstreamer-pbutils",
  "gstreamer-video",

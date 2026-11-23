@@ -54,7 +54,7 @@ struct Resume {
 /// the UI thread; a subsequent `add_clip`/`append_clip` then hits the warm cache
 /// and returns immediately instead of blocking the UI on discovery.
 pub fn warm_asset(path: &Path) -> Result<()> {
-    let uri = gst::glib::filename_to_uri(path, None)?;
+    let uri = crate::longpath::file_uri(path)?;
     warm_asset_uri(&uri)
 }
 
@@ -218,7 +218,7 @@ fn emit_sample(
 /// natural aspect) for a media file. Safe to call off the UI thread; None on
 /// failure. Seeks a little in to skip black intro frames.
 pub fn thumbnail(path: &Path, width: u32) -> Option<Frame> {
-    let uri = gst::glib::filename_to_uri(path, None).ok()?;
+    let uri = crate::longpath::file_uri(path).ok()?;
     thumbnail_uri(&uri, width)
 }
 
@@ -233,18 +233,43 @@ pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
         .ok()?;
     let convert = gst::ElementFactory::make("videoconvert").build().ok()?;
     let scale = gst::ElementFactory::make("videoscale").build().ok()?;
+    // Scaled down first, then through the HDR mapping (a copy for SDR, set
+    // once the decoded caps say which), so an iPhone's HDR clip gets a
+    // thumbnail as bright as its preview.
+    let wide = gst::Caps::builder("video/x-raw")
+        .field("format", "RGBA64_LE")
+        .field("width", width as i32)
+        .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+        .build();
+    let wide_filter = gst::ElementFactory::make("capsfilter")
+        .property("caps", &wide)
+        .build()
+        .ok()?;
+    let hdr = gst::ElementFactory::make(crate::hdr::ELEMENT)
+        .property("transfer", "none")
+        .build()
+        .ok()?;
+    let narrow = gst::ElementFactory::make("videoconvert").build().ok()?;
     let caps = gst::Caps::builder("video/x-raw")
         .field("format", "RGBA")
         .field("width", width as i32)
         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
         .build();
     let sink = AppSink::builder().caps(&caps).build();
-    pipeline
-        .add_many([&src, &convert, &scale, sink.upcast_ref::<gst::Element>()])
-        .ok()?;
-    gst::Element::link_many([&convert, &scale, sink.upcast_ref::<gst::Element>()]).ok()?;
+    let chain = [
+        &convert,
+        &scale,
+        &wide_filter,
+        &hdr,
+        &narrow,
+        sink.upcast_ref::<gst::Element>(),
+    ];
+    pipeline.add(&src).ok()?;
+    pipeline.add_many(chain).ok()?;
+    gst::Element::link_many(chain).ok()?;
     // uridecodebin exposes decoded pads dynamically — link only the video one.
     let convert_weak = convert.downgrade();
+    let hdr_weak = hdr.downgrade();
     src.connect_pad_added(move |_, pad| {
         let Some(convert) = convert_weak.upgrade() else {
             return;
@@ -256,6 +281,9 @@ pub fn thumbnail_uri(uri: &str, width: u32) -> Option<Frame> {
             .unwrap_or(false);
         if !is_video {
             return;
+        }
+        if let (Some(hdr), Some(transfer)) = (hdr_weak.upgrade(), crate::hdr::transfer_of(&caps)) {
+            hdr.set_property("transfer", transfer);
         }
         if let Some(sinkpad) = convert.static_pad("sink") {
             if !sinkpad.is_linked() {
@@ -832,6 +860,47 @@ fn apply_rate(clip: &ges::Clip, rate: f64) -> Result<()> {
     Ok(())
 }
 
+/// The HDR transfer (`"hlg"` or `"pq"`) of a clip's video, from what
+/// discovery found; None for SDR footage, stills and titles.
+fn hdr_transfer(clip: &ges::Clip) -> Option<&'static str> {
+    use gstreamer_pbutils::prelude::DiscovererStreamInfoExt;
+    let asset = clip.asset()?.downcast::<ges::UriClipAsset>().ok()?;
+    asset
+        .info()
+        .video_streams()
+        .iter()
+        .find_map(|v| v.caps().and_then(|c| crate::hdr::transfer_of(&c)))
+}
+
+/// Whether `effect` is the HDR mapping [`apply_hdr`] puts on.
+fn is_hdr_effect(effect: &ges::TrackElement) -> bool {
+    effect.downcast_ref::<ges::Effect>().is_some_and(|e| {
+        e.bin_description()
+            .is_some_and(|d| d.starts_with(crate::hdr::ELEMENT))
+    })
+}
+
+/// Put the HDR-to-SDR mapping (hdr.rs) on a clip whose video is HLG or PQ,
+/// so an iPhone's HDR footage shows and exports at its proper brightness and
+/// colour rather than dim and grey. Once per clip; a split copies it to the
+/// new half and a restored clip comes back through here. A failure leaves the
+/// clip as it was, unmapped: dim is better than gone.
+fn apply_hdr(clip: &ges::Clip) {
+    let Some(transfer) = hdr_transfer(clip) else {
+        return;
+    };
+    if clip.top_effects().iter().any(is_hdr_effect) {
+        return;
+    }
+    let description = format!("{} transfer={transfer}", crate::hdr::ELEMENT);
+    let added = ges::Effect::new(&description)
+        .map_err(anyhow::Error::from)
+        .and_then(|e| clip.add_top_effect(&e, -1).map_err(anyhow::Error::from));
+    if let Err(e) = added {
+        eprintln!("kuvatin: no HDR mapping for {:?}: {e:#}", clip.name());
+    }
+}
+
 /// Set a clip's times and speed so that, at every step on the way, the source
 /// is never asked for more than it has, which GES refuses: the duration goes
 /// down first if it is going down at all; then the speed and the in-point,
@@ -998,6 +1067,9 @@ pub(crate) fn ensure_discovery_timeout() {
 }
 
 pub(crate) fn ensure_encoder_ranks() {
+    // Every init site calls this before a pipeline exists: the one place
+    // the in-process HDR element is sure to be registered in time.
+    crate::hdr::register();
     use gst::prelude::PluginFeatureExtManual;
     let registry = gst::Registry::get();
     for (name, rank) in [
@@ -1484,7 +1556,7 @@ impl Project {
         inpoint: Duration,
         duration: Duration,
     ) -> Result<ClipId> {
-        let uri = gst::glib::filename_to_uri(path, None)?;
+        let uri = crate::longpath::file_uri(path)?;
         self.add_clip_uri(&uri, track, start, inpoint, duration)
     }
 
@@ -1506,6 +1578,7 @@ impl Project {
         clip.set_inpoint(gst::ClockTime::from_nseconds(inpoint.as_nanos() as u64));
         clip.set_duration(gst::ClockTime::from_nseconds(duration.as_nanos() as u64));
         self.layer(track).add_clip(&clip)?;
+        apply_hdr(clip.upcast_ref());
         // Async commit (see append_clip): commit_sync() can deadlock during an
         // async pipeline state-change, so never block on the commit here.
         self.commit();
@@ -1528,7 +1601,7 @@ impl Project {
         track: usize,
         image_dur: Option<Duration>,
     ) -> Result<ClipInfo> {
-        let uri = gst::glib::filename_to_uri(path, None)?;
+        let uri = crate::longpath::file_uri(path)?;
         self.append_clip_uri(&uri, track, image_dur)
     }
 
@@ -1558,6 +1631,7 @@ impl Project {
             dur_ct,
             ges::TrackType::UNKNOWN,
         )?;
+        apply_hdr(&clip);
         // Async commit: never block the caller. commit_sync() deadlocks if the
         // pipeline is mid async state-change (e.g. a second clip added right
         // after play()), because the commit ack can't arrive until preroll ends.
@@ -2036,6 +2110,8 @@ impl Project {
         self.layer(record.track).add_clip(&clip)?;
         if let Some(title) = title {
             write_title(&clip, title);
+        } else {
+            apply_hdr(&clip);
         }
         self.commit();
         self.clips.insert(id.0.clone(), clip);
@@ -2358,11 +2434,16 @@ impl Project {
         use crate::document::ClipBody;
         let (uri, name, body) = if let Some(uri_clip) = clip.downcast_ref::<ges::UriClip>() {
             let uri = uri_clip.uri().to_string();
-            let name = uri
-                .rsplit(['/', '\\'])
-                .next()
-                .map(|s| s.split('?').next().unwrap_or(s).to_string())
-                .unwrap_or_default();
+            // A single file is named by its long path: one opened past
+            // MAX_PATH sits in the timeline under its 8.3 form.
+            let name = crate::document::path_from_uri(&uri)
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| {
+                    uri.rsplit(['/', '\\'])
+                        .next()
+                        .map(|s| s.split('?').next().unwrap_or(s).to_string())
+                        .unwrap_or_default()
+                });
             (uri, name, None)
         } else if clip.is::<ges::TitleClip>() {
             let title = self.title_of(id)?;
@@ -3087,7 +3168,7 @@ impl Project {
         self.rendering.set(true);
         *self.last_encoder.borrow_mut() = None;
         let attempt = (|| -> Result<()> {
-            let uri = gst::glib::filename_to_uri(path, None)?;
+            let uri = crate::longpath::file_uri(path)?;
             let profile = encoding_profile(settings);
             self.pipeline.set_render_settings(uri.as_str(), &profile)?;
             self.pipeline.set_mode(ges::PipelineFlags::RENDER)?;
@@ -3693,6 +3774,73 @@ mod tests {
         assert!(!is_hardware_encoder("x264enc"));
         assert!(!is_hardware_encoder("vp9enc"));
         assert!(!is_hardware_encoder("openh264enc"));
+    }
+
+    /// A file deeper than 260 characters (an iPhone video in a OneDrive or
+    /// iCloud folder tree) was "Resource not found": GStreamer opens through
+    /// the C runtime, which stops at MAX_PATH. It now imports, exports into
+    /// the same folder, and a saved project names it by its long path.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_past_the_old_path_limit_imports_and_exports() {
+        let base = scratch("long-path");
+        let dir = base
+            .join("a".repeat(90))
+            .join("b".repeat(90))
+            .join("c".repeat(90));
+        std::fs::create_dir_all(&dir).expect("deep dir");
+        let png = dir.join("still from a phone.png");
+        image::RgbaImage::from_pixel(160, 120, image::Rgba([90, 160, 60, 255]))
+            .save(&png)
+            .expect("write still");
+        assert!(png.as_os_str().len() > 300, "{}", png.display());
+        if crate::longpath::openable(&png) == png {
+            eprintln!("this volume keeps no 8.3 names; the fallback can't help here");
+            return;
+        }
+        warm_asset(&png).expect("discovered");
+        assert!(thumbnail(&png, 160).is_some(), "thumbnail");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let info = project.append_clip(&png, 0, None).expect("append still");
+        project.set_clip_duration(&info.id, 1.0).expect("1 s");
+        let doc = project.to_document();
+        let saved = doc.clips[0].uri.clone();
+        let named = crate::document::path_from_uri(&saved).expect("a file uri");
+        assert_eq!(
+            named.file_name(),
+            png.file_name(),
+            "the project names the long file, not its 8.3 form: {}",
+            named.display()
+        );
+        let out = dir.join("exported from a deep folder.mp4");
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 320,
+                    height: 240,
+                    fps: 24,
+                    bitrate_kbps: 2000,
+                    encoder: Encoder::Software,
+                },
+            )
+            .expect("begin_render");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match project.render_status() {
+                RenderStatus::Done => break,
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => {
+                    assert!(std::time::Instant::now() < deadline, "never finished");
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+        let _ = project.end_render();
+        let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        assert!(size > 1000, "the export is {size} bytes");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// "Which encoder did that use?" was unanswerable: the export either
@@ -4351,7 +4499,7 @@ mod tests {
             )
             .expect("begin_render");
         let mut done = false;
-        for _ in 0..600 {
+        for _ in 0..1800 {
             match project.render_status() {
                 RenderStatus::Done => {
                     done = true;
@@ -6689,6 +6837,184 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A one-second clip of one colour, tagged as `colorimetry` says: raw
+    /// frames in Matroska, which keeps the tag, so no HEVC encoder is needed
+    /// to stand in for an iPhone's HLG footage.
+    fn tagged_clip(dir: &Path, argb: u32, colorimetry: &str) -> std::path::PathBuf {
+        let out = dir.join(format!("{colorimetry}-{argb:08x}.mkv"));
+        let location = out.to_string_lossy().replace('\\', "/");
+        let desc = format!(
+            "videotestsrc num-buffers=30 pattern=solid-color foreground-color={argb} \
+             ! video/x-raw,format=ARGB,width=320,height=180,framerate=30/1 \
+             ! videoconvert ! video/x-raw,format=I420,colorimetry={colorimetry} \
+             ! matroskamux ! filesink location=\"{location}\""
+        );
+        let pipeline = gst::parse::launch(&desc).expect("fixture pipeline");
+        pipeline.set_state(gst::State::Playing).expect("play");
+        let bus = pipeline.bus().expect("bus");
+        let msg = bus
+            .timed_pop_filtered(
+                gst::ClockTime::from_seconds(20),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            )
+            .expect("the fixture finished");
+        assert_eq!(msg.type_(), gst::MessageType::Eos, "{msg:?}");
+        pipeline.set_state(gst::State::Null).expect("stop");
+        out
+    }
+
+    /// The preview's centre pixel half a second into a lone clip.
+    fn centre_of(path: &Path) -> (u8, u8, u8) {
+        let (shot, mut project) = shooting_project();
+        project.append_clip(path, 1, None).expect("clip");
+        project.pause().expect("pause");
+        wait_settled(&project);
+        project.seek_accurate(secs(0.5)).expect("seek");
+        let (w, h, px) = frame_at(&shot, secs(0.5));
+        let i = ((h / 2 * w + w / 2) * 4) as usize;
+        (px[i], px[i + 1], px[i + 2])
+    }
+
+    /// An iPhone records HDR (HLG) by default, and an untouched copy keeps
+    /// it. Unmapped, its reference white (75 % signal) showed as a 75 % grey
+    /// and its colours greyed; it now shows near white, a BT.2020 red stays a
+    /// strong red, and SDR footage is left exactly as it was.
+    #[test]
+    fn hlg_footage_shows_at_sdr_brightness() {
+        gst::init().unwrap();
+        let dir = scratch("hlg-preview");
+        // 0xbf = 75 %: HLG's reference white.
+        let grey = tagged_clip(&dir, 0xffbf_bfbf, "bt2100-hlg");
+        let red = tagged_clip(&dir, 0xffbf_0000, "bt2100-hlg");
+        let sdr = tagged_clip(&dir, 0xffbf_bfbf, "bt709");
+        let (r, g, b) = centre_of(&grey);
+        assert!(
+            r >= 230 && g >= 230 && b >= 230,
+            "HLG white: {:?}",
+            (r, g, b)
+        );
+        assert!(
+            r.abs_diff(g) <= 4 && g.abs_diff(b) <= 4,
+            "a grey: {:?}",
+            (r, g, b)
+        );
+        let (r, g, b) = centre_of(&red);
+        assert!(r >= 200 && g <= 40 && b <= 40, "HLG red: {:?}", (r, g, b));
+        let (r, g, b) = centre_of(&sdr);
+        assert!(
+            (185..=197).contains(&r) && r.abs_diff(g) <= 3 && g.abs_diff(b) <= 3,
+            "SDR untouched: {:?}",
+            (r, g, b)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The media bin's thumbnail goes through the same mapping.
+    #[test]
+    fn an_hlg_thumbnail_is_as_bright_as_its_preview() {
+        gst::init().unwrap();
+        let dir = scratch("hlg-thumb");
+        let grey = tagged_clip(&dir, 0xffbf_bfbf, "bt2100-hlg");
+        let sdr = tagged_clip(&dir, 0xffbf_bfbf, "bt709");
+        let centre = |f: Frame| {
+            let i = ((f.height / 2 * f.width + f.width / 2) * 4) as usize;
+            (f.rgba[i], f.rgba[i + 1], f.rgba[i + 2])
+        };
+        let (r, g, b) = centre(thumbnail(&grey, 160).expect("HLG thumbnail"));
+        assert!(
+            r >= 230 && g >= 230 && b >= 230,
+            "HLG thumbnail: {:?}",
+            (r, g, b)
+        );
+        let (r, _, _) = centre(thumbnail(&sdr, 160).expect("SDR thumbnail"));
+        assert!((185..=197).contains(&r), "SDR thumbnail untouched: {r}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The export carries the mapping too: HLG reference white comes out of
+    /// the MP4 as white.
+    #[test]
+    fn an_hlg_clip_exports_at_sdr_brightness() {
+        gst::init().unwrap();
+        let dir = scratch("hlg-export");
+        let grey = tagged_clip(&dir, 0xffbf_bfbf, "bt2100-hlg");
+        let out = dir.join("out.mp4");
+        let mut project = Project::new(|_f| {}).expect("project");
+        project.append_clip(&grey, 1, None).expect("clip");
+        project
+            .begin_render(
+                &out,
+                ExportSettings {
+                    codec: VideoCodec::H264,
+                    width: 320,
+                    height: 180,
+                    fps: 30,
+                    bitrate_kbps: 2000,
+                    encoder: Encoder::Software,
+                },
+            )
+            .expect("begin_render");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match project.render_status() {
+                RenderStatus::Done => break,
+                RenderStatus::Failed(e) => panic!("render failed: {e}"),
+                RenderStatus::Rendering(_) => {
+                    assert!(std::time::Instant::now() < deadline, "never finished");
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+        let _ = project.end_render();
+        let f = thumbnail(&out, 160).expect("the export decodes");
+        let i = ((f.height / 2 * f.width + f.width / 2) * 4) as usize;
+        let px = (f.rgba[i], f.rgba[i + 1], f.rgba[i + 2]);
+        assert!(
+            px.0 >= 225 && px.1 >= 225 && px.2 >= 225,
+            "exported HLG white: {px:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mapping is one effect per HLG clip, never a second, never on SDR
+    /// footage; a split gives each half its own and an undone removal brings
+    /// it back. It is not a speed change and never reaches the saved file.
+    #[test]
+    fn the_hdr_mapping_follows_the_clip() {
+        gst::init().unwrap();
+        let dir = scratch("hlg-effect");
+        let hlg = tagged_clip(&dir, 0xffbf_bfbf, "bt2100-hlg");
+        let sdr = tagged_clip(&dir, 0xffbf_bfbf, "bt709");
+        let mut project = Project::new(|_f| {}).expect("project");
+        let count = |p: &Project, id: &ClipId| {
+            p.clips[&id.0]
+                .top_effects()
+                .iter()
+                .filter(|e| is_hdr_effect(e))
+                .count()
+        };
+        let a = project.append_clip(&hlg, 1, None).expect("hlg").id;
+        let s = project.append_clip(&sdr, 2, None).expect("sdr").id;
+        assert_eq!(count(&project, &a), 1, "one mapping on the HLG clip");
+        assert_eq!(count(&project, &s), 0, "none on SDR");
+        assert_eq!(clip_rate_of(&project.clips[&a.0]), 1.0, "not a speed");
+        let (b, _, _) = project.split_clip(&a, secs(0.5)).expect("split");
+        assert_eq!(count(&project, &a), 1, "the left half keeps it");
+        assert_eq!(count(&project, &b), 1, "the right half has its own");
+        let record = project
+            .clip_records()
+            .into_iter()
+            .find(|(id, _)| *id == b)
+            .expect("record")
+            .1;
+        assert!(project.remove_clip(&b));
+        project.restore_clip(&b, &record).expect("restore");
+        assert_eq!(count(&project, &b), 1, "back with it");
+        let saved = toml::to_string(&project.to_document()).expect("toml");
+        assert!(!saved.contains(crate::hdr::ELEMENT), "{saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Two stills on one track, the second starting 1 s before the first
     /// ends: a 1 s dissolve.
     fn overlapping_pair(project: &mut Project, png: &Path, track: usize) -> (ClipId, ClipId) {
@@ -6903,5 +7229,123 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every `.mov` in `KUVATIN_MOV_DIR` opens, previews a frame with
+    /// picture in it, and exports to MP4 the way the Export button does. A
+    /// probe for the formats `.mov` files come in (H.264, HEVC, 10-bit HEVC,
+    /// ProRes with PCM audio, a phone's rotated portrait clip), meant to be
+    /// run with only the installed runtime on PATH. Every file is reported
+    /// before anything fails.
+    #[test]
+    #[ignore = "needs KUVATIN_MOV_DIR, a folder of .mov files"]
+    fn mov_probe_opens_previews_and_exports() {
+        let dir =
+            std::path::PathBuf::from(std::env::var_os("KUVATIN_MOV_DIR").expect("KUVATIN_MOV_DIR"));
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the folder")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("mov")))
+            .collect();
+        files.sort();
+        let mut failures = Vec::new();
+        let outdir = scratch("mov-probe");
+        for src in &files {
+            let name = src.file_name().unwrap().to_string_lossy().to_string();
+            let outcome = std::panic::catch_unwind(|| {
+                let (shot, mut project) = shooting_project();
+                let info = project.append_clip(src, 1, None).expect("the clip goes on");
+                project.pause().expect("pause");
+                wait_settled(&project);
+                project.seek_accurate(secs(1.0)).expect("seek");
+                let (w, h, px) = frame_at(&shot, secs(1.0));
+                let lit = px
+                    .chunks(4)
+                    .filter(|p| p[0] > 40 || p[1] > 40 || p[2] > 40)
+                    .count();
+                let fit = project.clip_fit_size(&info.id);
+                let out = outdir.join(format!("{name}.mp4"));
+                let _ = std::fs::remove_file(&out);
+                project
+                    .begin_render(
+                        &out,
+                        ExportSettings {
+                            codec: VideoCodec::H264,
+                            width: 1280,
+                            height: 720,
+                            fps: 30,
+                            bitrate_kbps: 4000,
+                            encoder: Encoder::Auto,
+                        },
+                    )
+                    .expect("begin_render");
+                let began = std::time::Instant::now();
+                let mut rendered = None;
+                for _ in 0..1800 {
+                    match project.render_status() {
+                        RenderStatus::Done => {
+                            rendered = Some(Ok(()));
+                            break;
+                        }
+                        RenderStatus::Failed(e) => {
+                            rendered = Some(Err(e));
+                            break;
+                        }
+                        RenderStatus::Rendering(_) => {
+                            std::thread::sleep(Duration::from_millis(100))
+                        }
+                    }
+                }
+                let _ = project.end_render();
+                let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+                eprintln!(
+                    "MOV {name}: {}s long, preview {w}x{h} with {lit} lit pixels, fit {fit:?}, export {rendered:?} {size} bytes in {:.1}s",
+                    info.duration.as_secs_f64(), began.elapsed().as_secs_f64()
+                );
+                assert!(lit > 1000, "{name}: the preview frame is black");
+                assert_eq!(rendered, Some(Ok(())), "{name}: the export");
+                assert!(size > 1000, "{name}: the export is {size} bytes");
+            });
+            if outcome.is_err() {
+                failures.push(name);
+            }
+        }
+        assert!(!files.is_empty(), "no .mov files in {}", dir.display());
+        assert!(failures.is_empty(), "failed: {failures:?}");
+    }
+
+    /// Import the file (or every file in the folder) named by
+    /// `KUVATIN_IMPORT_FILE` the way "Open media" does — discovery, thumbnail,
+    /// onto the timeline — and say what happened to each. A probe for a
+    /// user's file that won't import, not a gate.
+    #[test]
+    #[ignore = "needs KUVATIN_IMPORT_FILE"]
+    fn import_probe() {
+        let src = std::path::PathBuf::from(
+            std::env::var_os("KUVATIN_IMPORT_FILE").expect("KUVATIN_IMPORT_FILE"),
+        );
+        let files: Vec<_> = if src.is_dir() {
+            let mut v: Vec<_> = std::fs::read_dir(&src)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect();
+            v.sort();
+            v
+        } else {
+            vec![src]
+        };
+        for f in files {
+            let warm = warm_asset(&f).map_err(|e| format!("{e:#}"));
+            let thumb = thumbnail(&f, 160).map(|t| (t.width, t.height));
+            let mut project = Project::new(|_f| {}).expect("project");
+            let add = project
+                .append_clip(&f, 1, None)
+                .map(|i| i.duration)
+                .map_err(|e| format!("{e:#}"));
+            eprintln!(
+                "IMPORT {}: warm {warm:?}, thumb {thumb:?}, append {add:?}",
+                f.display()
+            );
+        }
     }
 }
