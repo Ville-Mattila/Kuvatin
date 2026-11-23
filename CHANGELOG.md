@@ -15,6 +15,10 @@ something is fixed.
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-11-23
+iPhone media as it arrives straight from the phone: HEIC photos open, and HDR
+video shows at normal brightness.
+
 ### Added
 - **iPhone photos (HEIC).** A `.heic` or `.heif` photo, the way an iPhone
   sends it by AirDrop or cable (and the still half of a Live Photo), now
@@ -439,7 +443,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.14.2...HEAD
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.15.0...HEAD
+[2.15.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.15.0
 [2.14.2]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.2
 [2.14.1]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.1
 [2.14.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.0
