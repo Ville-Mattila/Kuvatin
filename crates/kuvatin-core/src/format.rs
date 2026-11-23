@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 /// the dialog; `.jfif` got the menu and then "no image files").
 pub const INPUT_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "jpe", "jfif", "webp", "bmp", "tiff", "tif", "gif",
+    // iPhone photos, decoded through Windows' own codec (see `crate::heif`).
+    "heic", "heif",
 ];
 
 /// Whether `ext` (any case, no dot) is an accepted image input.
@@ -70,6 +72,13 @@ mod tests {
         }
         assert!(is_input_extension("JFIF"));
         assert!(is_input_extension("tif"));
+        assert!(
+            is_input_extension("HEIC"),
+            "iPhone photos arrive upper-case"
+        );
+        for e in crate::heif::HEIF_EXTENSIONS {
+            assert!(is_input_extension(e), "{e}");
+        }
         assert!(
             !is_input_extension("exr"),
             "EXR is a sequence frame, not an image input"

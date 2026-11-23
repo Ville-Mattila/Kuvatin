@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod crop;
 pub mod format;
+pub mod heif;
 pub mod menu;
 pub mod metadata;
 pub mod naming;
@@ -26,6 +27,10 @@ pub enum CoreError {
     },
     #[error("invalid job: {0}")]
     InvalidJob(String),
+    /// An image of a kind Kuvatin knows that could not be read here (a HEIC
+    /// without Windows' codecs); the message is complete as it stands.
+    #[error("{0}")]
+    Unreadable(String),
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;

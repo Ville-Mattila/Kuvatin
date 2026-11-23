@@ -65,8 +65,8 @@ pub(super) const STORES: &[&str] = &[STORE_ITEM, STORE_BACKGROUND, STORE_FRAMES]
 /// re-register at next launch.
 /// 2 = folder + background verbs, MultiSelectModel; 3 = sequence-to-MP4 item;
 /// 4 = per-extension roots, presets from the store; 5 = `--` before the path,
-/// so a file named like a flag is not parsed as one.
-const SCHEMA: &str = "5";
+/// so a file named like a flag is not parsed as one; 6 = `.heic`/`.heif`.
+const SCHEMA: &str = "6";
 
 /// Frame formats that are NOT image inputs — they get the verb with the
 /// sequence-only store.

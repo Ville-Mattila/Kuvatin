@@ -41,7 +41,7 @@ $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\ma
 if (-not $makeappx) { throw 'MakeAppx.exe not found: install the Windows 10/11 SDK' }
 
 # EXTENSIONS: image inputs, then the sequence-only frame formats (see the test).
-$extensions = '.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.bmp', '.tiff', '.tif', '.gif', '.exr'
+$extensions = '.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.bmp', '.tiff', '.tif', '.gif', '.heic', '.heif', '.exr'
 $types = @($extensions) + @('Directory', 'Directory\Background')
 $items = ($types | ForEach-Object {
     "            <desktop5:ItemType Type=`"$_`">`n              <desktop5:Verb Id=`"Kuvatin`" Clsid=`"$Clsid`" />`n            </desktop5:ItemType>"

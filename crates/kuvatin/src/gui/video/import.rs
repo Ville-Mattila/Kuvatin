@@ -15,8 +15,17 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// (generation, path, thumbnail, Some(error) if discovery failed → not addable).
-type ImportItem = (u64, PathBuf, Option<kuvatin_video::Frame>, Option<String>);
+/// (generation, path, media, thumbnail, Some(error) if discovery failed → not
+/// addable). `path` is what was picked or dropped (the import's identity);
+/// `media` is what the editor opens: the same file, or for a HEIC photo the
+/// PNG made from it (see `super::heic`).
+type ImportItem = (
+    u64,
+    PathBuf,
+    PathBuf,
+    Option<kuvatin_video::Frame>,
+    Option<String>,
+);
 
 /// Worker → UI handoff for a finished sequence import.
 struct SeqResult {
@@ -76,17 +85,23 @@ impl ImportState {
                     if item_gen != gen.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let warm = kuvatin_video::warm_asset(&path);
-                    let err = warm.err().map(|e| e.to_string());
+                    // A HEIC photo becomes a PNG first: GStreamer can't read it.
+                    let (media, err) = match super::heic::editor_source(&path) {
+                        Ok(media) => {
+                            let warm = kuvatin_video::warm_asset(&media);
+                            (media, warm.err().map(|e| e.to_string()))
+                        }
+                        Err(e) => (path.clone(), Some(e)),
+                    };
                     let thumb = if err.is_none() {
-                        kuvatin_video::thumbnail(&path, 160)
+                        kuvatin_video::thumbnail(&media, 160)
                     } else {
                         None
                     };
                     ready
                         .lock()
                         .unwrap()
-                        .push_back((item_gen, path, thumb, err));
+                        .push_back((item_gen, path, media, thumb, err));
                 }
             });
         }
@@ -390,7 +405,7 @@ pub(super) fn wire(
                 }
                 loop {
                     let next = ready.lock().unwrap().pop_front();
-                    let Some((item_gen, path, thumb_frame, err)) = next else {
+                    let Some((item_gen, path, media, thumb_frame, err)) = next else {
                         break;
                     };
                     if item_gen != import_q.current_gen() {
@@ -408,13 +423,13 @@ pub(super) fn wire(
                         continue;
                     }
                     let thumb = frame_to_image(thumb_frame);
-                    add_to_bin(&assets, &path, thumb.clone());
-                    bin_paths.borrow_mut().push(path.clone());
+                    add_to_bin(&assets, &media, thumb.clone());
+                    bin_paths.borrow_mut().push(media.clone());
                     // Only the first file (when the timeline is empty) goes on
                     // the timeline; the rest wait in the bin for the user.
                     if tl_clips.row_count() == 0 {
                         add_to_timeline(
-                            &path,
+                            &media,
                             &ui_weak,
                             &project_slot,
                             &tl_clips,

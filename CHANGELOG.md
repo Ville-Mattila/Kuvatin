@@ -15,6 +15,20 @@ something is fixed.
 
 ## [Unreleased]
 
+### Added
+- **iPhone photos (HEIC).** A `.heic` or `.heif` photo, the way an iPhone
+  sends it by AirDrop or cable (and the still half of a Live Photo), now
+  opens in Images mode, converts from the right-click menu, and drops into
+  the video editor as a still. It comes in upright and keeps its capture
+  date and camera details like a JPEG does; a Display P3 photo keeps its
+  colour profile when converted, and is turned into sRGB for the video
+  editor, whose engine ignores profiles. Kuvatin reads HEIC with Windows'
+  own codecs, so it needs "HEIF Image Extensions" (part of Windows 10 1809
+  and later) and "HEVC Video Extensions" from the Microsoft Store; when one
+  is missing, the error names it. The video editor works from a PNG copy of
+  each photo, kept in `%LOCALAPPDATA%\Kuvatin\heic` so that saved projects
+  find it again.
+
 ## [2.14.2] - 2026-09-30
 A fix for updating from the app, which could stop at "COM Surrogate" after
 Kuvatin's Windows 11 menu had been used. It was first tagged as 2.14.1, which
