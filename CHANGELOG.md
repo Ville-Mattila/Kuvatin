@@ -15,9 +15,11 @@ something is fixed.
 
 ## [Unreleased]
 
-## [2.15.0] - 2026-11-23
+## [2.15.1] - 2026-11-23
 iPhone media as it arrives straight from the phone: HEIC photos open, and HDR
-video shows at normal brightness.
+video shows at normal brightness. It was first tagged as 2.15.0, which
+was never published: a dependency audit stopped it, and three libraries the
+interface toolkit uses were updated for security advisories.
 
 ### Added
 - **iPhone photos (HEIC).** A `.heic` or `.heif` photo, the way an iPhone
@@ -443,8 +445,8 @@ puts "Kuvatin" in the top-level right-click menu.
 - First public release: a compact native Windows batch image converter,
   resizer and cropper with Explorer context-menu integration.
 
-[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.15.0...HEAD
-[2.15.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.15.0
+[Unreleased]: https://github.com/Ville-Mattila/Kuvatin/compare/v2.15.1...HEAD
+[2.15.1]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.15.1
 [2.14.2]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.2
 [2.14.1]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.1
 [2.14.0]: https://github.com/Ville-Mattila/Kuvatin/releases/tag/v2.14.0
